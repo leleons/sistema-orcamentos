@@ -267,7 +267,7 @@ elif menu == "📋 Ordem de Serviço (OS)":
             os_servico = st.text_area("Problema Relatado / Serviço a Executar:", height=100)
             os_atendente = st.text_input("Técnico / Atendente responsável:")
 
-            submit_os = st.form_submit_button("", type="primary", use_container_width=True)
+           
 
         if submit_os:
             if os_cliente and os_equipamento and os_servico:
