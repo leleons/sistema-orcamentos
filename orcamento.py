@@ -25,12 +25,12 @@ st.markdown("""
 
 
     @media print {
-        /* 1. Esconde as barras laterais e topo do site */
+       
         header, footer, [data-testid="stSidebar"], [data-testid="stHeader"] { 
             display: none !important; 
         }
         
-        /* 2. O GRANDE TRUQUE: Destrói as "colunas invisíveis" do Streamlit */
+       
         html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMainBlockContainer"], .element-container {
             position: static !important;
             width: 100% !important;
@@ -41,17 +41,17 @@ st.markdown("""
             transform: none !important;
         }
 
-        /* 3. Deixa todos os botões e formulários do site invisíveis */
+    
         body * {
             visibility: hidden;
         }
         
-        /* 4. Torna APENAS o documento visível */
+
         #doc-impressao, #doc-impressao * {
             visibility: visible;
         }
         
-        /* 5. Prega o documento no topo esquerdo do papel e estica */
+     
         #doc-impressao {
             position: absolute !important;
             left: 0 !important;
@@ -63,13 +63,11 @@ st.markdown("""
             border: none !important;
             box-shadow: none !important;
         }
-        
-        /* Impede que tabelas cortem no meio da folha */
+    
         table, tr, td, th, div, p {
             page-break-inside: avoid !important;
         }
 
-        /* Define o tamanho da folha real da impressora */
         @page { 
             margin: 5mm !important; 
             size: A4 portrait; 
