@@ -25,12 +25,18 @@ st.markdown("""
 
 
     @media print {
-       
+        /* Esconde menus laterais e topo */
         header, footer, [data-testid="stSidebar"], [data-testid="stHeader"] { 
             display: none !important; 
         }
         
-       
+
+        body * { visibility: hidden !important; }
+        
+
+        #doc-impressao, #doc-impressao * { visibility: visible !important; }
+        
+
         html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMainBlockContainer"], .element-container {
             position: static !important;
             width: 100% !important;
@@ -41,47 +47,42 @@ st.markdown("""
             transform: none !important;
         }
 
-    
-        body * {
-            visibility: hidden;
-        }
-        
 
-        #doc-impressao, #doc-impressao * {
-            visibility: visible;
-        }
-        
-     
         #doc-impressao {
             position: absolute !important;
             left: 0 !important;
             top: 0 !important;
-            width: 100% !important;
-            max-width: 21cm !important; /* Limite perfeito da folha A4 */
+            width: 100vw !important;     /* 100% da largura da folha */
+            max-width: none !important;  /* Remove os limites */
+            min-width: 100vw !important; /* Obriga a esticar */
             margin: 0 !important;
-            padding: 5mm !important; /* Dá um leve respiro na borda do papel */
+            padding: 10mm !important;    /* Margem interna para não cortar texto na impressora */
             border: none !important;
             box-shadow: none !important;
+            box-sizing: border-box !important;
         }
-    
+        
         table, tr, td, th, div, p {
             page-break-inside: avoid !important;
+            break-inside: avoid !important;
         }
 
+
         @page { 
-            margin: 5mm !important; 
+            margin: 0 !important; 
             size: A4 portrait; 
         }
     }
 </style>
 """, unsafe_allow_html=True)
 
+
 if 'autenticado' not in st.session_state:
     st.session_state['autenticado'] = False
 if 'cargo' not in st.session_state:
     st.session_state['cargo'] = None
 if 'pagina_atual' not in st.session_state:
-    st.session_state['pagina_atual'] = " Página Inicial"
+    st.session_state['pagina_atual'] = "🏠 Página Inicial"
 
 def login():
     st.title(" Acesso ao Sistema Dsystem")
@@ -150,7 +151,13 @@ def carrega_logo(caminho_imagem, nome_empresa, cor_texto, largura="150"):
 st.sidebar.image("https://img.icons8.com/color/96/000000/monitor--v1.png", width=60)
 st.sidebar.title(f"Olá, {st.session_state['cargo'].capitalize()}")
 st.sidebar.write("---")
-menu = st.sidebar.radio("Navegação:", ["🏠 Página Inicial", "📊 Gerador de Orçamentos", "📋 Ordem de Serviço (OS)"], key="pagina_atual")
+
+menu = st.sidebar.radio(
+    "Navegação:",
+    ["🏠 Página Inicial", "📊 Gerador de Orçamentos", "📋 Ordem de Serviço (OS)"],
+    key="pagina_atual"
+)
+
 st.sidebar.write("<br><br>", unsafe_allow_html=True)
 if st.sidebar.button("🚪 Sair do Sistema"):
     logout()
@@ -166,20 +173,21 @@ if menu == "🏠 Página Inicial":
         st.success("### 📋 Ordem de Serviço")
         st.button("Abrir Nova OS ➔", use_container_width=True, on_click=mudar_pagina, args=("📋 Ordem de Serviço (OS)",))
 
+
 elif menu == "📊 Gerador de Orçamentos":
     st.title("📊 Gerador de Orçamentos")
     with st.container():
         col_orc1, col_orc2 = st.columns(2)
-        with col_orc1: numero_orcamento = st.text_input("Número do Orçamento:", value="441")
-        with col_orc2: forma_pagamento = st.selectbox("Forma de Pagamento:", ["Boleto Bancário", "PIX", "Cartão de Crédito", "A vista", "A Combinar"])
+        with col_orc1: numero_orcamento = st.text_input("Número Orçamento:", value="441")
+        with col_orc2: forma_pagamento = st.selectbox("Pagamento:", ["Boleto Bancário", "PIX", "Cartão de Crédito", "A vista", "A Combinar"])
         
         col_obs1, col_obs2 = st.columns(2)
         with col_obs1: obs_pagamento = st.text_input("Observação do Pagamento (Ex: Vencimento dia 10):", value="")
         with col_obs2: obs_gerais = st.text_input("Observações Gerais (Fim do Documento):", value="")
 
-        st.subheader("👤 Dados do Cliente")
+        st.subheader("👤 Cliente")
         col_cli1, col_cli2, col_cli3 = st.columns(3)
-        with col_cli1: cliente = st.text_input("Nome do Cliente / Empresa:")
+        with col_cli1: cliente = st.text_input("Nome/Empresa:")
         with col_cli2: telefone = st.text_input("Telefone:")
         with col_cli3: email = st.text_input("E-mail:")
         
@@ -187,11 +195,12 @@ elif menu == "📊 Gerador de Orçamentos":
         with col_d1: cnpj = st.text_input("CNPJ / CPF:")
         with col_d2: rg_mei = st.text_input("Nome Fantasia / RG:")
         
-        col_e1, col_e2, col_e3, col_e4 = st.columns([3,1,2,1])
+        col_e1, col_e2, col_e3, col_e4, col_e5 = st.columns([3, 1, 2, 2, 2])
         with col_e1: endereco = st.text_input("Rua / Endereço:")
         with col_e2: numero = st.text_input("Número:")
-        with col_e3: bairro = st.text_input("Bairro:")
-        with col_e4: cidade_estado = st.text_input("Cidade/UF:", value="BH / MG")
+        with col_e3: complemento = st.text_input("Complemento:")
+        with col_e4: bairro = st.text_input("Bairro:")
+        with col_e5: cidade_estado = st.text_input("Cidade/UF:", value="BH / MG")
 
     st.divider()
     num_servicos = st.number_input("Qtd de itens:", min_value=1, max_value=20, value=1)
@@ -215,6 +224,7 @@ elif menu == "📊 Gerador de Orçamentos":
             elif "GT" in empresa_escolhida: mult = 1.45
             
             valor_final_total = valor_base_total * mult
+            comp_fmt = f" - {complemento}" if complemento else ""
 
             st.write("<br>", unsafe_allow_html=True)
             col_a, col_b, col_c = st.columns(3)
@@ -222,7 +232,7 @@ elif menu == "📊 Gerador de Orçamentos":
             col_b.metric("🤝 NC (+30%)", formata_moeda(valor_base_total * 1.30))
             col_c.metric("🤝 GT (+45%)", formata_moeda(valor_base_total * 1.45))
                 
-            st.success("🎉 Documento pronto! Aperte **Ctrl + P** para imprimir a folha cheia.")
+            st.success("🎉 Documento pronto! Aperte **Ctrl + P** para imprimir. (Vai preencher a folha toda!)")
             
             data_c = date.today().strftime("%d/%m/%Y")
             data_v = (date.today() + timedelta(days=7)).strftime("%d/%m/%Y")
@@ -231,7 +241,7 @@ elif menu == "📊 Gerador de Orçamentos":
                 linhas_html = "".join([f"<tr><td style='padding:6px; border-bottom:1px solid #ddd;'>{s['descricao']}</td><td align='center' style='padding:6px; border-bottom:1px solid #ddd;'>1,000</td><td align='right' style='padding:6px; border-bottom:1px solid #ddd;'>{formata_moeda(s['valor'] * mult).replace('R$ ', '')}</td><td align='right' style='padding:6px; border-bottom:1px solid #ddd;'>0,00</td><td align='right' style='padding:6px; border-bottom:1px solid #ddd;'>{formata_moeda(s['valor'] * mult).replace('R$ ', '')}</td></tr>" for s in servicos])
 
                 html_doc = f"""
-<div id="doc-impressao" style="background:white; color:black; padding:20px; font-family:Arial, sans-serif; font-size:12px; width:100%; box-sizing: border-box;">
+<div id="doc-impressao" style="background:white; color:black; padding:20px; font-family:Arial, sans-serif; font-size:12px; width:100%; max-width:800px; margin:0 auto; box-sizing: border-box;">
 <div style="display:flex; justify-content:space-between; margin-bottom:10px; border-bottom:3px solid #004488; padding-bottom:10px;">
     <div style="width:50%;">
         {carrega_logo("logo_dsystem.png", "SYSTEM TECNOLOGIA", "#004488", "140")}<br>
@@ -254,7 +264,7 @@ elif menu == "📊 Gerador de Orçamentos":
     <h4 style="color:#004488; border-bottom:1px solid #004488; margin-bottom:5px; padding-bottom:2px;">Cliente</h4>
     <table style="width:100%; border:none; font-size:11px;">
         <tr><td style="width:50%;"><b>Nome:</b> {cliente}</td><td><b>CPF/CNPJ:</b> {cnpj}</td></tr>
-        <tr><td><b>Endereço:</b> {endereco}, {numero} {bairro} - {cidade_estado}</td><td><b>Telefone:</b> {telefone}</td></tr>
+        <tr><td><b>Endereço:</b> {endereco}, {numero}{comp_fmt} - {bairro} - {cidade_estado}</td><td><b>Telefone:</b> {telefone}</td></tr>
         <tr><td colspan="2"><b>E-mail:</b> {email}</td></tr>
     </table>
     <p style="margin:2px 0 0 0; font-size:11px;">{rg_mei}</p>
@@ -301,7 +311,7 @@ elif menu == "📊 Gerador de Orçamentos":
                 linhas_html = "".join([f"<tr><td style='border:1px solid #000; padding:6px; text-align:center;'>{i+1}</td><td style='border:1px solid #000; padding:6px;'>{s['descricao']}</td><td style='border:1px solid #000; padding:6px; text-align:center;'>1</td><td style='border:1px solid #000; padding:6px; text-align:right;'>{formata_moeda(s['valor'] * mult)}</td><td style='border:1px solid #000; padding:6px; text-align:right;'>{formata_moeda(s['valor'] * mult)}</td></tr>" for i, s in enumerate(servicos)])
                 
                 html_doc = f"""
-<div id="doc-impressao" style="background:white; color:black; padding:20px; font-family:Arial, sans-serif; font-size:11px; width:100%; box-sizing: border-box;">
+<div id="doc-impressao" style="background:white; color:black; padding:20px; font-family:Arial, sans-serif; font-size:11px; width:100%; max-width:800px; margin:0 auto; box-sizing: border-box;">
 <div style="display:flex; justify-content:space-between; margin-bottom:15px;">
     <div style="display:flex; align-items:center;">
         {carrega_logo("logo_nc.png", "NC Comercial", "#000", "100")}
@@ -314,13 +324,13 @@ elif menu == "📊 Gerador de Orçamentos":
     <div style="text-align:right;">
         <h2 style="margin:0; font-size:16px; color:#333;">ORÇAMENTO</h2>
         <p style="margin:5px 0 0 0; font-weight:bold;">Nº {numero_orcamento}</p>
-        <p style="margin:0;">DATA DE EMISSÃO: {data_c}</p>
+        <p style="margin:0;">DATA: {data_c}</p>
     </div>
 </div>
 <div style="border-top:1px solid #000; border-bottom:1px solid #000; padding:8px 0; margin-bottom:15px; font-size:10px; line-height:1.4;">
     <div style="display:flex;"><div style="width:50%;"><b>NOME:</b> {cliente}</div><div style="width:50%;"><b>TELEFONE:</b> {telefone}</div></div>
     <div style="display:flex;"><div style="width:50%;"><b>EMAIL:</b> {email}</div><div style="width:50%;"><b>CPF/CNPJ:</b> {cnpj}</div></div>
-    <div style="display:flex;"><div style="width:50%;"><b>RG/MEI:</b> {rg_mei}</div><div style="width:50%;"><b>ENDEREÇO:</b> {endereco}, {numero}</div></div>
+    <div style="display:flex;"><div style="width:50%;"><b>RG/MEI:</b> {rg_mei}</div><div style="width:50%;"><b>ENDEREÇO:</b> {endereco}, {numero}{comp_fmt}</div></div>
     <div style="display:flex;"><div style="width:50%;"><b>BAIRRO:</b> {bairro}</div><div style="width:50%;"><b>CIDADE/UF:</b> {cidade_estado}</div></div>
 </div>
 <table style="width:100%; border-collapse:collapse; margin-bottom:15px;">
@@ -335,56 +345,56 @@ elif menu == "📊 Gerador de Orçamentos":
         <b>OBSERVAÇÃO DO PAGAMENTO:</b><br>{obs_pagamento}<br><br>
         <b>OBSERVAÇÕES GERAIS:</b><br>{obs_gerais}
     </div>
-    <div style="width:40%; border:1px solid #000; padding:10px; text-align:right;">
-        <div style="display:flex; justify-content:space-between; margin-bottom:10px;"><span>ACRÉSCIMO: R$ 0,00</span><span>DESCONTO: R$ 0,00</span></div>
-        <b style="font-size:14px;">TOTAL: {formata_moeda(valor_final_total)}</b>
+    <div style="width:40%; border:1px solid #000; padding:8px; text-align:right;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>ACRÉSCIMO: R$ 0,00</span><span>DESCONTO: R$ 0,00</span></div>
+        <b style="font-size:12px;">TOTAL: {formata_moeda(valor_final_total)}</b>
     </div>
 </div>
 </div>"""
 
             else:
-                linhas_html = "".join([f"<tr><td style='border:1px solid #ccc; padding:6px; text-align:center;'>{i+1}</td><td style='border:1px solid #ccc; padding:6px;'>{s['descricao']}</td><td style='border:1px solid #ccc; padding:6px; text-align:center;'>1</td><td style='border:1px solid #ccc; padding:6px; text-align:right;'>{formata_moeda(s['valor'] * mult)}</td></tr>" for i, s in enumerate(servicos)])
+                linhas_html = "".join([f"<tr><td style='border:1px solid #ccc; padding:4px; text-align:center;'>{i+1}</td><td style='border:1px solid #ccc; padding:4px;'>{s['descricao']}</td><td style='border:1px solid #ccc; padding:4px; text-align:center;'>1</td><td style='border:1px solid #ccc; padding:4px; text-align:right;'>{formata_moeda(s['valor'] * mult)}</td></tr>" for i, s in enumerate(servicos)])
                 
                 html_doc = f"""
-<div id="doc-impressao" style="background:white; color:#333; padding:20px; font-family:Arial, sans-serif; font-size:10px; width:100%; box-sizing: border-box;">
-<div style="display:flex; justify-content:space-between; margin-bottom:15px;">
-    <div style="width:30%;">{carrega_logo("logo_gt.png", "GT Solutions", "#4ba3d5", "100")}</div>
-    <div style="width:40%; line-height:1.3;">
-        <h3 style="margin:0; color:#4ba3d5; font-size:14px;">GT Solutions Eireli</h3>
+<div id="doc-impressao" style="background:white; color:#333; padding:15px 20px; font-family:Arial, sans-serif; font-size:10px; width:100%; max-width:800px; margin:0 auto; box-sizing: border-box;">
+<div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+    <div style="width:30%;">{carrega_logo("logo_gt.png", "GT Solutions", "#4ba3d5", "90")}</div>
+    <div style="width:40%; line-height:1.2;">
+        <h3 style="margin:0; color:#4ba3d5; font-size:13px;">GT Solutions Eireli</h3>
         ENDEREÇO: AV Alterosa 17, sala 6 parque turista - contagem<br>TELEFONE: (31) 9 8679-7785<br>EMAIL: gustavo@gtimpressao.com.br<br>WEBSITE: www.gtimpressao.com.br<br>CPF/CNPJ: 34.349.098/0001-09
     </div>
     <div style="width:25%; text-align:right;">
-        <h2 style="margin:0; color:#666; font-size:18px;">ORÇAMENTO</h2>
-        <p style="margin:5px 0 2px 0;"><b>ORÇAMENTO Nº:</b> {numero_orcamento}</p>
+        <h2 style="margin:0; color:#666; font-size:16px;">ORÇAMENTO</h2>
+        <p style="margin:3px 0 2px 0;"><b>ORÇAMENTO Nº:</b> {numero_orcamento}</p>
         <p style="margin:2px 0;"><b>EMITIDO EM:</b> {data_c}</p>
         <p style="margin:2px 0;"><b>VÁLIDO ATÉ:</b> {data_v}</p>
     </div>
 </div>
-<div style="background:#f2f2f2; padding:10px; border-radius:5px; margin-bottom:15px; border:1px solid #e0e0e0;">
-    <p style="margin:0 0 8px 0; font-weight:bold; font-size:11px; color:#555;">CLIENTE</p>
-    <div style="display:flex; flex-wrap:wrap; gap:8px;">
+<div style="background:#f2f2f2; padding:8px; border-radius:5px; margin-bottom:10px; border:1px solid #e0e0e0;">
+    <p style="margin:0 0 5px 0; font-weight:bold; font-size:11px; color:#555;">CLIENTE</p>
+    <div style="display:flex; flex-wrap:wrap; gap:5px;">
         <div style="width:48%;"><b>NOME:</b> {cliente}</div><div style="width:48%;"><b>TELEFONE:</b> {telefone}</div>
         <div style="width:48%;"><b>CPF/CNPJ:</b> {cnpj}</div><div style="width:48%;"><b>EMAIL:</b> {email}</div>
-        <div style="width:48%;"><b>ENDEREÇO:</b> {endereco}, {numero}</div><div style="width:48%;"><b>BAIRRO:</b> {bairro}</div>
+        <div style="width:48%;"><b>ENDEREÇO:</b> {endereco}, {numero}{comp_fmt}</div><div style="width:48%;"><b>BAIRRO:</b> {bairro}</div>
         <div style="width:48%;"><b>CIDADE/ESTADO:</b> {cidade_estado}</div>
     </div>
 </div>
 <table style="width:100%; border-collapse:collapse; margin-bottom:10px;">
     <tr style="background:#4ba3d5; color:white;">
-        <th style="border:1px solid #ccc; padding:6px;">ITEM</th><th style="border:1px solid #ccc; padding:6px; width:50%;">PRODUTO/SERVIÇO</th><th style="border:1px solid #ccc; padding:6px;">QUANT</th><th style="border:1px solid #ccc; padding:6px;">VALOR</th>
+        <th style="border:1px solid #ccc; padding:4px;">ITEM</th><th style="border:1px solid #ccc; padding:4px; width:50%;">PRODUTO/SERVIÇO</th><th style="border:1px solid #ccc; padding:4px;">QUANT</th><th style="border:1px solid #ccc; padding:4px;">VALOR</th>
     </tr>
     {linhas_html}
 </table>
-<div style="display:flex; justify-content:space-between; align-items:center; padding:8px; border:1px solid #ccc; margin-bottom:15px; font-weight:bold; background:#fafafa;">
+<div style="display:flex; justify-content:space-between; align-items:center; padding:6px; border:1px solid #ccc; margin-bottom:10px; font-weight:bold; background:#fafafa;">
     <span>SUBTOTAL: {formata_moeda(valor_final_total)}</span>
     <span>DESCONTO: R$ 0,00</span>
     <span>ACRÉSCIMO: R$ 0,00</span>
-    <span style="font-size:14px; color:#4ba3d5;">TOTAL: {formata_moeda(valor_final_total)}</span>
+    <span style="font-size:12px; color:#4ba3d5;">TOTAL: {formata_moeda(valor_final_total)}</span>
 </div>
 <div>
-    <p style="margin:0 0 4px 0;"><b>FORMAS DE PAGAMENTO:</b> {forma_pagamento} - {obs_pagamento}</p>
-    <p style="margin:0 0 4px 0;"><b>OBSERVAÇÕES:</b> {obs_gerais}</p>
-    <p style="margin:10px 0 0 0; font-weight:bold;">OBS: (12) MESES DE GARANTIA</p>
+    <p style="margin:0 0 3px 0;"><b>FORMAS DE PAGAMENTO:</b> {forma_pagamento} - {obs_pagamento}</p>
+    <p style="margin:0 0 3px 0;"><b>OBSERVAÇÕES:</b> {obs_gerais}</p>
+    <p style="margin:8px 0 0 0; font-weight:bold;">OBS: (12) MESES DE GARANTIA</p>
 </div>
 </div>"""
             st.markdown(html_doc, unsafe_allow_html=True)
@@ -404,6 +414,7 @@ elif menu == "📋 Ordem de Serviço (OS)":
             c_cli1, c_cli2 = st.columns(2)
             with c_cli1: os_cliente = st.text_input("Nome do Cliente:")
             with c_cli2: os_cpf = st.text_input("CPF/CNPJ:")
+            
             c_end1, c_end2 = st.columns([3,1])
             with c_end1: os_endereco = st.text_input("Endereço Completo:")
             with c_end2: os_telefone = st.text_input("Telefone do Cliente:")
@@ -434,22 +445,22 @@ elif menu == "📋 Ordem de Serviço (OS)":
                 os_id = c.lastrowid
                 conn.commit()
                 conn.close()
-                st.success(f"OS Nº {os_id} Salva! Aperte **Ctrl+P** para imprimir a folha cheia.")
+                st.success(f"OS Nº {os_id} Salva! Aperte **Ctrl+P** para imprimir a folha.")
                 
                 linhas_eq_html = "".join([f"<tr><td style='border:1px solid #333; padding:5px; width:40%;'>{eq['e']}</td><td style='border:1px solid #333; padding:5px; width:45%;'>{eq['m']}</td><td style='border:1px solid #333; padding:5px; text-align:center; width:15%;'>{eq['a'].upper()}</td></tr>" for eq in equipamentos])
 
                 html_os = f"""
-<div id="doc-impressao" style="font-family:Arial, sans-serif; font-size:10px; color:#000; background:#fff; width:100%; box-sizing: border-box; padding:20px;">
-<table style="width:100%; border:none; margin-bottom:10px;">
+<div id="doc-impressao" style="font-family:Arial, sans-serif; font-size:10px; color:#000; background:#fff; width:100%; max-width:800px; margin:0 auto; padding:15px 20px; box-sizing: border-box;">
+<table style="width:100%; border:none; margin-bottom:5px;">
 <tr>
-<td style="width:50%; vertical-align:top;">{carrega_logo("logo_dsystem.png", "DSYSTEM", "#004488", "130")}</td>
-<td style="width:50%; text-align:right; vertical-align:top; line-height:1.3;">
-<b style="font-size:12px; color:#004488;">D F Pereira Informática</b><br>adm@dsystemtecnologia.com.br<br>(31) 97117-7190<br>Rua Glicério Alves Pinto 129, Alvorada<br>Belo Horizonte, MG - 34.700-130<br>CNPJ: 23.524.449/0001-54
+<td style="width:50%; vertical-align:top;">{carrega_logo("logo_dsystem.png", "DSYSTEM", "#004488", "120")}</td>
+<td style="width:50%; text-align:right; vertical-align:top; line-height:1.2;">
+<b style="font-size:11px; color:#004488;">D F Pereira Informática</b><br>adm@dsystemtecnologia.com.br<br>(31) 97117-7190<br>Rua Glicério Alves Pinto 129, Alvorada<br>Belo Horizonte, MG - 34.700-130<br>CNPJ: 23.524.449/0001-54
 </td>
 </tr>
 </table>
-<div style="text-align:center; margin-bottom:15px;">
-<div style="display:inline-block; border:1px solid #666; border-radius:15px; padding:4px 20px; font-size:12px; font-weight:bold; color:#333; background:#fafafa;">
+<div style="text-align:center; margin-bottom:10px;">
+<div style="display:inline-block; border:1px solid #666; border-radius:15px; padding:3px 20px; font-size:12px; font-weight:bold; color:#333; background:#fafafa;">
 Ordem de serviço N° {os_id:05d}
 </div>
 </div>
@@ -457,23 +468,23 @@ Ordem de serviço N° {os_id:05d}
 <tr>
 <td style="width:55%; vertical-align:top; padding-right:10px; border:none;">
 <div style="margin-bottom:2px; font-weight:bold; font-size:10px;">Cliente</div>
-<div style="border:1px solid #333; padding:8px; min-height:40px; font-size:10px;">
+<div style="border:1px solid #333; padding:6px; min-height:35px; font-size:10px;">
 <b>{os_cliente}</b><br>Telefone: {os_telefone}<br>CPF/CNPJ: {os_cpf}<br>Endereço: {os_endereco}
 </div>
 </td>
 <td style="width:45%; vertical-align:top; border:none;">
 <table style="width:100%; border-collapse:collapse; text-align:center; height:100%;">
 <tr>
-<td style="border:1px solid #333; padding:4px; font-weight:bold; background:#f4f4f4;">Número<br>da OS</td>
-<td style="border:1px solid #333; padding:4px; font-size:11px; font-weight:bold; color:#004488;">{os_id:05d}</td>
-<td style="border:1px solid #333; padding:4px; font-weight:bold; background:#f4f4f4;">Data de<br>entrada</td>
-<td style="border:1px solid #333; padding:4px;">{data_hoje}</td>
+<td style="border:1px solid #333; padding:3px; font-weight:bold; background:#f4f4f4;">Número<br>da OS</td>
+<td style="border:1px solid #333; padding:3px; font-size:11px; font-weight:bold; color:#004488;">{os_id:05d}</td>
+<td style="border:1px solid #333; padding:3px; font-weight:bold; background:#f4f4f4;">Data de<br>entrada</td>
+<td style="border:1px solid #333; padding:3px;">{data_hoje}</td>
 </tr>
 <tr>
-<td style="border:1px solid #333; padding:4px; font-weight:bold; background:#f4f4f4;">Data<br>prevista</td>
-<td style="border:1px solid #333; padding:4px;">3 Dias</td>
-<td style="border:1px solid #333; padding:4px; font-weight:bold; background:#f4f4f4;">Status</td>
-<td style="border:1px solid #333; padding:4px; font-weight:bold; color:red;">Aberto</td>
+<td style="border:1px solid #333; padding:3px; font-weight:bold; background:#f4f4f4;">Data<br>prevista</td>
+<td style="border:1px solid #333; padding:3px;">3 Dias</td>
+<td style="border:1px solid #333; padding:3px; font-weight:bold; background:#f4f4f4;">Status</td>
+<td style="border:1px solid #333; padding:3px; font-weight:bold; color:red;">Aberto</td>
 </tr>
 </table>
 </td>
@@ -482,29 +493,29 @@ Ordem de serviço N° {os_id:05d}
 <div style="margin-bottom:2px; font-weight:bold; font-size:10px;">Aparelhos / Equipamentos Recebidos</div>
 <table style="width:100%; border-collapse:collapse; margin-bottom:10px;">
 <tr style="background:#f4f4f4;">
-<th style="border:1px solid #333; padding:4px; text-align:left; width:40%;">Equipamento</th>
-<th style="border:1px solid #333; padding:4px; text-align:left; width:45%;">Número de série / Marca</th>
-<th style="border:1px solid #333; padding:4px; text-align:center; width:15%;">Avaria?</th>
+<th style="border:1px solid #333; padding:3px; text-align:left; width:40%;">Equipamento</th>
+<th style="border:1px solid #333; padding:3px; text-align:left; width:45%;">Número de série / Marca</th>
+<th style="border:1px solid #333; padding:3px; text-align:center; width:15%;">Avaria?</th>
 </tr>
 {linhas_eq_html}
 </table>
 <div style="margin-bottom:2px; font-weight:bold; font-size:10px;">Problema / Serviço a Executar</div>
-<div style="border:1px solid #333; padding:8px; margin-bottom:10px; min-height:35px; font-size:10px;">{os_servico}</div>
+<div style="border:1px solid #333; padding:6px; margin-bottom:10px; min-height:30px; font-size:10px;">{os_servico}</div>
 <table style="width:100%; border-collapse:collapse; margin-bottom:10px; text-align:right;">
-<tr><th style="border:1px solid #333; padding:4px; background:#f4f4f4; width:33%; text-align:center;">Total serviços</th><th style="border:1px solid #333; padding:4px; background:#f4f4f4; width:33%; text-align:center;">Total peças</th><th style="border:1px solid #333; padding:4px; background:#f4f4f4; width:34%; text-align:center;">Total da ordem de serviço</th></tr>
-<tr><td style="border:1px solid #333; padding:4px; text-align:center;">A definir</td><td style="border:1px solid #333; padding:4px; text-align:center;">A definir</td><td style="border:1px solid #333; padding:4px; text-align:center;"><b>A definir</b></td></tr>
+<tr><th style="border:1px solid #333; padding:3px; background:#f4f4f4; width:33%; text-align:center;">Total serviços</th><th style="border:1px solid #333; padding:3px; background:#f4f4f4; width:33%; text-align:center;">Total peças</th><th style="border:1px solid #333; padding:3px; background:#f4f4f4; width:34%; text-align:center;">Total da ordem de serviço</th></tr>
+<tr><td style="border:1px solid #333; padding:3px; text-align:center;">A definir</td><td style="border:1px solid #333; padding:3px; text-align:center;">A definir</td><td style="border:1px solid #333; padding:3px; text-align:center;"><b>A definir</b></td></tr>
 </table>
 <div style="margin-bottom:2px; font-weight:bold; font-size:9px;">Observações do recebimento</div>
-<div style="border:1px solid #333; padding:8px; margin-bottom:15px; font-size:9px; text-align:justify; line-height:1.2; color:#444;">
+<div style="border:1px solid #333; padding:6px; margin-bottom:10px; font-size:8px; text-align:justify; line-height:1.2; color:#444;">
 Informamos que, após a realização do orçamento, o cliente tem um prazo de até 90 dias para retirar o aparelho em nossa loja. Caso a retirada não seja feita dentro deste período, nos reservamos o direito de tomar as medidas cabíveis para a destinação do aparelho, conforme a legislação vigente (artigo 1.275, inciso III, do Código Civil Brasileiro). Reforçamos a importância de buscar o aparelho dentro do prazo estabelecido para evitar qualquer inconveniente. Agradecemos a compreensão e estamos à disposição para quaisquer dúvidas.
 </div>
-<div style="margin-top:10px;">
-<p style="font-size:11px; margin-bottom:15px;"><b>Técnico(s) / Vendedor:</b> {os_tecnico}</p>
-<p style="font-size:9px; color:#555; margin-bottom:20px;">Concordo com os termos descritos acima.</p>
+<div style="margin-top:5px;">
+<p style="font-size:10px; margin-bottom:10px;"><b>Técnico(s) / Vendedor:</b> {os_tecnico}</p>
+<p style="font-size:9px; color:#555; margin-bottom:15px;">Concordo com os termos descritos acima.</p>
 <table style="width:100%; border:none;">
 <tr>
 <td style="width:40%; vertical-align:bottom; font-size:10px;"><b>Data:</b> ____/____/________</td>
-<td style="width:60%; text-align:center; vertical-align:bottom;">___________________________________________________<br><span style="color:#555; font-size:9px;">Assinatura do responsável</span></td>
+<td style="width:60%; text-align:center; vertical-align:bottom;">___________________________________________________<br><span style="color:#555; font-size:8px;">Assinatura do responsável</span></td>
 </tr>
 </table>
 </div>
