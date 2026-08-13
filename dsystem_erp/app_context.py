@@ -17,6 +17,8 @@ def _aplicar_valores_sem_substituir_funcoes(
     """
     modulo_destino = destino.get("__name__")
     for nome, valor in valores.items():
+        if nome.startswith("__"):
+            continue
         existente = destino.get(nome)
         funcao_local = (
             callable(existente)

@@ -43,6 +43,32 @@ class AppContextTests(unittest.TestCase):
         self.assertIs(destino["restaurar_portal_por_sid"], funcao_da_pagina)
         self.assertEqual(destino["restaurar_portal_por_sid"](ctx="ok"), "ok")
 
+    def test_preserva_metadados_e_funcao_local_em_varios_reruns(self):
+        def funcao_da_pagina(ctx=None):
+            return ctx
+
+        def wrapper_principal():
+            return "wrapper"
+
+        modulo_pagina = funcao_da_pagina.__module__
+        destino = {
+            "__name__": modulo_pagina,
+            "__file__": "pagina.py",
+            "restaurar_portal_por_sid": funcao_da_pagina,
+        }
+        contexto_principal = {
+            "__name__": "orcamento",
+            "__file__": "orcamento.py",
+            "restaurar_portal_por_sid": wrapper_principal,
+        }
+
+        aplicar_contexto_pagina(contexto_principal, destino)
+        aplicar_contexto_pagina(contexto_principal, destino)
+
+        self.assertEqual(destino["__name__"], modulo_pagina)
+        self.assertEqual(destino["__file__"], "pagina.py")
+        self.assertIs(destino["restaurar_portal_por_sid"], funcao_da_pagina)
+
 
 if __name__ == "__main__":
     unittest.main()
