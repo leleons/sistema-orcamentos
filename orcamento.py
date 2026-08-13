@@ -16,8 +16,6 @@ import struct
 import math
 import wave
 import time
-import smtplib
-from email.message import EmailMessage
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -95,6 +93,12 @@ from dsystem_erp.services.permissions import (
     usuario_tem_permissao,
     valor_usuario,
 )
+from dsystem_erp.services.email import (
+    SMTPConfig,
+    enviar_email as service_enviar_email,
+    enviar_email_com_anexo as service_enviar_email_com_anexo,
+)
+from dsystem_erp.services.session import limpar_sessao
 from dsystem_erp.services.streamlit_static import configurar_limite_arquivos_estaticos
 from dsystem_erp.services.alertas_atendimento import agendamentos_proximos, chamado_esta_aberto, ids_novos
 from dsystem_erp.services.orcamentos import aplicar_encargos_renegociacao, data_validade_orcamento, numero_renegociacao, orcamento_esta_vencido, total_geral_orcamento, total_item_orcamento
@@ -150,6 +154,7 @@ from dsystem_erp.pages.contratos import renderizar_contratos as page_renderizar_
 from dsystem_erp.pages.recepcao_kanban import renderizar_recepcao_kanban as page_renderizar_recepcao_kanban
 from dsystem_erp.services.contratos import salvar_contrato_gerado
 from dsystem_erp.pages.emails import renderizar_gestao_emails as page_renderizar_gestao_emails
+from dsystem_erp.pages.login import renderizar_login as page_renderizar_login
 from dsystem_erp.technical_logs import registrar_log_tecnico
 from dsystem_erp.utils.datas import data_extenso_br, data_input_valor, data_para_banco_br, data_para_br, data_para_iso, parse_data_flex
 from dsystem_erp.utils.formatadores import formatar_moeda_br, tamanho_arquivo_legivel
@@ -192,6 +197,7 @@ SMTP_PORT = int(config_val("SMTP_PORT", "587") or 587)
 SMTP_USER = config_val("SMTP_USER", "")
 SMTP_PASSWORD = config_val("SMTP_PASSWORD", "")
 SMTP_FROM = config_val("SMTP_FROM", SMTP_USER)
+SMTP_CONFIG = SMTPConfig(SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM)
 AREAS_CHAMADO = ["Gerente", "Suporte", "Compras"]
 MAX_UPLOAD_BANCO_BYTES = int(config_val("MAX_UPLOAD_BANCO_BYTES", str(8 * 1024 * 1024)) or (8 * 1024 * 1024))
 DSYSTEM_UPLOAD_MAX_BYTES = int(config_val("DSYSTEM_UPLOAD_MAX_BYTES", str(7 * 1024 * 1024 * 1024)) or (7 * 1024 * 1024 * 1024))
@@ -204,33 +210,13 @@ def responsavel_area_chamado(area):
     return "Daniel.fabio" if area in {"Gerente", "Compras"} else ""
 
 def enviar_email(destinatario, assunto, corpo):
-    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD or not SMTP_FROM:
-        raise RuntimeError("SMTP não configurado. Configure SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD e SMTP_FROM.")
-    msg = EmailMessage()
-    msg["From"] = SMTP_FROM
-    msg["To"] = destinatario
-    msg["Subject"] = assunto
-    msg.set_content(corpo)
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
-        smtp.starttls()
-        smtp.login(SMTP_USER, SMTP_PASSWORD)
-        smtp.send_message(msg)
+    return service_enviar_email(SMTP_CONFIG, destinatario, assunto, corpo)
 
 
 def enviar_email_com_anexo(destinatario, assunto, corpo, nome_arquivo, arquivo, mime_type="application/pdf"):
-    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD or not SMTP_FROM:
-        raise RuntimeError("SMTP não configurado. Configure SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD e SMTP_FROM.")
-    msg = EmailMessage()
-    msg["From"] = SMTP_FROM
-    msg["To"] = destinatario
-    msg["Subject"] = assunto
-    msg.set_content(corpo)
-    tipo, subtipo = (mime_type or "application/pdf").split("/", 1)
-    msg.add_attachment(bytes(arquivo), maintype=tipo, subtype=subtipo, filename=nome_arquivo)
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
-        smtp.starttls()
-        smtp.login(SMTP_USER, SMTP_PASSWORD)
-        smtp.send_message(msg)
+    return service_enviar_email_com_anexo(
+        SMTP_CONFIG, destinatario, assunto, corpo, nome_arquivo, arquivo, mime_type
+    )
 
 def enviar_codigo_email_cliente(cliente, contexto="login"):
     email_cliente = (cliente.get("email") or "").strip()
@@ -6581,120 +6567,7 @@ if 'pagina_atual' not in st.session_state:
     st.session_state['pagina_atual'] = "Página Inicial"
 
 def login():
-    usuario_troca = st.session_state.get("usuario_troca_senha_pendente")
-    if usuario_troca:
-        exibir_logo_dsystem("190")
-        st.title("Definir nova senha")
-        st.info(f"Primeiro acesso do usuário {usuario_troca.get('username')}. Troque a senha temporária para continuar.")
-        nova_senha = st.text_input("Nova senha:", type="password", key="usuario_nova_senha")
-        confirmar_nova = st.text_input("Confirmar nova senha:", type="password", key="usuario_confirmar_nova_senha")
-        if st.button("Salvar nova senha e entrar", type="primary", width="stretch"):
-            if len(nova_senha) < 6:
-                st.error("A nova senha precisa ter pelo menos 6 caracteres.")
-            elif nova_senha != confirmar_nova:
-                st.error("As senhas não conferem.")
-            elif nova_senha == "1234":
-                st.error("Escolha uma senha diferente da senha temporária.")
-            else:
-                conn_troca = conectar_banco(); ct = conn_troca.cursor()
-                ct.execute("UPDATE usuarios SET password=?, trocar_senha=0 WHERE id=?", (criar_hash_senha(nova_senha), usuario_troca.get("id")))
-                conn_troca.commit(); conn_troca.close()
-                for key, value in usuario_troca.items():
-                    if key != "password":
-                        st.session_state[key] = value
-                st.session_state["trocar_senha"] = 0
-                st.session_state["autenticado"] = True
-                st.session_state.pop("usuario_troca_senha_pendente", None)
-                registrar_evento_sistema("update", "usuarios", usuario_troca.get("id"), "", {"evento": "Senha temporária alterada"})
-                st.rerun()
-        return
-
-    cliente_pendente = st.session_state.get("cliente_login_pendente")
-    if cliente_pendente:
-        exibir_logo_dsystem("190")
-        if int(cliente_pendente.get("portal_trocar_senha") or 0) or not int(cliente_pendente.get("portal_2fa_ativo") or 0):
-            renderizar_primeiro_acesso_cliente(cliente_pendente)
-        else:
-            renderizar_2fa_cliente(cliente_pendente)
-        return
-
-    exibir_logo_dsystem("210")
-    st.title("Acesso ao Sistema Dsystem ERP")
-    with st.container():
-        user = st.text_input("Usuário")
-        password = st.text_input("Senha", type="password")
-        
-        if st.button("Entrar no Sistema", type="primary"):
-            conn = conectar_banco()
-            c = conn.cursor(dictionary=True)
-            c.execute("SELECT * FROM usuarios WHERE username=%s", (user,))
-            row = c.fetchone()
-            
-            if row is not None and verificar_senha(password, row.get("password", "")):
-                if not senha_esta_com_hash(row.get("password", "")):
-                    c.execute("UPDATE usuarios SET password=%s WHERE id=%s", (criar_hash_senha(password), row["id"]))
-                    conn.commit()
-                    row["password"] = ""
-                if int(row.get("trocar_senha") or 0):
-                    conn.close()
-                    st.session_state["usuario_troca_senha_pendente"] = dict(row)
-                    st.rerun()
-                conn.close()
-                row_dict = row
-                for key, value in row_dict.items():
-                    if key == "password":
-                        continue
-                    st.session_state[key] = value
-                st.session_state['autenticado'] = True
-                registrar_tentativa_login(user, "usuario", True, "Login do sistema autorizado")
-                registrar_evento_sistema("insert", "sistema", row.get("id"), "", {"evento": "Entrada no sistema"})
-                st.rerun()
-            else:
-                usuario_portal_busca = user.strip().lower()
-                documento_login = normalizar_documento_cliente(user)
-                if len(documento_login) in (11, 14):
-                    usuario_portal_busca = documento_login
-                c.execute("SELECT * FROM clientes WHERE LOWER(portal_username)=%s", (usuario_portal_busca,))
-                cliente = c.fetchone()
-                if cliente is None:
-                    c.execute(
-                        """SELECT p.id AS portal_conta_id, p.username, p.nome AS portal_usuario_nome,
-                                  p.tipo AS portal_tipo_usuario, p.password AS conta_password,
-                                  p.trocar_senha, p.twofa_secret, p.twofa_ativo, c.*
-                           FROM clientes_portal_usuarios p
-                           INNER JOIN clientes c ON c.id=p.cliente_id
-                           WHERE LOWER(p.username)=%s AND p.ativo=1 LIMIT 1""",
-                        (usuario_portal_busca,),
-                    )
-                    conta_funcionario = c.fetchone()
-                    if conta_funcionario is not None:
-                        cliente = dict(conta_funcionario)
-                        cliente["portal_username"] = conta_funcionario.get("username")
-                        cliente["portal_password"] = conta_funcionario.get("conta_password")
-                        cliente["portal_trocar_senha"] = conta_funcionario.get("trocar_senha")
-                        cliente["portal_2fa_secret"] = conta_funcionario.get("twofa_secret")
-                        cliente["portal_2fa_ativo"] = conta_funcionario.get("twofa_ativo")
-                if cliente is not None and verificar_senha(password, cliente.get("portal_password", "")):
-                    if not senha_esta_com_hash(cliente.get("portal_password", "")):
-                        if cliente.get("portal_conta_id"):
-                            c.execute(
-                                "UPDATE clientes_portal_usuarios SET password=%s WHERE id=%s",
-                                (criar_hash_senha(password), cliente["portal_conta_id"]),
-                            )
-                        else:
-                            c.execute("UPDATE clientes SET portal_password=%s WHERE id=%s", (criar_hash_senha(password), cliente["id"]))
-                        conn.commit()
-                        cliente["portal_trocar_senha"] = 1
-                    conn.close()
-                    registrar_tentativa_login(user, "cliente", True, "Login do portal autorizado")
-                    st.session_state["cliente_login_pendente"] = dict(cliente)
-                    st.rerun()
-                else:
-                    if cliente is not None:
-                        registrar_acesso_cliente(cliente, "senha_invalida")
-                    registrar_tentativa_login(user, "usuario" if row is not None else "cliente", False, "Usuário ou senha incorretos")
-                    conn.close()
-                    st.error("Usuário ou senha incorretos.")
+    return page_renderizar_login(criar_app_context(globals()))
 
 
 def tocar_campainha_alerta():
@@ -6823,8 +6696,7 @@ renderizar_central_atendimentos_global()
 
 def logout():
     registrar_evento_sistema("Saída", "sistema", st.session_state.get("id", ""), st.session_state.get("cliente_nome", ""), {"evento": "Saída do sistema"})
-    for key in list(st.session_state.keys()): 
-        del st.session_state[key]
+    limpar_sessao(st.session_state)
     st.rerun()
 
 if st.session_state.get("tipo_login") == "cliente":
