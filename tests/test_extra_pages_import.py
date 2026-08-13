@@ -12,6 +12,7 @@ from dsystem_erp.pages.ordens_servico import renderizar_ordem_servico
 from dsystem_erp.pages.portal_cliente import renderizar_portal_cliente_page
 from dsystem_erp.pages.usuarios import renderizar_gerenciador_usuarios
 from dsystem_erp.pages.login import renderizar_login
+from dsystem_erp.pages.logs import renderizar_log_sistema
 
 
 class ExtraPagesImportTests(unittest.TestCase):
@@ -28,6 +29,7 @@ class ExtraPagesImportTests(unittest.TestCase):
         self.assertTrue(callable(renderizar_cobrancas))
         self.assertTrue(callable(renderizar_atendimentos_checklists))
         self.assertTrue(callable(renderizar_login))
+        self.assertTrue(callable(renderizar_log_sistema))
 
 
 if __name__ == "__main__":
