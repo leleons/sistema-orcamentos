@@ -12,9 +12,6 @@ import html
 import unicodedata
 import xml.etree.ElementTree as ET
 import uuid
-import hashlib
-import secrets as py_secrets
-import hmac
 import struct
 import math
 import wave
@@ -80,7 +77,24 @@ from dsystem_erp.services.nfse_xml import gerar_xml_nfse_bh_rps as service_gerar
 from dsystem_erp.services.nfse_xml import xml_texto as service_xml_texto
 from dsystem_erp.services.nfse_pdf import gerar_pdf_nota_autorizada_simples as service_gerar_pdf_nota_autorizada_simples
 from dsystem_erp.services.nfse_signature import assinar_xml_nfse_bh as service_assinar_xml_nfse_bh
-from dsystem_erp.services.security import mascarar_segredo as service_mascarar_segredo
+from dsystem_erp.services.security import (
+    criar_hash_senha,
+    gerar_codigo_email_2fa,
+    gerar_secret_2fa,
+    mascarar_segredo as service_mascarar_segredo,
+    senha_esta_com_hash,
+    uri_totp_cliente,
+    verificar_senha,
+    verificar_totp,
+)
+from dsystem_erp.services.permissions import (
+    carregar_submodulos,
+    flags_legadas,
+    permissoes_do_usuario,
+    usuario_tem_alguma_permissao,
+    usuario_tem_permissao,
+    valor_usuario,
+)
 from dsystem_erp.services.streamlit_static import configurar_limite_arquivos_estaticos
 from dsystem_erp.services.alertas_atendimento import agendamentos_proximos, chamado_esta_aberto, ids_novos
 from dsystem_erp.services.orcamentos import aplicar_encargos_renegociacao, data_validade_orcamento, numero_renegociacao, orcamento_esta_vencido, total_geral_orcamento, total_item_orcamento
@@ -178,8 +192,6 @@ SMTP_PORT = int(config_val("SMTP_PORT", "587") or 587)
 SMTP_USER = config_val("SMTP_USER", "")
 SMTP_PASSWORD = config_val("SMTP_PASSWORD", "")
 SMTP_FROM = config_val("SMTP_FROM", SMTP_USER)
-HASH_PREFIX = "pbkdf2_sha256"
-HASH_ITERATIONS = 260000
 AREAS_CHAMADO = ["Gerente", "Suporte", "Compras"]
 MAX_UPLOAD_BANCO_BYTES = int(config_val("MAX_UPLOAD_BANCO_BYTES", str(8 * 1024 * 1024)) or (8 * 1024 * 1024))
 DSYSTEM_UPLOAD_MAX_BYTES = int(config_val("DSYSTEM_UPLOAD_MAX_BYTES", str(7 * 1024 * 1024 * 1024)) or (7 * 1024 * 1024 * 1024))
@@ -190,60 +202,6 @@ TIPOS_IMAGEM_UPLOAD = ["png", "jpg", "jpeg", "webp"]
 
 def responsavel_area_chamado(area):
     return "Daniel.fabio" if area in {"Gerente", "Compras"} else ""
-
-def criar_hash_senha(senha):
-    salt = py_secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac("sha256", str(senha).encode("utf-8"), salt.encode("utf-8"), HASH_ITERATIONS)
-    return f"{HASH_PREFIX}${HASH_ITERATIONS}${salt}${digest.hex()}"
-
-def senha_esta_com_hash(valor):
-    return isinstance(valor, str) and valor.startswith(f"{HASH_PREFIX}$")
-
-def verificar_senha(senha_digitada, senha_salva):
-    senha_digitada = "" if senha_digitada is None else str(senha_digitada)
-    senha_salva = "" if senha_salva is None else str(senha_salva)
-    if senha_esta_com_hash(senha_salva):
-        try:
-            _, iteracoes, salt, digest_salvo = senha_salva.split("$", 3)
-            digest = hashlib.pbkdf2_hmac("sha256", senha_digitada.encode("utf-8"), salt.encode("utf-8"), int(iteracoes)).hex()
-            return py_secrets.compare_digest(digest, digest_salvo)
-        except Exception:
-            return False
-    return py_secrets.compare_digest(senha_digitada, senha_salva)
-
-def gerar_secret_2fa():
-    return base64.b32encode(py_secrets.token_bytes(20)).decode("ascii").rstrip("=")
-
-def codigo_totp(secret, intervalo=30, digitos=6, momento=None):
-    if not secret:
-        return ""
-    momento = int(time.time() if momento is None else momento)
-    contador = int(momento // intervalo)
-    padding = "=" * ((8 - len(secret) % 8) % 8)
-    chave = base64.b32decode((secret + padding).upper())
-    msg = struct.pack(">Q", contador)
-    digest = hmac.new(chave, msg, hashlib.sha1).digest()
-    offset = digest[-1] & 0x0F
-    codigo = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
-    return str(codigo % (10 ** digitos)).zfill(digitos)
-
-def verificar_totp(secret, codigo, janela=1):
-    codigo = re.sub(r"\D", "", codigo or "")
-    if len(codigo) != 6:
-        return False
-    agora = int(time.time())
-    return any(py_secrets.compare_digest(codigo_totp(secret, momento=agora + (offset * 30)), codigo) for offset in range(-janela, janela + 1))
-
-def uri_totp_cliente(usuario, secret):
-    issuer = "Dsystem ERP"
-    label = f"{issuer}:{usuario}"
-    return (
-        "otpauth://totp/"
-        f"{quote(label)}?secret={secret}&issuer={quote(issuer)}&digits=6&period=30"
-    )
-
-def gerar_codigo_email_2fa():
-    return f"{py_secrets.randbelow(1000000):06d}"
 
 def enviar_email(destinatario, assunto, corpo):
     if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD or not SMTP_FROM:
@@ -299,56 +257,12 @@ def verificar_codigo_email_cliente(codigo):
         return False
     return verificar_senha(re.sub(r"\D", "", codigo or ""), codigo_hash)
 
-from dsystem_erp.navigation import ARVORE_PERMISSOES, LEGACY_PERMISSOES, MODULOS_NAVEGACAO, PERMISSOES_INFRA_ABAS, TODAS_PERMISSOES
-def carregar_submodulos(valor):
-    if not valor:
-        return set()
-    if isinstance(valor, (list, tuple, set)):
-        return {str(item) for item in valor}
-    try:
-        dados = json.loads(valor)
-        if isinstance(dados, dict):
-            return {str(k) for k, v in dados.items() if v}
-        if isinstance(dados, list):
-            return {str(item) for item in dados}
-    except Exception:
-        pass
-    return set()
-
-def valor_usuario(usuario, chave, padrao=0):
-    try:
-        return usuario.get(chave, padrao)
-    except Exception:
-        try:
-            return usuario[chave]
-        except Exception:
-            return padrao
-
-def permissoes_do_usuario(usuario):
-    permissoes = carregar_submodulos(valor_usuario(usuario, "submodulos", "[]"))
-    for acao, coluna in LEGACY_PERMISSOES.items():
-        if valor_usuario(usuario, coluna, 0):
-            permissoes.add(acao)
-    return permissoes
-
+from dsystem_erp.navigation import ARVORE_PERMISSOES, MODULOS_NAVEGACAO, PERMISSOES_INFRA_ABAS
 def tem_permissao(acao, usuario=None):
-    usuario = usuario or st.session_state
-    if valor_usuario(usuario, "tipo_login", "") == "cliente":
-        return acao in {"cliente.portal", "cliente.os", "cliente.autorizacao", "cliente.chamados", "cliente.propostas"}
-    if valor_usuario(usuario, "is_admin", 0):
-        return True
-    permissoes = permissoes_do_usuario(usuario)
-    return acao in permissoes
+    return usuario_tem_permissao(acao, usuario or st.session_state)
 
 def tem_alguma_permissao(prefixo, usuario=None):
-    usuario = usuario or st.session_state
-    if valor_usuario(usuario, "is_admin", 0):
-        return True
-    permissoes = permissoes_do_usuario(usuario)
-    return any(item == prefixo or item.startswith(f"{prefixo}.") for item in permissoes)
-
-def flags_legadas(permissoes):
-    return {coluna: int(acao in permissoes) for acao, coluna in LEGACY_PERMISSOES.items()}
+    return usuario_tem_alguma_permissao(prefixo, usuario or st.session_state)
 
 def editor_permissoes(prefixo, usuario=None):
     permissoes_atuais = permissoes_do_usuario(usuario or {})
