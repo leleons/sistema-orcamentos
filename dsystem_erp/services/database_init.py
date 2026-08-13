@@ -823,7 +823,8 @@ def iniciar_banco(conectar_banco):
     usuario_recepcao = str(config_val("RECEPCAO_USERNAME", "recepcao") or "").strip()
     senha_recepcao = str(config_val("RECEPCAO_PASSWORD", "") or "")
     c.execute("SELECT id FROM usuarios WHERE LOWER(username)=LOWER(?) LIMIT 1", (usuario_recepcao,))
-    if usuario_recepcao and senha_recepcao and not c.fetchone():
+    recepcao_existente = c.fetchone()
+    if usuario_recepcao and senha_recepcao and not recepcao_existente:
         c.execute('''INSERT INTO usuarios
             (username, password, trocar_senha, is_admin, perm_orcamentos, perm_del_orc,
              perm_os, perm_edit_os, perm_del_os, perm_emails, perm_edit_em, perm_del_em,
