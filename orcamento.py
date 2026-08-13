@@ -533,7 +533,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+@st.cache_resource(show_spinner=False)
 def iniciar_banco():
+    """Inicializa o schema uma vez por processo, não a cada rerun do Streamlit."""
     return service_iniciar_banco(conectar_banco)
 
 iniciar_banco()
@@ -1368,6 +1370,7 @@ def salvar_cliente(nome, tel, tel_sec, email, emails_cobranca, cnpj, rg, end, nu
     conn.close()
 
 
+@st.cache_resource(show_spinner=False)
 def garantir_logins_clientes_existentes():
     """Cria uma única vez os acessos automáticos para cadastros já existentes."""
     conn = conectar_banco()
