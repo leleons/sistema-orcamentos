@@ -24,6 +24,25 @@ class AppContextTests(unittest.TestCase):
 
         self.assertEqual(destino["st"], "fake")
 
+    def test_preserva_funcao_local_em_colisao_com_wrapper(self):
+        def funcao_da_pagina(ctx=None):
+            return ctx
+
+        def wrapper_principal():
+            return "wrapper"
+
+        destino = {
+            "__name__": funcao_da_pagina.__module__,
+            "restaurar_portal_por_sid": funcao_da_pagina,
+        }
+        aplicar_contexto_pagina(
+            {"restaurar_portal_por_sid": wrapper_principal},
+            destino,
+        )
+
+        self.assertIs(destino["restaurar_portal_por_sid"], funcao_da_pagina)
+        self.assertEqual(destino["restaurar_portal_por_sid"](ctx="ok"), "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

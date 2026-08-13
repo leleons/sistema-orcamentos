@@ -4,6 +4,31 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, MutableMapping
 
 
+def _aplicar_valores_sem_substituir_funcoes(
+    valores: Mapping[str, Any],
+    destino: MutableMapping[str, Any],
+) -> None:
+    """Injeta dependências sem trocar funções definidas pelo módulo de destino.
+
+    Em recarregamentos do Streamlit, o contexto do arquivo principal contém
+    wrappers com os mesmos nomes das funções das páginas extraídas. Substituir
+    essas funções transforma os aliases importados em wrappers incompatíveis no
+    próximo rerun.
+    """
+    modulo_destino = destino.get("__name__")
+    for nome, valor in valores.items():
+        existente = destino.get(nome)
+        funcao_local = (
+            callable(existente)
+            and callable(valor)
+            and modulo_destino
+            and getattr(existente, "__module__", None) == modulo_destino
+        )
+        if funcao_local:
+            continue
+        destino[nome] = valor
+
+
 @dataclass
 class AppContext:
     """Contexto compartilhado entre o app principal e paginas extraidas."""
@@ -15,7 +40,7 @@ class AppContext:
         return cls(dict(source))
 
     def apply_to(self, target: MutableMapping[str, Any]) -> None:
-        target.update(self.values)
+        _aplicar_valores_sem_substituir_funcoes(self.values, target)
 
     def get(self, name: str, default: Any = None) -> Any:
         return self.values.get(name, default)
@@ -41,6 +66,6 @@ def aplicar_contexto_pagina(ctx: AppContext | Mapping[str, Any], target: Mutable
     if isinstance(ctx, AppContext) or hasattr(ctx, "apply_to"):
         ctx.apply_to(target)
     elif hasattr(ctx, "values") and isinstance(ctx.values, dict):
-        target.update(ctx.values)
+        _aplicar_valores_sem_substituir_funcoes(ctx.values, target)
     else:
-        target.update(ctx)
+        _aplicar_valores_sem_substituir_funcoes(ctx, target)
