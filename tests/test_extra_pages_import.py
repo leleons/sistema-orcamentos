@@ -18,6 +18,15 @@ from dsystem_erp.pages.financeiro import (
     renderizar_conta_financeira,
     renderizar_lancamentos_financeiros,
 )
+from dsystem_erp.pages.chamados import (
+    renderizar_abertura_chamado,
+    renderizar_chamados_cliente,
+    renderizar_gestao_chamados_chefe,
+)
+from dsystem_erp.pages.portal_sections import (
+    injetar_css_portal_cliente,
+    renderizar_portal_cliente_home,
+)
 
 
 class ExtraPagesImportTests(unittest.TestCase):
@@ -38,6 +47,11 @@ class ExtraPagesImportTests(unittest.TestCase):
         self.assertTrue(callable(renderizar_conta_financeira))
         self.assertTrue(callable(renderizar_cadastros_financeiros))
         self.assertTrue(callable(renderizar_lancamentos_financeiros))
+        self.assertTrue(callable(renderizar_abertura_chamado))
+        self.assertTrue(callable(renderizar_chamados_cliente))
+        self.assertTrue(callable(renderizar_gestao_chamados_chefe))
+        self.assertTrue(callable(injetar_css_portal_cliente))
+        self.assertTrue(callable(renderizar_portal_cliente_home))
 
 
 if __name__ == "__main__":
