@@ -1,0 +1,56 @@
+# Segredos e configurações locais
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.pfx
+*.p12
+*.pem
+*.key
+*.crt
+*.cer
+
+# Bancos, exportações e dados de produção
+*.db
+*.sqlite
+*.sqlite3
+*.sql.gz
+mysql_dados_exportados.sql
+dump*.sql
+backup*.sql
+
+# Backups, logs e temporários
+backups/
+logs/
+tmp/
+output/
+*.bak
+*.bak_*
+*.bak.*
+*.log
+
+# Artefatos Python e testes
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Pacotes de deploy e arquivos compactados
+deploy_dsystem/
+deploy_dsystem.*
+*.tgz
+*.tar
+*.tar.gz
+*.zip
+
+# Ambiente local e sistema operacional
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

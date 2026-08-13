@@ -1,0 +1,10 @@
+streamlit
+mysql-connector-python
+pandas
+openpyxl
+pypdf
+reportlab
+cryptography
+lxml
+signxml
+python-dotenv
