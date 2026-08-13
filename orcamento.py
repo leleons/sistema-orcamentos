@@ -42,6 +42,20 @@ except ImportError:
         )
 from dsystem_erp.services.documentos import gerar_excel_tabela as service_gerar_excel_tabela
 from dsystem_erp.services.documentos import gerar_pdf_tabela_simples as service_gerar_pdf_tabela_simples
+from dsystem_erp.services.email_exports import (
+    gerar_excel_emails as service_gerar_excel_emails,
+    gerar_pdf_emails as service_gerar_pdf_emails,
+    preparar_tabela_emails as service_preparar_tabela_emails,
+)
+from dsystem_erp.services.orcamento_pdf import (
+    dados_orcamento_base as service_dados_orcamento_base,
+    gerar_pdf_orcamento_empresa as service_gerar_pdf_orcamento_empresa,
+    gerar_pdfs_tres_orcamentos as service_gerar_pdfs_tres_orcamentos,
+    itens_orcamento_normalizados as service_itens_orcamento_normalizados,
+    multiplicador_orcamento_empresa as service_multiplicador_orcamento_empresa,
+    nome_arquivo_orcamento as service_nome_arquivo_orcamento,
+    salvar_pdfs_orcamento as service_salvar_pdfs_orcamento,
+)
 from dsystem_erp.services.nfse_xml import formatar_decimal_xml as service_formatar_decimal_xml
 from dsystem_erp.services.nfse_xml import gerar_xml_nfse_bh_rps as service_gerar_xml_nfse_bh_rps
 from dsystem_erp.services.nfse_xml import xml_texto as service_xml_texto
@@ -1395,182 +1409,22 @@ def moeda_para_float(valor):
         return 0.0
 
 def multiplicador_orcamento_empresa(empresa):
-    if "LC Printer" in str(empresa or ""):
-        return 1.30
-    if "GT" in str(empresa or ""):
-        return 1.45
-    return 1.0
+    return service_multiplicador_orcamento_empresa(empresa)
 
 def itens_orcamento_normalizados(valor):
-    if isinstance(valor, list):
-        itens = valor
-    else:
-        try:
-            itens = json.loads(valor or "[]")
-        except Exception:
-            itens = []
-    normalizados = []
-    for item in itens if isinstance(itens, list) else []:
-        if not isinstance(item, dict):
-            continue
-        desc = str(item.get("d") or item.get("desc") or item.get("descricao") or "").strip()
-        try:
-            qtd = int(float(item.get("q") or item.get("qtd") or 0))
-        except Exception:
-            qtd = 0
-        vunit = moeda_para_float(item.get("v") if item.get("v") is not None else item.get("vunit"))
-        vtotal = moeda_para_float(item.get("t") if item.get("t") is not None else item.get("vtotal"))
-        if not vtotal:
-            vtotal = vunit * qtd
-        tipo_item = item.get("tipo_item") or item.get("tipo") or item.get("tipo_nota") or "Serviço"
-        if tipo_item not in ["Produto", "Serviço"]:
-            tipo_item = "Serviço"
-        if desc or vtotal:
-            normalizados.append({
-                "d": desc, "q": qtd, "v": vunit, "t": vtotal, "tipo_item": tipo_item,
-                "estoque_id": item.get("estoque_id"), "situacao_nota": item.get("situacao_nota") or "",
-                "origem_item": item.get("origem_item") or "",
-                "ajuste_preco_percentual": item.get("ajuste_preco_percentual") or 0,
-            })
-    return normalizados
+    return service_itens_orcamento_normalizados(valor)
 
 def nome_arquivo_orcamento(numero, empresa):
-    empresa_limpa = re.sub(r"[^A-Za-z0-9_-]+", "_", empresa or "orcamento").strip("_")
-    numero_limpo = re.sub(r"[^A-Za-z0-9_-]+", "_", str(numero or "sem_numero")).strip("_")
-    return f"orcamento_{numero_limpo}_{empresa_limpa}.pdf"
+    return service_nome_arquivo_orcamento(numero, empresa)
 
 def gerar_pdf_orcamento_empresa(dados, empresa):
-    buffer = io.BytesIO()
-    try:
-        import reportlab
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units import mm
-        from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.ttfonts import TTFont
-        from reportlab.platypus import Image as RLImage, SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    except Exception as ex:
-        raise RuntimeError(f"Biblioteca de PDF não instalada: {ex}")
-
-    mult = multiplicador_orcamento_empresa(empresa)
-    cor = colors.HexColor("#004488") if "Dsystem" in empresa else colors.HexColor("#1c1762") if "LC Printer" in empresa else colors.HexColor("#4ba3d5")
-    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm, topMargin=12 * mm, bottomMargin=12 * mm)
-    pasta_fontes_orc = Path(reportlab.__file__).resolve().parent / "fonts"
-    if "OrcamentoSans" not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont("OrcamentoSans", str(pasta_fontes_orc / "Vera.ttf")))
-        pdfmetrics.registerFont(TTFont("OrcamentoSans-Bold", str(pasta_fontes_orc / "VeraBd.ttf")))
-    styles = getSampleStyleSheet()
-    styles["Normal"].fontName = "OrcamentoSans"
-    styles["Title"].fontName = "OrcamentoSans-Bold"
-    styles.add(ParagraphStyle(name="Small", parent=styles["Normal"], fontSize=8, leading=10))
-    styles.add(ParagraphStyle(name="Cell", parent=styles["Normal"], fontSize=8, leading=9))
-    elementos = []
-    titulo_empresa = {
-        "Dsystem Tecnologia": "Dsystem Tecnologia",
-        "LC Printer": "LC Printer - Luiz Cláudio da Silveira-ME",
-        "GT Solutions": "GT Solutions",
-    }.get(empresa, empresa)
-    endereco_empresa = {
-        "Dsystem Tecnologia": "Rua Glória, 25 - Sabará/MG - CEP 34.700-150",
-        "LC Printer": "CNPJ 11.024.413/0001-22 - R. Geralda Martins de Miranda, 244 - Maria Goretti - Belo Horizonte/MG - CEP 31.930-450 - (31) 3432-3593 / 9 8500-2691 - lc_printer@hotmail.com",
-    }.get(empresa, "")
-    estilo_titulo_orc = ParagraphStyle(
-        name="TituloOrc", parent=styles["Title"], textColor=cor, fontSize=20, leading=24
-    )
-    caminho_logo_lc = Path(__file__).resolve().parent / "logo_lc_printer.jpg"
-    if empresa == "LC Printer" and caminho_logo_lc.exists():
-        cabecalho_empresa = Table(
-            [[
-                RLImage(str(caminho_logo_lc), width=42 * mm, height=28.3 * mm),
-                Paragraph(f"<b>{titulo_empresa}</b><br/><font size='8'>{endereco_empresa}</font>", estilo_titulo_orc),
-            ]],
-            colWidths=[48 * mm, 132 * mm],
-        )
-        cabecalho_empresa.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ]))
-        elementos.append(cabecalho_empresa)
-    else:
-        elementos.append(Paragraph(f"<b>{titulo_empresa}</b>", estilo_titulo_orc))
-        if endereco_empresa:
-            elementos.append(Paragraph(endereco_empresa, styles["Small"]))
-    cabecalho_orcamento = f"Orçamento Nº {h(dados.get('numero'))} - emissão {h(dados.get('data_orc') or data_para_br(date.today()))}"
-    if dados.get("data_validade"):
-        cabecalho_orcamento += f" - válido até {h(dados.get('data_validade'))}"
-    elementos.append(Paragraph(cabecalho_orcamento, styles["Small"]))
-    elementos.append(Spacer(1, 8))
-    cliente = [
-        ["Cliente", dados.get("cliente") or ""],
-        ["CPF/CNPJ", dados.get("cpf_cnpj") or ""],
-        ["Telefone", dados.get("telefone") or ""],
-        ["E-mail", dados.get("email") or ""],
-        ["Endereço", dados.get("endereco") or ""],
-    ]
-    tabela_cliente = Table(cliente, colWidths=[28 * mm, 150 * mm])
-    tabela_cliente.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f2f4f7")),
-        ("FONTNAME", (0, 0), (-1, -1), "OrcamentoSans"),
-        ("FONTNAME", (0, 0), (0, -1), "OrcamentoSans-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
-    elementos.append(tabela_cliente)
-    elementos.append(Spacer(1, 10))
-    linhas = [["Item", "Descrição", "Qtd", "Unitário", "Total"]]
-    total = 0.0
-    for idx, item in enumerate(itens_orcamento_normalizados(dados.get("itens")), start=1):
-        qtd = int(item.get("q") or 0)
-        unit = float(item.get("v") or 0) * mult
-        subtotal = float(item.get("t") or 0) * mult
-        total += subtotal
-        linhas.append([idx, Paragraph(h(item.get("d") or ""), styles["Cell"]), qtd, formata_moeda(unit), formata_moeda(subtotal)])
-    if len(linhas) == 1:
-        linhas.append(["", "Sem itens", "", "", formata_moeda(0)])
-    tabela_itens = Table(linhas, colWidths=[12 * mm, 92 * mm, 16 * mm, 30 * mm, 30 * mm], repeatRows=1)
-    tabela_itens.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), cor),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, -1), "OrcamentoSans"),
-        ("FONTNAME", (0, 0), (-1, 0), "OrcamentoSans-Bold"),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
-    elementos.append(tabela_itens)
-    elementos.append(Spacer(1, 8))
-    elementos.append(Paragraph(f"<b>Total: {formata_moeda(total)}</b>", ParagraphStyle(name="TotalOrc", parent=styles["Normal"], fontSize=13, leading=16, alignment=2, textColor=cor)))
-    elementos.append(Spacer(1, 10))
-    elementos.append(Paragraph(f"<b>Forma de pagamento:</b> {h(dados.get('forma_pagamento') or '')}", styles["Small"]))
-    if dados.get("obs_pag"):
-        elementos.append(Paragraph(f"<b>Obs. pagamento:</b> {h(dados.get('obs_pag'))}", styles["Small"]))
-    if dados.get("obs_geral"):
-        elementos.append(Paragraph(f"<b>Observações:</b> {h(dados.get('obs_geral'))}", styles["Small"]))
-    doc.build(elementos)
-    buffer.seek(0)
-    return buffer.getvalue()
+    return service_gerar_pdf_orcamento_empresa(dados, empresa)
 
 def dados_orcamento_base(numero, cliente, cpf_cnpj, itens, forma_pagamento, obs_pag="", obs_geral="", data_orc=None, telefone="", email="", endereco="", data_validade=""):
-    return {
-        "numero": numero,
-        "cliente": cliente,
-        "cpf_cnpj": cpf_cnpj,
-        "itens": itens,
-        "forma_pagamento": forma_pagamento,
-        "obs_pag": obs_pag,
-        "obs_geral": obs_geral,
-        "data_orc": data_orc or date.today().strftime("%d/%m/%Y"),
-        "telefone": telefone,
-        "email": email,
-        "endereco": endereco,
-        "data_validade": data_validade,
-    }
+    return service_dados_orcamento_base(
+        numero, cliente, cpf_cnpj, itens, forma_pagamento, obs_pag, obs_geral,
+        data_orc, telefone, email, endereco, data_validade,
+    )
 
 def tipo_nota_por_itens(itens):
     tipos = sorted({item.get("tipo_item") or "Serviço" for item in itens})
@@ -2013,22 +1867,14 @@ def faturar_lancamento_com_integracoes(faturamento):
     return {"ok": True, "mensagem": mensagem}
 
 def gerar_pdfs_tres_orcamentos(dados):
-    return {
-        empresa: {
-            "nome": nome_arquivo_orcamento(dados.get("numero"), empresa),
-            "dados": gerar_pdf_orcamento_empresa(dados, empresa),
-        }
-        for empresa in ["Dsystem Tecnologia", "LC Printer", "GT Solutions"]
-    }
+    return service_gerar_pdfs_tres_orcamentos(dados)
 
 def salvar_pdfs_orcamento(cursor, orc_id, dados):
-    cursor.execute("DELETE FROM orcamento_pdfs WHERE orc_id=?", (orc_id,))
-    for empresa, pdf in gerar_pdfs_tres_orcamentos(dados).items():
-        cursor.execute("""INSERT INTO orcamento_pdfs
-                       (orc_id, empresa, nome_arquivo, mime_type, arquivo, criado_por, criado_em)
-                       VALUES (?,?,?,?,?,?,?)""",
-                       (orc_id, empresa, pdf["nome"], "application/pdf", pdf["dados"],
-                        st.session_state.get("username", ""), agora_br()))
+    return service_salvar_pdfs_orcamento(
+        cursor, orc_id, dados,
+        criado_por=st.session_state.get("username", ""),
+        criado_em=agora_br(),
+    )
 
 def carrega_logo(img, nome, cor, larg="150"):
     caminho_logo = img if os.path.isabs(img) else os.path.join(os.path.dirname(os.path.abspath(__file__)), img)
@@ -2042,14 +1888,7 @@ def limpar_html_impressao(html):
     return "\n".join(linha.lstrip() for linha in textwrap.dedent(html).strip().splitlines())
 
 def preparar_tabela_emails(rows, incluir_senhas=False):
-    colunas = [("id", "ID"),("cliente_vinculado", "Empresa/Cliente"),("funcionario", "Usuário/Funcionário"),("email", "E-mail"),("senha", "Senha"),("aliases", "Aliases"),("provedor", "Provedor"),("config_entrada", "Entrada"),("config_saida", "Saída"),("capacidade", "Capacidade"),("data_verificacao", "Data Verificação"),("backup_realizado", "Backup"),("data_backup", "Data Backup")]
-    dados = []
-    for row in rows:
-        item = dict(row)
-        if not incluir_senhas:
-            item["senha"] = mascarar_segredo(item.get("senha"))
-        dados.append({titulo: item.get(campo, "") for campo, titulo in colunas})
-    return dados
+    return service_preparar_tabela_emails(rows, incluir_senhas=incluir_senhas)
 
 def confirmar_senha_usuario_atual(senha_digitada):
     usuario = st.session_state.get("username", "")
@@ -2066,70 +1905,10 @@ def confirmar_senha_usuario_atual(senha_digitada):
     return verificar_senha(senha_digitada, senha_hash)
 
 def gerar_excel_emails(rows, titulo, incluir_senhas=False):
-    dados = preparar_tabela_emails(rows, incluir_senhas=incluir_senhas)
-    df = pd.DataFrame(dados)
-    html = f"<html><head><meta charset='utf-8'></head><body><h2>{titulo}</h2>{df.to_html(index=False, escape=True)}</body></html>"
-    return html.encode("utf-8")
-
-def _pdf_escape(texto):
-    return str(texto).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    return service_gerar_excel_emails(rows, titulo, incluir_senhas=incluir_senhas)
 
 def gerar_pdf_emails(rows, titulo, incluir_senhas=False):
-    dados = preparar_tabela_emails(rows, incluir_senhas=incluir_senhas)
-    linhas = [titulo, ""]
-    for item in dados:
-        linhas.extend([
-            f"Empresa/Cliente: {item['Empresa/Cliente']}",
-            f"Usuário/Funcionário: {item['Usuário/Funcionário']}",
-            f"E-mail: {item['E-mail']}",
-            f"Senha: {item['Senha']}",
-            f"Aliases: {item['Aliases']}",
-            f"Provedor: {item['Provedor']}",
-            f"Entrada: {item['Entrada']} | Saída: {item['Saída']}",
-            f"Capacidade: {item['Capacidade']} | Backup: {item['Backup']} | Data Backup: {item['Data Backup']}",
-            "-" * 95,
-        ])
-    if not dados:
-        linhas.append("Nenhum e-mail encontrado.")
-
-    paginas, linha_atual = [], []
-    for linha in linhas:
-        partes = textwrap.wrap(str(linha), width=95) or [""]
-        for parte in partes:
-            linha_atual.append(parte)
-            if len(linha_atual) >= 45:
-                paginas.append(linha_atual)
-                linha_atual = []
-    if linha_atual: paginas.append(linha_atual)
-
-    objetos = ["<< /Type /Catalog /Pages 2 0 R >>", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
-    page_ids = []
-    for pagina in paginas:
-        page_id = len(objetos) + 1
-        content_id = page_id + 1
-        page_ids.append(page_id)
-        comandos = ["BT", "/F1 9 Tf", "50 800 Td"]
-        for idx, linha in enumerate(pagina):
-            if idx: comandos.append("0 -15 Td")
-            comandos.append(f"({_pdf_escape(linha)}) Tj")
-        comandos.append("ET")
-        stream = "\n".join(comandos).encode("cp1252", errors="replace")
-        objetos.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>")
-        objetos.append(f"<< /Length {len(stream)} >>\nstream\n{stream.decode('cp1252')}\nendstream")
-
-    kids = " ".join(f"{pid} 0 R" for pid in page_ids)
-    objetos[1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>"
-
-    saida = bytearray(b"%PDF-1.4\n")
-    offsets = [0]
-    for idx, obj in enumerate(objetos, start=1):
-        offsets.append(len(saida))
-        saida.extend(f"{idx} 0 obj\n{obj}\nendobj\n".encode("cp1252", errors="replace"))
-    xref = len(saida)
-    saida.extend(f"xref\n0 {len(objetos)+1}\n0000000000 65535 f \n".encode("ascii"))
-    for off in offsets[1:]: saida.extend(f"{off:010d} 00000 n \n".encode("ascii"))
-    saida.extend(f"trailer\n<< /Size {len(objetos)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode("ascii"))
-    return bytes(saida)
+    return service_gerar_pdf_emails(rows, titulo, incluir_senhas=incluir_senhas)
 
 MODELOS_CONTRATO = {
     "Suporte Tecnológico": "Contrato_Suporte_Tecnologico_DSystem.pdf",
