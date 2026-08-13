@@ -13,6 +13,11 @@ from dsystem_erp.pages.portal_cliente import renderizar_portal_cliente_page
 from dsystem_erp.pages.usuarios import renderizar_gerenciador_usuarios
 from dsystem_erp.pages.login import renderizar_login
 from dsystem_erp.pages.logs import renderizar_log_sistema
+from dsystem_erp.pages.financeiro import (
+    renderizar_cadastros_financeiros,
+    renderizar_conta_financeira,
+    renderizar_lancamentos_financeiros,
+)
 
 
 class ExtraPagesImportTests(unittest.TestCase):
@@ -30,6 +35,9 @@ class ExtraPagesImportTests(unittest.TestCase):
         self.assertTrue(callable(renderizar_atendimentos_checklists))
         self.assertTrue(callable(renderizar_login))
         self.assertTrue(callable(renderizar_log_sistema))
+        self.assertTrue(callable(renderizar_conta_financeira))
+        self.assertTrue(callable(renderizar_cadastros_financeiros))
+        self.assertTrue(callable(renderizar_lancamentos_financeiros))
 
 
 if __name__ == "__main__":
