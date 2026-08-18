@@ -6,6 +6,8 @@ import json
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
+from dsystem_erp.services.estoque_fiscal import aplicar_regra_fiscal_item
+
 
 def decimal_brl(valor) -> Decimal:
     if isinstance(valor, Decimal):
@@ -61,12 +63,12 @@ def itens_faturamento_lista(valor) -> list[dict]:
         if tipo_item not in ["Produto", "Serviço"]:
             tipo_item = "Serviço"
         if desc or vtotal:
-            normalizados.append({
+            normalizados.append(aplicar_regra_fiscal_item({
                 "desc": desc, "qtd": qtd, "vunit": vunit, "vtotal": vtotal, "tipo_item": tipo_item,
                 "estoque_id": item.get("estoque_id"), "situacao_nota": item.get("situacao_nota") or "",
                 "origem_item": item.get("origem_item") or "",
                 "ajuste_preco_percentual": item.get("ajuste_preco_percentual") or 0,
-            })
+            }))
     return normalizados
 
 

@@ -1,6 +1,11 @@
 ﻿from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.services.estoque_fiscal import (
+    COMPRADO_SEM_NOTA,
+    normalizar_situacao_compra,
+    tipo_fiscal_produto_estoque,
+)
 from dsystem_erp.services.precificacao_estoque import preco_revenda_produto
 
 
@@ -122,7 +127,7 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
         ns = st.number_input("Quantidade de Itens Diferentes:", min_value=1, max_value=20, value=max(1, len(itens_carregados)), key=f"{prefixo_orc}_qtd_itens")
         produtos_estoque_orc = repo_listar_estoque(conectar_banco)
         opcoes_produto_orc = ["-- Selecionar produto do estoque --"] + [
-            f"{p['id']} - {p.get('produto') or p.get('codigo_entrada')} — {p.get('situacao_nota') or 'Comprado com nota'} (Estoque: {p.get('quantidade') or 0})"
+            f"{p['id']} - {p.get('produto') or p.get('codigo_entrada')} — {normalizar_situacao_compra(p.get('situacao_nota'))} (Estoque: {p.get('quantidade') or 0})"
             for p in produtos_estoque_orc
         ]
         srvs = []
@@ -160,14 +165,14 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                     produto_id = int(produto_escolhido.split(" - ", 1)[0])
                     produto_orc = next((p for p in produtos_estoque_orc if int(p["id"]) == produto_id), None)
                     if produto_orc:
-                        situacao_nota_orc = produto_orc.get("situacao_nota") or "Comprado com nota"
-                        tipo_item_fiscal_orc = "Serviço" if situacao_nota_orc == "Comprado sem nota" else "Produto"
+                        situacao_nota_orc = normalizar_situacao_compra(produto_orc.get("situacao_nota"))
+                        tipo_item_fiscal_orc = tipo_fiscal_produto_estoque(produto_orc)
                         d = produto_orc.get("produto") or produto_orc.get("codigo_entrada") or d
                         if produto_orc.get("permitir_ajuste_preco"):
                             ajuste_orc = st.number_input(f"Ajuste comercial do produto {i+1} (%):", min_value=-100.0, value=float(item_carregado.get("ajuste_preco_percentual") or 0), step=0.1, key=f"{prefixo_orc}_ajuste_produto_{i}")
                         def_v = float(preco_revenda_produto(produto_orc, ajuste_orc))
                         st.caption(f"Preço do estoque aplicado ao item {i+1}: {formatar_moeda_br(def_v)} — {situacao_nota_orc}")
-                        if situacao_nota_orc == "Comprado sem nota":
+                        if situacao_nota_orc == COMPRADO_SEM_NOTA:
                             st.warning(f"Item {i+1}: será lançado fiscalmente como Serviço e continuará vinculado à baixa do estoque.")
             chave_preco_orc = f"{prefixo_orc}_ov_{i}_{produto_orc.get('id') if produto_orc else 'manual'}_{ajuste_orc:.2f}"
             v = cc3.number_input(f"Valor Unit. R$ {i+1}:", value=def_v, min_value=0.0, format="%.2f", key=chave_preco_orc, disabled=bool(produto_orc))

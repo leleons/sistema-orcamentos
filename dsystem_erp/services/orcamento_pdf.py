@@ -8,6 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from dsystem_erp.services.estoque_fiscal import aplicar_regra_fiscal_item
 from dsystem_erp.utils.datas import data_para_br
 
 
@@ -62,7 +63,7 @@ def itens_orcamento_normalizados(valor: Any) -> list[dict]:
             tipo_item = "Serviço"
         if descricao or total:
             normalizados.append(
-                {
+                aplicar_regra_fiscal_item({
                     "d": descricao,
                     "q": quantidade,
                     "v": unitario,
@@ -72,7 +73,7 @@ def itens_orcamento_normalizados(valor: Any) -> list[dict]:
                     "situacao_nota": item.get("situacao_nota") or "",
                     "origem_item": item.get("origem_item") or "",
                     "ajuste_preco_percentual": item.get("ajuste_preco_percentual") or 0,
-                }
+                })
             )
     return normalizados
 

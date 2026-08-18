@@ -1,6 +1,11 @@
 ﻿from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.services.estoque_fiscal import (
+    COMPRADO_COM_NOTA,
+    SITUACOES_DOCUMENTO_COMPRA,
+    normalizar_situacao_compra,
+)
 from dsystem_erp.services.precificacao_estoque import calcular_preco_revenda, decimal_valor
 from dsystem_erp.ui_consulta import tabela_selecionavel_id
 
@@ -109,7 +114,7 @@ def renderizar_estoque(ctx: dict) -> None:
             e_qtd = ce4.number_input("Quantidade Inicial em Estoque:", min_value=0, value=0)
             e_min = ce5.number_input("Estoque Mínimo (Alerta):", min_value=0, value=5)
             e_situacao_nota = st.radio(
-                "Documento da compra:", ["Comprado com nota", "Comprado sem nota"], horizontal=True,
+                "Documento da compra:", list(SITUACOES_DOCUMENTO_COMPRA), horizontal=True,
                 help="Produtos comprados sem nota serão classificados como serviço na venda, mas continuarão baixando o estoque.",
             )
 
@@ -238,10 +243,10 @@ def renderizar_estoque(ctx: dict) -> None:
                         col_eq1, col_eq2 = st.columns(2)
                         ne_qtd = col_eq1.number_input("Quantidade Atual:", value=prod_edit['quantidade'], key=f"eqtd_{id_ed_est}")
                         ne_min = col_eq2.number_input("Estoque Mínimo:", value=prod_edit['estoque_minimo'], key=f"emin_{id_ed_est}")
-                        situacao_nota_atual = prod_edit.get("situacao_nota") or "Comprado com nota"
+                        situacao_nota_atual = normalizar_situacao_compra(prod_edit.get("situacao_nota"))
                         ne_situacao_nota = st.radio(
-                            "Documento da compra:", ["Comprado com nota", "Comprado sem nota"],
-                            index=0 if situacao_nota_atual == "Comprado com nota" else 1, horizontal=True,
+                            "Documento da compra:", list(SITUACOES_DOCUMENTO_COMPRA),
+                            index=0 if situacao_nota_atual == COMPRADO_COM_NOTA else 1, horizontal=True,
                             key=f"esituacaonota_{id_ed_est}",
                         )
                         

@@ -3,6 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.services.estoque_fiscal import (
+    COMPRADO_SEM_NOTA,
+    normalizar_situacao_compra,
+    tipo_fiscal_produto_estoque,
+)
 from dsystem_erp.services.nfse_certificado import certificado_bate_com_cnpj, inspecionar_certificado_pfx
 from dsystem_erp.services.nfse_nacional import (
     assinar_xml_dps_nacional,
@@ -114,7 +119,7 @@ def renderizar_a_faturar(ctx: dict) -> None:
         qtd_itens = st.number_input("Quantidade de Itens:", min_value=1, max_value=20, value=1, key="fat_qtd_itens")
         produtos_estoque_fat = repo_listar_estoque(conectar_banco)
         opcoes_produto_fat = ["-- Selecionar produto do estoque --"] + [
-            f"{p['id']} - {p.get('produto') or p.get('codigo_entrada')} — {p.get('situacao_nota') or 'Comprado com nota'} (Estoque: {p.get('quantidade') or 0})"
+            f"{p['id']} - {p.get('produto') or p.get('codigo_entrada')} — {normalizar_situacao_compra(p.get('situacao_nota'))} (Estoque: {p.get('quantidade') or 0})"
             for p in produtos_estoque_fat
         ]
         itens_fat = []
@@ -135,14 +140,14 @@ def renderizar_a_faturar(ctx: dict) -> None:
                     produto_id_fat = int(produto_escolhido_fat.split(" - ", 1)[0])
                     produto_fat = next((p for p in produtos_estoque_fat if int(p["id"]) == produto_id_fat), None)
                     if produto_fat:
-                        situacao_nota_fat = produto_fat.get("situacao_nota") or "Comprado com nota"
-                        tipo_item_fiscal_fat = "Serviço" if situacao_nota_fat == "Comprado sem nota" else "Produto"
+                        situacao_nota_fat = normalizar_situacao_compra(produto_fat.get("situacao_nota"))
+                        tipo_item_fiscal_fat = tipo_fiscal_produto_estoque(produto_fat)
                         desc = produto_fat.get("produto") or produto_fat.get("codigo_entrada") or desc
                         if produto_fat.get("permitir_ajuste_preco"):
                             ajuste_fat = st.number_input(f"Ajuste comercial do produto {i+1} (%):", min_value=-100.0, value=0.0, step=0.1, key=f"fat_ajuste_produto_{i}")
                         preco_fat = float(preco_revenda_produto(produto_fat, ajuste_fat))
                         st.caption(f"Preço do estoque aplicado: {formatar_moeda_br(preco_fat)} — {situacao_nota_fat}")
-                        if situacao_nota_fat == "Comprado sem nota":
+                        if situacao_nota_fat == COMPRADO_SEM_NOTA:
                             st.warning(f"Item {i+1}: sairá fiscalmente como Serviço, mantendo a baixa no estoque.")
             chave_preco_fat = f"fat_vunit_{i}_{produto_fat.get('id') if produto_fat else 'manual'}_{ajuste_fat:.2f}"
             vunit = ic3.number_input(f"Valor Unit. R$:", min_value=0.0, value=preco_fat, step=0.01, format="%.2f", key=chave_preco_fat, disabled=bool(produto_fat))
@@ -392,13 +397,21 @@ def renderizar_a_faturar(ctx: dict) -> None:
                         vtotal_item = float(qtd_item) * float(vunit_item)
                         ii5.metric("Total", formatar_moeda_br(vtotal_item))
                         if desc_item.strip() or vtotal_item:
-                            tipo_fiscal_preservado = item_padrao.get("tipo_item") if item_padrao.get("estoque_id") and item_padrao.get("situacao_nota") == "Comprado sem nota" else tipo_item_edit
+                            tipo_fiscal_preservado = (
+                                tipo_fiscal_produto_estoque(item_padrao)
+                                if item_padrao.get("estoque_id")
+                                else tipo_item_edit
+                            )
                             itens_editados.append({
                                 "desc": desc_item.strip(), "tipo_item": tipo_fiscal_preservado,
                                 "qtd": int(qtd_item), "vunit": float(vunit_item), "vtotal": float(vtotal_item),
                                 "estoque_id": item_padrao.get("estoque_id"),
                                 "origem_item": item_padrao.get("origem_item") or "",
-                                "situacao_nota": item_padrao.get("situacao_nota") or "",
+                                "situacao_nota": (
+                                    normalizar_situacao_compra(item_padrao.get("situacao_nota"))
+                                    if item_padrao.get("estoque_id")
+                                    else ""
+                                ),
                                 "ajuste_preco_percentual": item_padrao.get("ajuste_preco_percentual") or 0,
                             })
                             e_valor += vtotal_item
