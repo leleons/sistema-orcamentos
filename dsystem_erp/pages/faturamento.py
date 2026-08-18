@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.pages.faturado_documentos import renderizar_central_documentos_faturados
 from dsystem_erp.services.estoque_fiscal import (
     COMPRADO_SEM_NOTA,
     normalizar_situacao_compra,
@@ -963,7 +964,9 @@ def renderizar_faturado(ctx: dict) -> None:
 
     st.title("Faturado")
     st.caption("Itens aprovados no faturamento separados por Produto e Serviço para emissão de nota.")
-    aba_faturado_lista, aba_faturado_emissao, aba_faturado_notas = st.tabs(["Faturados", "Emissão de Nota", "Notas Emitidas"])
+    aba_faturado_lista, aba_faturado_emissao, aba_faturado_notas, aba_faturado_documentos = st.tabs([
+        "Faturados", "Emissão de Nota", "Notas Emitidas", "Enviar documentos"
+    ])
 
     with aba_faturado_emissao:
         st.subheader("Preparação e Controle de Emissão de Nota Fiscal")
@@ -1711,6 +1714,9 @@ def renderizar_faturado(ctx: dict) -> None:
             else:
                 st.error(resultado_fat.get("mensagem"))
             st.rerun()
+
+    with aba_faturado_documentos:
+        renderizar_central_documentos_faturados(ctx, rows_faturado)
 
     with aba_faturado_notas:
         renderizar_notas_emitidas_tab()
