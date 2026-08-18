@@ -472,7 +472,25 @@ def renderizar_conta_financeira(ctx, tipo):
         if registros and tem_permissao(f"{permissao}.delete"):
             with st.expander("Excluir lançamento"):
                 id_excluir = st.number_input("ID para excluir:", min_value=1, step=1, key=f"{tabela}_id_excluir")
-                if st.button("Excluir permanentemente", key=f"{tabela}_excluir"):
+                registro_excluir = next(
+                    (r for r in registros if int(r.get("id") or 0) == int(id_excluir)),
+                    None,
+                )
+                if registro_excluir:
+                    st.warning(
+                        f"Você está prestes a excluir o lançamento #{id_excluir} de "
+                        f"{registro_excluir.get(campo_parte) or 'cadastro não informado'}, no valor de "
+                        f"{formatar_moeda_br(registro_excluir.get('valor_total'))}."
+                    )
+                confirmar_exclusao = st.checkbox(
+                    "Confirmo que desejo excluir permanentemente este lançamento.",
+                    key=f"{tabela}_confirmar_exclusao_{id_excluir}",
+                )
+                if st.button(
+                    "Excluir permanentemente",
+                    key=f"{tabela}_excluir",
+                    disabled=not confirmar_exclusao or not registro_excluir,
+                ):
                     deletar_registro(tabela, "id", id_excluir)
                     st.success("Lançamento excluído.")
                     st.rerun()

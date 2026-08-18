@@ -97,6 +97,7 @@ from dsystem_erp.services.streamlit_static import configurar_limite_arquivos_est
 from dsystem_erp.services.alertas_atendimento import agendamentos_proximos, chamado_esta_aberto, ids_novos
 from dsystem_erp.services.orcamentos import aplicar_encargos_renegociacao, data_validade_orcamento, numero_renegociacao, orcamento_esta_vencido, total_geral_orcamento, total_item_orcamento
 from dsystem_erp.services.contas_receber import IMPOSTOS_PADRAO, calcular_impostos, calcular_margem_lucro, gerar_parcelas
+from dsystem_erp.services.faturamento_parcelas import gerar_parcelas_faturamento
 from dsystem_erp.services.precificacao_estoque import decimal_valor
 from dsystem_erp.services.cobrancas_recorrentes import sincronizar_lancamentos_recorrentes
 from dsystem_erp.ui import injetar_css_base
@@ -1807,32 +1808,40 @@ def faturar_lancamento_com_integracoes(faturamento):
         return {"ok": False, "mensagem": "Este lançamento já está marcado como faturado."}
 
     itens = itens_faturamento_lista(faturamento.get("itens"))
-    total = float(faturamento.get("valor_total") or sum(float(i.get("vtotal") or 0) for i in itens))
     usuario = st.session_state.get("username", "")
     agora = agora_br()
-    documento = f"FAT-{fat_id}"
+    parcelas_financeiras = gerar_parcelas_faturamento(faturamento)
     baixas_estoque = []
     alertas = []
 
     conn_fat = conectar_banco()
     cfat = conn_fat.cursor()
     try:
-        cfat.execute("SELECT id FROM contas_receber WHERE numero_documento=? LIMIT 1", (documento,))
-        conta_existente = cfat.fetchone()
-        if not conta_existente:
+        for parcela in parcelas_financeiras:
+            documento = parcela["documento"]
+            cfat.execute("SELECT id FROM contas_receber WHERE numero_documento=? LIMIT 1", (documento,))
+            conta_existente = cfat.fetchone()
+            if conta_existente:
+                continue
+            detalhes_parcela = json.dumps([parcela], ensure_ascii=False)
+            quantidade_parcelas = int(parcela["quantidade"])
             cfat.execute("""INSERT INTO contas_receber
                          (cliente, cpf_cnpj, numero_documento, tipo_receita, categoria, centro_receita,
                           data_emissao, data_competencia, data_vencimento, valor_original, valor_total,
-                          forma_recebimento, nota_fiscal, boleto, status, observacoes, criado_por, criado_em)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                          forma_recebimento, nota_fiscal, boleto, status, observacoes, criado_por, criado_em,
+                          parcelado, quantidade_parcelas, meio_parcelamento, parcelas_detalhes)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                          (
                              faturamento.get("cliente") or "", faturamento.get("cnpj") or "", documento,
                              faturamento.get("tipo") or "Eventual", "Faturamento", "Faturamento",
                              data_para_banco_br(date.today()), faturamento.get("data_lanc") or data_para_banco_br(date.today()),
-                             faturamento.get("vencimento") or data_para_banco_br(date.today()), total, total,
+                             parcela["vencimento"], parcela["valor"], parcela["valor"],
                              faturamento.get("forma_pag") or "", "Sim" if faturamento.get("emite_nf") == "Sim" else "Não",
-                             "Não", "Aberto", f"Gerado automaticamente pelo faturamento #{fat_id}.",
-                             usuario, agora,
+                             "Sim" if str(faturamento.get("forma_pag") or "").casefold() == "boleto" else "Não",
+                             "Aberto",
+                             f"Parcela {parcela['rotulo']} gerada automaticamente pelo faturamento #{fat_id}.",
+                             usuario, agora, "Sim" if quantidade_parcelas > 1 else "Não",
+                             quantidade_parcelas, faturamento.get("forma_pag") or "", detalhes_parcela,
                          ))
 
         for item in itens:
@@ -1866,9 +1875,17 @@ def faturar_lancamento_com_integracoes(faturamento):
         "faturamento",
         fat_id,
         faturamento.get("cliente") or "",
-        {"conta_receber": documento, "baixas_estoque": baixas_estoque, "alertas": alertas},
+        {
+            "contas_receber": [parcela["documento"] for parcela in parcelas_financeiras],
+            "baixas_estoque": baixas_estoque,
+            "alertas": alertas,
+        },
     )
-    mensagem = f"Faturamento #{fat_id} marcado como faturado e enviado para Contas a Receber."
+    quantidade_gerada = len(parcelas_financeiras)
+    mensagem = (
+        f"Faturamento #{fat_id} marcado como faturado e enviado para Contas a Receber "
+        f"em {quantidade_gerada} parcela(s)."
+    )
     if baixas_estoque:
         mensagem += f" Estoque baixado em {len(baixas_estoque)} item(ns)."
     if alertas:

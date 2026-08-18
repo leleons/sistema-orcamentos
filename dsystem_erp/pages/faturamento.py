@@ -4,6 +4,7 @@ from pathlib import Path
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.pages.faturado_documentos import renderizar_central_documentos_faturados
+from dsystem_erp.services.faturamento_parcelas import gerar_parcelas_faturamento
 from dsystem_erp.services.estoque_fiscal import (
     COMPRADO_SEM_NOTA,
     normalizar_situacao_compra,
@@ -284,6 +285,7 @@ def renderizar_a_faturar(ctx: dict) -> None:
                     "Qtd itens": len(itens_reg),
                     "Valor": formatar_moeda_br(r.get("valor_total")),
                     "Vencimento": data_para_br(r.get("vencimento")),
+                    "Parcelas": r.get("parcelas") or "Não",
                     "Status": r.get("status") or "Aberto",
                 })
 
@@ -559,7 +561,18 @@ def renderizar_a_faturar(ctx: dict) -> None:
 
             if st.session_state.get('is_admin', 0) or tem_permissao("faturamento.delete"):
                 del_id = st.number_input("ID para excluir:", min_value=1, step=1, key="fat_del_id")
-                if st.button("Excluir Lançamento", key="btn_del_fat"):
+                fat_excluir = next((dict(r) for r in rows_fat if int(r.get("id") or 0) == int(del_id)), None)
+                if fat_excluir:
+                    st.warning(
+                        f"Você está prestes a excluir o faturamento #{del_id} de "
+                        f"{fat_excluir.get('cliente') or 'cliente não informado'}, no valor de "
+                        f"{formatar_moeda_br(fat_excluir.get('valor_total'))}."
+                    )
+                confirmar_exclusao_fat = st.checkbox(
+                    "Confirmo que desejo excluir permanentemente este lançamento.",
+                    key=f"fat_confirmar_exclusao_{del_id}",
+                )
+                if st.button("Excluir Lançamento", key="btn_del_fat", disabled=not confirmar_exclusao_fat or not fat_excluir):
                     deletar_registro('faturamento', 'id', del_id)
                     st.toast("Lançamento excluído!")
                     st.rerun()
@@ -1643,6 +1656,7 @@ def renderizar_faturado(ctx: dict) -> None:
             "Total": formatar_moeda_br(fat_row.get("valor_total")),
             "Status": fat_row.get("status") or "Aberto",
             "Vencimento": data_para_br(fat_row.get("vencimento")),
+            "Parcelas": fat_row.get("parcelas") or "Não",
         })
 
     fm1, fm2, fm3 = st.columns(3)
@@ -1670,6 +1684,18 @@ def renderizar_faturado(ctx: dict) -> None:
 
         st.markdown(f"#### Faturamento #{id_faturado} - {fat_emitir.get('cliente') or ''}")
         st.caption(f"CPF/CNPJ: {fat_emitir.get('cnpj') or ''} | Status: {fat_emitir.get('status') or 'Aberto'} | Orçamento: {fat_emitir.get('orc_ref') or '-'}")
+        parcelas_faturado = gerar_parcelas_faturamento(fat_emitir)
+        st.markdown("##### Parcelas do faturamento")
+        st.dataframe([
+            {
+                "Parcela": parcela["rotulo"],
+                "Documento financeiro": parcela["documento"],
+                "Vencimento": parcela["vencimento"],
+                "Valor": formatar_moeda_br(parcela["valor"]),
+                "Forma": parcela["meio"],
+            }
+            for parcela in parcelas_faturado
+        ], width="stretch", hide_index=True)
         competencia_faturado = st.date_input("Competência das notas:", value=date.today(), key=f"faturado_competencia_{id_faturado}")
 
         col_serv, col_prod = st.columns(2)
