@@ -10,6 +10,21 @@ from dsystem_erp.services.precificacao_estoque import calcular_preco_revenda, de
 from dsystem_erp.ui_consulta import tabela_selecionavel_id
 
 
+def sincronizar_selecao_produto_estoque(estado_sessao, produto_id):
+    """Propaga a seleção da grade para movimentação, edição e exclusão."""
+    try:
+        produto_id = int(produto_id)
+    except (TypeError, ValueError):
+        return None
+    if produto_id <= 0:
+        return None
+    estado_sessao["estoque_produto_selecionado"] = produto_id
+    estado_sessao["estoque_produto_movimentacao_id"] = produto_id
+    estado_sessao["estoque_id_edicao"] = produto_id
+    estado_sessao["estoque_id_exclusao"] = produto_id
+    return produto_id
+
+
 def renderizar_estoque(ctx: dict) -> None:
     aplicar_contexto_pagina(ctx, globals())
     st.title("Controle de Estoque e Inventário")
@@ -51,20 +66,34 @@ def renderizar_estoque(ctx: dict) -> None:
             df_estoque = pd.DataFrame(preparar_tabela_estoque(estoque_filtrado))
             id_estoque_selecionado = tabela_selecionavel_id(st, df_estoque.to_dict("records"), "estoque_grade_consulta", "ID")
             if id_estoque_selecionado:
-                st.session_state["estoque_produto_selecionado"] = int(id_estoque_selecionado)
-            st.caption("Clique no produto para abrir automaticamente a consulta/edição na aba Editar / Excluir.")
+                sincronizar_selecao_produto_estoque(st.session_state, id_estoque_selecionado)
+            st.caption("Selecione o produto para carregá-lo na movimentação rápida e na aba Editar / Excluir.")
             st.download_button("Baixar estoque em Excel", data=gerar_excel_tabela(preparar_tabela_estoque(estoque_filtrado), "Relatório de Estoque"), file_name="relatorio_estoque.xls", mime="application/vnd.ms-excel", width="stretch")
 
             st.write("---")
             st.subheader("Entrada e Saída Rápida")
             col_mov1, col_mov2, col_mov3 = st.columns(3)
             
-            lista_prod = [f"{p['id']} - {p.get('codigo_entrada') or p.get('produto')} (Qtd: {p['quantidade']})" for p in estoque_data]
-            prod_sel = col_mov1.selectbox("Selecione o Produto para Movimentar:", lista_prod)
+            produtos_por_id = {int(p["id"]): p for p in estoque_data}
+            ids_produtos = list(produtos_por_id)
+            id_padrao = int(st.session_state.get("estoque_produto_selecionado") or ids_produtos[0])
+            if id_padrao not in produtos_por_id:
+                id_padrao = ids_produtos[0]
+            if st.session_state.get("estoque_produto_movimentacao_id") not in produtos_por_id:
+                st.session_state["estoque_produto_movimentacao_id"] = id_padrao
+            id_sel = col_mov1.selectbox(
+                "Selecione o Produto para Movimentar:",
+                ids_produtos,
+                key="estoque_produto_movimentacao_id",
+                format_func=lambda produto_id: (
+                    f"{produto_id} - "
+                    f"{produtos_por_id[produto_id].get('codigo_entrada') or produtos_por_id[produto_id].get('produto')} "
+                    f"(Qtd: {produtos_por_id[produto_id].get('quantidade') or 0})"
+                ),
+            )
             
-            if prod_sel:
-                id_sel = int(prod_sel.split(" - ")[0])
-                prod_info = next((p for p in estoque_data if p['id'] == id_sel), None)
+            if id_sel:
+                prod_info = produtos_por_id.get(int(id_sel))
                 if prod_info and prod_info.get("foto"):
                     st.image(prod_info.get("foto"), caption=prod_info.get("foto_nome") or prod_info.get("produto"), width=260)
                 
@@ -165,7 +194,17 @@ def renderizar_estoque(ctx: dict) -> None:
             act_est = st.radio("Selecione a Ação:", ["Editar Produto", "Excluir Produto"], horizontal=True)
             
             if act_est == "Excluir Produto":
-                id_del_est = st.number_input("ID do Produto para excluir:", min_value=1, step=1)
+                produtos_por_id_exclusao = {int(p["id"]): p for p in estoque_data}
+                ids_exclusao = list(produtos_por_id_exclusao)
+                if st.session_state.get("estoque_id_exclusao") not in produtos_por_id_exclusao:
+                    st.session_state["estoque_id_exclusao"] = ids_exclusao[0]
+                id_del_est = st.selectbox(
+                    "Produto para excluir:", ids_exclusao, key="estoque_id_exclusao",
+                    format_func=lambda produto_id: (
+                        f"{produto_id} - "
+                        f"{produtos_por_id_exclusao[produto_id].get('codigo_entrada') or produtos_por_id_exclusao[produto_id].get('produto')}"
+                    ),
+                )
                 if st.button("Excluir Produto Permanentemente"):
                     deletar_registro('estoque', 'id', id_del_est)
                     st.success("Produto removido com sucesso.")
@@ -217,8 +256,18 @@ def renderizar_estoque(ctx: dict) -> None:
                             st.rerun()
                     
             elif act_est == "Editar Produto":
-                id_ed_est = st.number_input("ID do Produto para editar:", min_value=1, step=1, value=int(st.session_state.get("estoque_produto_selecionado") or 1), key="estoque_id_edicao")
-                prod_edit = next((p for p in estoque_data if p['id'] == id_ed_est), None)
+                produtos_por_id_edicao = {int(p["id"]): p for p in estoque_data}
+                ids_edicao = list(produtos_por_id_edicao)
+                if st.session_state.get("estoque_id_edicao") not in produtos_por_id_edicao:
+                    st.session_state["estoque_id_edicao"] = ids_edicao[0]
+                id_ed_est = st.selectbox(
+                    "Produto para editar:", ids_edicao, key="estoque_id_edicao",
+                    format_func=lambda produto_id: (
+                        f"{produto_id} - "
+                        f"{produtos_por_id_edicao[produto_id].get('codigo_entrada') or produtos_por_id_edicao[produto_id].get('produto')}"
+                    ),
+                )
+                prod_edit = produtos_por_id_edicao.get(int(id_ed_est))
                 
                 if prod_edit:
                     with st.expander(f"Editando Produto: {prod_edit.get('codigo_entrada') or prod_edit['produto']}", expanded=True):
