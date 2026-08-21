@@ -9,7 +9,7 @@ from dsystem_erp.services.estoque_fiscal import (
 from dsystem_erp.services.precificacao_estoque import calcular_preco_revenda, decimal_valor
 from dsystem_erp.services.estoque_importacao import (
     codigo_localizacao_valido,
-    separar_codigo_localizacao,
+    interpretar_codigo_localizacao,
 )
 from dsystem_erp.ui_consulta import tabela_selecionavel_id
 
@@ -448,10 +448,10 @@ def renderizar_estoque(ctx: dict) -> None:
                     for linha in produtos_excel[:20]
                 )
                 separar_codigo_automaticamente = st.checkbox(
-                    "Separar automaticamente o código em Fileira 1, Fileira 2 e Identificação",
+                    "Interpretar automaticamente o estado, a área e a identificação do código",
                     value=amostra_codigo_valida,
                     key="estoque_separar_codigo_importacao",
-                    help="Exemplo: 02.04.07 será importado como Fileira 1 = 02, Fileira 2 = 04 e Identificação = 07.",
+                    help="Exemplo: 02.04.07 será importado como Usado, Infraestrutura e identificação 07.",
                 )
                 coluna_codigo_composto = None
                 campos_extraidos_codigo = {"codigo", "categoria", "produto", "codigo_entrada"}
@@ -463,8 +463,9 @@ def renderizar_estoque(ctx: dict) -> None:
                         key="estoque_coluna_codigo_composto",
                     )
                     st.info(
-                        f"A coluna {coluna_codigo_composto} será separada automaticamente. "
-                        "Exemplo: 02.04.07 → Fileira 1: 02 | Fileira 2: 04 | Identificação: 07."
+                        f"A coluna {coluna_codigo_composto} será interpretada automaticamente. "
+                        "Primeira parte: 01 Novo ou 02 Usado. Segunda parte: 01 Informática, "
+                        "02 CFTV, 03 Alarme ou 04 Infraestrutura. O restante identifica o item."
                     )
                 cols_mapa = st.columns(3)
                 campos_para_mapear = [
@@ -502,7 +503,7 @@ def renderizar_estoque(ctx: dict) -> None:
                                     for campo, coluna in mapeamento_estoque.items()
                                 }
                                 if separar_codigo_automaticamente:
-                                    codigo, categoria, identificacao = separar_codigo_localizacao(
+                                    codigo, categoria, identificacao = interpretar_codigo_localizacao(
                                         linha.get(coluna_codigo_composto)
                                     )
                                     if not identificacao:
@@ -571,7 +572,7 @@ def renderizar_estoque(ctx: dict) -> None:
                             if codigos_invalidos:
                                 st.warning(
                                     f"{codigos_invalidos} linha(s) foram ignoradas porque o código não tinha "
-                                    "as três partes esperadas, como 02.04.07."
+                                    "um estado, uma área e uma identificação válidos, como 01.01.07 ou 02.04.07."
                                 )
                             st.rerun()
             elif cabecalhos_excel:
