@@ -8,7 +8,7 @@ from dsystem_erp.services.estoque_fiscal import (
 )
 from dsystem_erp.services.precificacao_estoque import preco_revenda_produto
 from dsystem_erp.services.orcamentos import preparar_edicao_orcamento
-from dsystem_erp.ui_consulta import tabela_selecionavel_id
+from dsystem_erp.ui_consulta import tabela_clicavel_id
 
 
 def renderizar_gerador_orcamentos(ctx: dict) -> None:
@@ -576,13 +576,16 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
             mo3.metric("Itens Dsystem", itens_orc_filtrados)
 
             if view_orc:
-                id_orcamento_selecionado = tabela_selecionavel_id(
+                id_orcamento_selecionado = tabela_clicavel_id(
                     st,
                     view_orc,
                     f"orcamentos_grade_consulta_{st.session_state.get('orc_grade_versao', 0)}",
                     "ID",
                 )
-                st.caption("Clique em qualquer informação da linha para abrir diretamente na edição.")
+                st.caption(
+                    "Clique no número, no cliente ou em qualquer outra informação do orçamento "
+                    "para abrir diretamente na edição."
+                )
                 if id_orcamento_selecionado and tem_permissao("orcamentos.edit"):
                     orc_selecionado = next(
                         (dict(o) for o in df_orc if int(o.get("orc_id") or 0) == int(id_orcamento_selecionado)),
@@ -617,7 +620,6 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
         if df_orc:
             st.write("---")
             opcoes_acao_orc = [
-                "Visualizar/Editar Orçamento",
                 "Renegociar orçamento vencido",
                 "Enviar por e-mail ou WhatsApp",
                 "Lançar orçamento aprovado no faturamento",
@@ -632,16 +634,6 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                     deletar_registro('orcamentos', 'orc_id', idd)
                     st.success("Excluído com sucesso.")
                     st.rerun()
-            elif act_orc == "Visualizar/Editar Orçamento":
-                idd = st.number_input("ID do Orçamento para Carregar:", min_value=1, step=1, key="edit_orc_id")
-                st.caption("Para gerar PDF com o layout correto, carregue o orçamento na edição e use os botões PDF Dsystem, PDF LC Printer ou PDF GT.")
-                if st.button("Carregar na Tela de Edição", key="btn_edit_orc"):
-                    orc_load = next((dict(o) for o in df_orc if o['orc_id'] == idd), None)
-                    if orc_load:
-                        carregar_orcamento_na_edicao(orc_load)
-                        st.rerun()
-                    else:
-                        st.error("ID não encontrado.")
             elif act_orc == "Renegociar orçamento vencido":
                 id_reneg = st.number_input("ID do orçamento para renegociar:", min_value=1, step=1, key="reneg_orc_id")
                 orc_reneg = next((dict(o) for o in df_orc if int(o['orc_id']) == int(id_reneg)), None)
