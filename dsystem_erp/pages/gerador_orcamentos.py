@@ -7,20 +7,33 @@ from dsystem_erp.services.estoque_fiscal import (
     tipo_fiscal_produto_estoque,
 )
 from dsystem_erp.services.precificacao_estoque import preco_revenda_produto
+from dsystem_erp.services.orcamentos import preparar_edicao_orcamento
+from dsystem_erp.ui_consulta import tabela_selecionavel_id
 
 
 def renderizar_gerador_orcamentos(ctx: dict) -> None:
     aplicar_contexto_pagina(ctx, globals())
     st.title("Gerador de Orçamentos")
-    aba1, aba2 = st.tabs(["Gerar/Editar Orçamento", "Histórico de Orçamentos"])
 
     if 'orc_em_edicao' not in st.session_state:
         st.session_state['orc_em_edicao'] = None
     if "orc_form_reset" not in st.session_state:
         st.session_state["orc_form_reset"] = 0
+    aba_padrao_orc = st.session_state.pop("orc_aba_destino", "Gerar/Editar Orçamento")
+    aba1, aba2 = st.tabs(
+        ["Gerar/Editar Orçamento", "Histórico de Orçamentos"],
+        default=aba_padrao_orc,
+    )
 
     def resetar_formulario_orcamento():
         st.session_state["orc_form_reset"] = st.session_state.get("orc_form_reset", 0) + 1
+
+    def carregar_orcamento_na_edicao(orcamento):
+        carregado = preparar_edicao_orcamento(dict(orcamento))
+        st.session_state['orc_em_edicao'] = carregado
+        st.session_state["orc_grade_versao"] = st.session_state.get("orc_grade_versao", 0) + 1
+        st.session_state["orc_aba_destino"] = "Gerar/Editar Orçamento"
+        resetar_formulario_orcamento()
 
     with aba1:
         edicao = st.session_state['orc_em_edicao']
@@ -29,6 +42,11 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
         
         if edicao:
             st.warning(f"MODO DE EDIÇÃO: Você está alterando o Orçamento Nº {edicao['numero']}")
+            if edicao.get("_renovado_na_edicao"):
+                st.info(
+                    "Este orçamento estava vencido. Ao salvar, a data será renovada para hoje, "
+                    "a validade será prorrogada por 10 dias e o status ficará Aberto."
+                )
             if st.button("Cancelar Edição e Limpar Tela", key="btn_canc_ed"):
                 st.session_state['orc_em_edicao'] = None
                 resetar_formulario_orcamento()
@@ -216,7 +234,10 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
 
         if bp or bpa or bimp or bpdf_ds or bpdf_nc or bpdf_gt:
             if vt > 0 and nm:
-                dtc = date.today().strftime("%d/%m/%Y")
+                dtc = (
+                    data_para_br(edicao.get("data_orc"))
+                    if edicao else date.today().strftime("%d/%m/%Y")
+                ) or date.today().strftime("%d/%m/%Y")
                 dtv = data_validade.strftime("%d/%m/%Y")
                 cfmt = f" - {comp}" if comp else ""
                 cepfmt = f" - CEP: {cep}" if cep else ""
@@ -229,7 +250,12 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                     conn = conectar_banco()
                     c = conn.cursor()
                     if edicao:
-                        c.execute('''UPDATE orcamentos SET numero=?, cliente=?, cpf_cnpj=?, valor_total=?, forma_pagamento=?, obs_pag=?, obs_geral=?, itens=?, status=?, data_validade=?, alterado_em=?, alterado_por=? WHERE orc_id=?''', (n_orc, nm, cnj, formata_moeda(vt), f_pag, o_pag, o_ger, json_itens, status_orcamento, dtv, agora_br(), st.session_state.get("username", ""), edicao['orc_id']))
+                        status_salvar = (
+                            "Aberto"
+                            if edicao.get("_renovado_na_edicao") and status_orcamento == "Vencido"
+                            else status_orcamento
+                        )
+                        c.execute('''UPDATE orcamentos SET numero=?, data_orc=?, cliente=?, cpf_cnpj=?, valor_total=?, forma_pagamento=?, obs_pag=?, obs_geral=?, itens=?, status=?, data_validade=?, alterado_em=?, alterado_por=? WHERE orc_id=?''', (n_orc, dtc, nm, cnj, formata_moeda(vt), f_pag, o_pag, o_ger, json_itens, status_salvar, dtv, agora_br(), st.session_state.get("username", ""), edicao['orc_id']))
                         orc_id_salvo = edicao['orc_id']
                         st.success("Orçamento atualizado com sucesso!")
                     else:
@@ -550,7 +576,21 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
             mo3.metric("Itens Dsystem", itens_orc_filtrados)
 
             if view_orc:
-                st.dataframe(view_orc, width="stretch", hide_index=True)
+                id_orcamento_selecionado = tabela_selecionavel_id(
+                    st,
+                    view_orc,
+                    f"orcamentos_grade_consulta_{st.session_state.get('orc_grade_versao', 0)}",
+                    "ID",
+                )
+                st.caption("Clique em qualquer informação da linha para abrir diretamente na edição.")
+                if id_orcamento_selecionado and tem_permissao("orcamentos.edit"):
+                    orc_selecionado = next(
+                        (dict(o) for o in df_orc if int(o.get("orc_id") or 0) == int(id_orcamento_selecionado)),
+                        None,
+                    )
+                    if orc_selecionado:
+                        carregar_orcamento_na_edicao(orc_selecionado)
+                        st.rerun()
             else:
                 st.info("Nenhum orçamento encontrado com os filtros selecionados.")
 
@@ -598,8 +638,7 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                 if st.button("Carregar na Tela de Edição", key="btn_edit_orc"):
                     orc_load = next((dict(o) for o in df_orc if o['orc_id'] == idd), None)
                     if orc_load:
-                        st.session_state['orc_em_edicao'] = orc_load
-                        resetar_formulario_orcamento()
+                        carregar_orcamento_na_edicao(orc_load)
                         st.rerun()
                     else:
                         st.error("ID não encontrado.")

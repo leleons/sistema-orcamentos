@@ -31,6 +31,19 @@ def orcamento_esta_vencido(orcamento: dict, hoje: date | None = None, dias: int 
     return bool(validade and (hoje or date.today()) > validade)
 
 
+def preparar_edicao_orcamento(orcamento: dict, hoje: date | None = None, dias: int = 10) -> dict:
+    """Renova datas e reabre um orçamento vencido quando ele entra em edição."""
+    preparado = dict(orcamento or {})
+    data_atual = hoje or date.today()
+    status_vencido = str(preparado.get("status") or "").strip().casefold() == "vencido"
+    if status_vencido or orcamento_esta_vencido(preparado, hoje=data_atual, dias=dias):
+        preparado["data_orc"] = data_atual.strftime("%d/%m/%Y")
+        preparado["data_validade"] = (data_atual + timedelta(days=int(dias))).strftime("%d/%m/%Y")
+        preparado["status"] = "Aberto"
+        preparado["_renovado_na_edicao"] = True
+    return preparado
+
+
 def numero_renegociacao(numero, versao: int) -> str:
     base = str(numero or "").split("-R", 1)[0]
     return f"{base}-R{max(2, int(versao or 1) + 1)}"

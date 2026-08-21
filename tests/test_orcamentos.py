@@ -5,6 +5,7 @@ from dsystem_erp.services.orcamentos import (
     aplicar_encargos_renegociacao,
     numero_renegociacao,
     orcamento_esta_vencido,
+    preparar_edicao_orcamento,
     total_geral_orcamento,
     total_item_orcamento,
 )
@@ -24,6 +25,20 @@ class OrcamentosTests(unittest.TestCase):
     def test_numero_renegociacao(self):
         self.assertEqual(numero_renegociacao("441", 1), "441-R2")
         self.assertEqual(numero_renegociacao("441-R2", 2), "441-R3")
+
+    def test_edicao_renova_orcamento_vencido(self):
+        renovado = preparar_edicao_orcamento(
+            {"orc_id": 18, "data_orc": "07/08/2026", "data_validade": "17/08/2026", "status": "Vencido"},
+            hoje=date(2026, 8, 21),
+        )
+        self.assertEqual(renovado["data_orc"], "21/08/2026")
+        self.assertEqual(renovado["data_validade"], "31/08/2026")
+        self.assertEqual(renovado["status"], "Aberto")
+        self.assertTrue(renovado["_renovado_na_edicao"])
+
+    def test_edicao_preserva_orcamento_ativo(self):
+        original = {"data_orc": "20/08/2026", "data_validade": "30/08/2026", "status": "Aberto"}
+        self.assertEqual(preparar_edicao_orcamento(original, hoje=date(2026, 8, 21)), original)
 
     def test_encargos_opcionais(self):
         itens = aplicar_encargos_renegociacao([{"d": "Item", "v": 100, "q": 2}], 10, 25)
