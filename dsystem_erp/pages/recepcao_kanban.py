@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.migrations import garantir_coluna
 from dsystem_erp.services.recepcao_kanban import (
     CORES_KANBAN_OS,
     STATUS_KANBAN_OS,
@@ -75,6 +76,10 @@ def renderizar_recepcao_kanban(ctx: dict) -> None:
     if not tem_permissao("recepcao.view"):
         st.error("Você não tem permissão para acessar a recepção.")
         st.stop()
+
+    if not st.session_state.get("kanban_estrutura_verificada"):
+        _garantir_estrutura_kanban()
+        st.session_state["kanban_estrutura_verificada"] = True
 
     st.title("Recepção de Equipamentos — Kanban")
     st.caption("Todo equipamento deste quadro está obrigatoriamente vinculado a uma Ordem de Serviço.")
@@ -190,3 +195,18 @@ def _salvar_alteracoes_quadro(alteracoes: list[dict]) -> None:
                 "",
                 {"de": alteracao["status_anterior"], "para": alteracao["status"]},
             )
+
+
+def _garantir_estrutura_kanban() -> None:
+    """Aplica a evolução mínima mesmo quando o Streamlit ainda está aberto."""
+    conn = conectar_banco()
+    c = conn.cursor()
+    try:
+        alterou = garantir_coluna(c, "equipamentos_os", "kanban_ordem", "INTEGER DEFAULT 0")
+        if alterou:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
