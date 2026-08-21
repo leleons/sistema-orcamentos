@@ -7,6 +7,10 @@ from dsystem_erp.services.estoque_fiscal import (
     normalizar_situacao_compra,
 )
 from dsystem_erp.services.precificacao_estoque import calcular_preco_revenda, decimal_valor
+from dsystem_erp.services.estoque_importacao import (
+    codigo_localizacao_valido,
+    separar_codigo_localizacao,
+)
 from dsystem_erp.ui_consulta import tabela_selecionavel_id
 
 
@@ -436,8 +440,39 @@ def renderizar_estoque(ctx: dict) -> None:
                 st.write("**Relacionar colunas da planilha com o formato do estoque:**")
                 opcoes_colunas = ["-- Não importar --"] + cabecalhos_excel
                 mapeamento_estoque = {}
+                coluna_codigo_sugerida = sugerir_coluna_estoque("codigo_entrada", cabecalhos_excel)
+                if coluna_codigo_sugerida == "-- Não importar --":
+                    coluna_codigo_sugerida = cabecalhos_excel[0]
+                amostra_codigo_valida = any(
+                    codigo_localizacao_valido(linha.get(coluna_codigo_sugerida))
+                    for linha in produtos_excel[:20]
+                )
+                separar_codigo_automaticamente = st.checkbox(
+                    "Separar automaticamente o código em Fileira 1, Fileira 2 e Identificação",
+                    value=amostra_codigo_valida,
+                    key="estoque_separar_codigo_importacao",
+                    help="Exemplo: 02.04.07 será importado como Fileira 1 = 02, Fileira 2 = 04 e Identificação = 07.",
+                )
+                coluna_codigo_composto = None
+                campos_extraidos_codigo = {"codigo", "categoria", "produto", "codigo_entrada"}
+                if separar_codigo_automaticamente:
+                    coluna_codigo_composto = st.selectbox(
+                        "Coluna do código no formato 02.04.07:",
+                        cabecalhos_excel,
+                        index=cabecalhos_excel.index(coluna_codigo_sugerida),
+                        key="estoque_coluna_codigo_composto",
+                    )
+                    st.info(
+                        f"A coluna {coluna_codigo_composto} será separada automaticamente. "
+                        "Exemplo: 02.04.07 → Fileira 1: 02 | Fileira 2: 04 | Identificação: 07."
+                    )
                 cols_mapa = st.columns(3)
-                for idx, (campo, rotulo) in enumerate(COLUNAS_ESTOQUE_IMPORTACAO.items()):
+                campos_para_mapear = [
+                    (campo, rotulo)
+                    for campo, rotulo in COLUNAS_ESTOQUE_IMPORTACAO.items()
+                    if not separar_codigo_automaticamente or campo not in campos_extraidos_codigo
+                ]
+                for idx, (campo, rotulo) in enumerate(campos_para_mapear):
                     sugestao = sugerir_coluna_estoque(campo, cabecalhos_excel)
                     indice_sugestao = opcoes_colunas.index(sugestao) if sugestao in opcoes_colunas else 0
                     mapeamento_estoque[campo] = cols_mapa[idx % 3].selectbox(
@@ -452,12 +487,13 @@ def renderizar_estoque(ctx: dict) -> None:
                 )
 
                 if st.button("Importar produtos para o banco", type="primary", width="stretch", key="btn_importar_estoque_excel"):
-                    if mapeamento_estoque["produto"] == "-- Não importar --" and mapeamento_estoque["nome_generico"] == "-- Não importar --":
+                    produto_mapeado = mapeamento_estoque.get("produto", "-- Não importar --")
+                    if not separar_codigo_automaticamente and produto_mapeado == "-- Não importar --" and mapeamento_estoque["nome_generico"] == "-- Não importar --":
                         st.error("Relacione pelo menos Produto / Identificação ou Nome genérico.")
                     else:
                         conn_imp = conectar_banco()
                         cimp = conn_imp.cursor()
-                        importados, atualizados, ignorados = 0, 0, 0
+                        importados, atualizados, ignorados, codigos_invalidos = 0, 0, 0, 0
                         erro_importacao = None
                         try:
                             for linha in produtos_excel:
@@ -465,6 +501,20 @@ def renderizar_estoque(ctx: dict) -> None:
                                     campo: linha.get(coluna) if coluna != "-- Não importar --" else ""
                                     for campo, coluna in mapeamento_estoque.items()
                                 }
+                                if separar_codigo_automaticamente:
+                                    codigo, categoria, identificacao = separar_codigo_localizacao(
+                                        linha.get(coluna_codigo_composto)
+                                    )
+                                    if not identificacao:
+                                        ignorados += 1
+                                        codigos_invalidos += 1
+                                        continue
+                                    dados_produto.update({
+                                        "codigo": codigo,
+                                        "categoria": categoria,
+                                        "produto": identificacao,
+                                        "codigo_entrada": montar_codigo_entrada(codigo, categoria, identificacao),
+                                    })
                                 nome_generico = texto_importacao(dados_produto["nome_generico"])
                                 produto = texto_importacao(dados_produto["produto"]) or nome_generico
                                 if not produto:
@@ -518,6 +568,11 @@ def renderizar_estoque(ctx: dict) -> None:
                             st.error(f"A importação foi cancelada sem alterar o banco: {erro_importacao}")
                         else:
                             st.success(f"Importação concluída: {importados} novos, {atualizados} atualizados e {ignorados} ignorados.")
+                            if codigos_invalidos:
+                                st.warning(
+                                    f"{codigos_invalidos} linha(s) foram ignoradas porque o código não tinha "
+                                    "as três partes esperadas, como 02.04.07."
+                                )
                             st.rerun()
             elif cabecalhos_excel:
                 st.warning("A planilha não possui produtos abaixo do cabeçalho.")
