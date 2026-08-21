@@ -29,7 +29,7 @@ ARVORE_PERMISSOES = [
             {"titulo": "A faturar", "acoes": [("faturamento.view", "Acessar"), ("faturamento.edit", "Editar"), ("faturamento.delete", "Excluir")], "legacy": {"faturamento.view": "perm_faturamento"}},
             {"titulo": "Faturado", "acoes": [("faturamento.faturado", "Acessar"), ("faturamento.faturado.edit", "Emitir/atualizar nota")]},
             {"titulo": "Cobranças Recorrentes", "acoes": [("faturamento.cobrancas", "Acessar"), ("faturamento.cobrancas.edit", "Editar"), ("faturamento.cobrancas.delete", "Excluir")]},
-            {"titulo": "Gerador de Orçamentos", "acoes": [("orcamentos.view", "Acessar"), ("orcamentos.edit", "Editar/aprovar"), ("orcamentos.delete", "Excluir")], "legacy": {"orcamentos.view": "perm_orcamentos", "orcamentos.delete": "perm_del_orc"}},
+            {"titulo": "Gerador de Orçamentos", "acoes": [("orcamentos.view", "Acessar"), ("orcamentos.edit", "Editar/aprovar"), ("orcamentos.delete", "Excluir")], "legacy": {"orcamentos.view": "perm_orcamentos", "orcamentos.edit": "perm_orcamentos", "orcamentos.delete": "perm_del_orc"}},
         ],
     },
     {

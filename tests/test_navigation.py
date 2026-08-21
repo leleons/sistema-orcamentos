@@ -8,6 +8,7 @@ class NavigationTests(unittest.TestCase):
         self.assertIn("clientes.view", TODAS_PERMISSOES)
         self.assertIn("faturamento.view", TODAS_PERMISSOES)
         self.assertEqual(LEGACY_PERMISSOES["clientes.view"], "perm_clientes")
+        self.assertEqual(LEGACY_PERMISSOES["orcamentos.edit"], "perm_orcamentos")
 
     def test_navegacao_tem_paginas_base(self):
         paginas = {

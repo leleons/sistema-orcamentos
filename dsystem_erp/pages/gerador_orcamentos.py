@@ -586,14 +586,17 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                     "Clique no número, no cliente ou em qualquer outra informação do orçamento "
                     "para abrir diretamente na edição."
                 )
-                if id_orcamento_selecionado and tem_permissao("orcamentos.edit"):
-                    orc_selecionado = next(
-                        (dict(o) for o in df_orc if int(o.get("orc_id") or 0) == int(id_orcamento_selecionado)),
-                        None,
-                    )
-                    if orc_selecionado:
-                        carregar_orcamento_na_edicao(orc_selecionado)
-                        st.rerun()
+                if id_orcamento_selecionado:
+                    if tem_permissao("orcamentos.edit"):
+                        orc_selecionado = next(
+                            (dict(o) for o in df_orc if int(o.get("orc_id") or 0) == int(id_orcamento_selecionado)),
+                            None,
+                        )
+                        if orc_selecionado:
+                            carregar_orcamento_na_edicao(orc_selecionado)
+                            st.rerun()
+                    else:
+                        st.warning("Seu usuário pode consultar orçamentos, mas não possui permissão para editá-los.")
             else:
                 st.info("Nenhum orçamento encontrado com os filtros selecionados.")
 

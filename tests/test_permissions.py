@@ -31,6 +31,12 @@ class PermissionsTests(unittest.TestCase):
         self.assertTrue(usuario_tem_alguma_permissao("infra", usuario))
         self.assertEqual(flags_legadas(permissoes)["perm_clientes"], 1)
 
+    def test_usuario_legado_de_orcamentos_pode_abrir_para_edicao(self):
+        usuario = {"perm_orcamentos": 1}
+
+        self.assertTrue(usuario_tem_permissao("orcamentos.view", usuario))
+        self.assertTrue(usuario_tem_permissao("orcamentos.edit", usuario))
+
 
 if __name__ == "__main__":
     unittest.main()
