@@ -11,6 +11,86 @@ STATUS_KANBAN_OS = (
     "Em execução", "Aguardando peça", "Pronto", "Entregue",
 )
 
+CORES_KANBAN_OS = {
+    "Recebido": "#3b82f6",
+    "Triagem / Diagnóstico": "#8b5cf6",
+    "Aguardando aprovação": "#f59e0b",
+    "Em execução": "#06b6d4",
+    "Aguardando peça": "#f97316",
+    "Pronto": "#22c55e",
+    "Entregue": "#64748b",
+}
+
+
+def texto_cartao_equipamento(item: dict) -> str:
+    """Monta um cartão legível e com identificador único para o quadro."""
+    equipamento_id = int(item.get("id") or 0)
+    os_id = int(item.get("os_id") or 0)
+    numero_item = str(item.get("numero_item") or f"ITEM-{equipamento_id}")
+    cliente = str(item.get("cliente") or "Cliente não informado").strip()
+    equipamento = " · ".join(
+        parte for parte in (
+            str(item.get("tipo_equipamento") or "").strip(),
+            str(item.get("equipamento") or "").strip(),
+        )
+        if parte
+    ) or "Equipamento não informado"
+    serie = str(item.get("numero_serie") or "").strip()
+    complemento = f" · Série {serie}" if serie else ""
+    return f"OS #{os_id:05d} · {numero_item}\n{cliente}\n{equipamento}{complemento}\nEQ-{equipamento_id}"
+
+
+def montar_quadro_equipamentos(equipamentos: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """Converte os equipamentos do banco para as colunas do componente."""
+    por_status = {status: [] for status in STATUS_KANBAN_OS}
+    cartao_para_id = {}
+    ordenados = sorted(
+        (dict(item) for item in equipamentos),
+        key=lambda item: (int(item.get("kanban_ordem") or 0), -int(item.get("id") or 0)),
+    )
+    for item in ordenados:
+        status = item.get("kanban_status") or STATUS_KANBAN_OS[0]
+        if status not in por_status:
+            status = STATUS_KANBAN_OS[0]
+        texto = texto_cartao_equipamento(item)
+        por_status[status].append(texto)
+        cartao_para_id[texto] = int(item.get("id") or 0)
+    return (
+        [{"header": status, "items": por_status[status]} for status in STATUS_KANBAN_OS],
+        cartao_para_id,
+    )
+
+
+def alteracoes_do_quadro(
+    quadro_resultado: list[dict] | None,
+    equipamentos: list[dict],
+    cartao_para_id: dict[str, int],
+) -> list[dict]:
+    """Calcula somente mudanças válidas de coluna ou ordem feitas no quadro."""
+    atuais = {int(item.get("id") or 0): dict(item) for item in equipamentos}
+    alteracoes = []
+    ids_processados = set()
+    for coluna in quadro_resultado or []:
+        status = coluna.get("header")
+        if status not in STATUS_KANBAN_OS:
+            continue
+        for ordem, cartao in enumerate(coluna.get("items") or []):
+            equipamento_id = cartao_para_id.get(cartao)
+            if not equipamento_id or equipamento_id in ids_processados or equipamento_id not in atuais:
+                continue
+            ids_processados.add(equipamento_id)
+            item = atuais[equipamento_id]
+            status_anterior = item.get("kanban_status") or STATUS_KANBAN_OS[0]
+            ordem_anterior = int(item.get("kanban_ordem") or 0)
+            if status != status_anterior or ordem != ordem_anterior:
+                alteracoes.append({
+                    "id": equipamento_id,
+                    "status": status,
+                    "ordem": ordem,
+                    "status_anterior": status_anterior,
+                })
+    return alteracoes
+
 
 def proximo_status(status: str, direcao: int = 1) -> str:
     atual = status if status in STATUS_KANBAN_OS else STATUS_KANBAN_OS[0]

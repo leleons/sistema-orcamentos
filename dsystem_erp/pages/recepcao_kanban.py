@@ -1,7 +1,73 @@
 from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
-from dsystem_erp.services.recepcao_kanban import STATUS_KANBAN_OS, gerar_etiqueta_equipamento, proximo_status
+from dsystem_erp.services.recepcao_kanban import (
+    CORES_KANBAN_OS,
+    STATUS_KANBAN_OS,
+    alteracoes_do_quadro,
+    gerar_etiqueta_equipamento,
+    montar_quadro_equipamentos,
+)
+
+try:
+    from streamlit_sortables import sort_items
+except ImportError:  # O deploy instala a versão fixada em requirements.txt.
+    sort_items = None
+
+
+ESTILO_KANBAN = """
+.sortable-component {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding: 8px 4px 18px;
+  background: transparent;
+}
+.sortable-container {
+  min-width: 270px;
+  width: 270px;
+  background: #111827;
+  border: 1px solid #293548;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0,0,0,.18);
+}
+.sortable-container-header {
+  padding: 13px 14px;
+  background: #172033;
+  color: #f8fafc;
+  border-bottom: 1px solid #293548;
+  font-size: 13px;
+  font-weight: 800;
+}
+.sortable-container-body {
+  min-height: 150px;
+  padding: 9px;
+  background: #0d1421;
+}
+.sortable-item, .sortable-item:hover {
+  margin: 8px 0;
+  padding: 12px 13px;
+  border: 1px solid #2b3b52;
+  border-left: 4px solid #1683ff;
+  border-radius: 10px;
+  background: #172033;
+  color: #e5edf8;
+  box-shadow: 0 3px 12px rgba(0,0,0,.2);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-line;
+  cursor: grab;
+}
+.sortable-item:hover {
+  border-color: #1683ff;
+  transform: translateY(-1px);
+}
+"""
+ESTILO_KANBAN += "\n".join(
+    f".sortable-container:nth-child({indice}) {{ border-top: 3px solid {CORES_KANBAN_OS[status]}; }}"
+    for indice, status in enumerate(STATUS_KANBAN_OS, start=1)
+)
 
 
 def renderizar_recepcao_kanban(ctx: dict) -> None:
@@ -36,40 +102,91 @@ def renderizar_recepcao_kanban(ctx: dict) -> None:
     if apenas_meus:
         usuario = (st.session_state.get("funcionario_nome") or st.session_state.get("username") or "").casefold()
         equipamentos = [item for item in equipamentos if usuario in f"{item.get('atendente')} {item.get('tecnico_extra')}".casefold()]
+    if not equipamentos:
+        st.info("Nenhum equipamento corresponde aos filtros selecionados.")
+        return
 
-    totais = {status: sum(1 for item in equipamentos if (item.get("kanban_status") or "Recebido") == status) for status in STATUS_KANBAN_OS}
-    st.write(" | ".join(f"**{status}:** {totais[status]}" for status in STATUS_KANBAN_OS))
+    totais = {
+        status: sum(1 for item in equipamentos if (item.get("kanban_status") or "Recebido") == status)
+        for status in STATUS_KANBAN_OS
+    }
+    metricas = st.columns(len(STATUS_KANBAN_OS))
+    for coluna, status in zip(metricas, STATUS_KANBAN_OS):
+        coluna.metric(status, totais[status])
 
-    for inicio in (0, 4):
-        grupo = STATUS_KANBAN_OS[inicio:inicio + 4]
-        colunas = st.columns(len(grupo))
-        for coluna, status in zip(colunas, grupo):
-            with coluna:
-                st.markdown(f"### {status} ({totais[status]})")
+    quadro, cartao_para_id = montar_quadro_equipamentos(equipamentos)
+    if sort_items is None:
+        st.error("O componente do Kanban não está instalado. Execute: pip install -r requirements.txt")
+    elif tem_permissao("recepcao.edit"):
+        st.caption("Arraste um cartão para mudar a etapa. A alteração é salva automaticamente no banco.")
+        resultado = sort_items(
+            quadro,
+            multi_containers=True,
+            direction="horizontal",
+            custom_style=ESTILO_KANBAN,
+            key=f"recepcao_kanban_{st.session_state.get('kanban_versao', 0)}",
+        )
+        alteracoes = alteracoes_do_quadro(resultado, equipamentos, cartao_para_id)
+        if alteracoes:
+            _salvar_alteracoes_quadro(alteracoes)
+            st.session_state["kanban_versao"] = st.session_state.get("kanban_versao", 0) + 1
+            st.toast(f"{len(alteracoes)} alteração(ões) salva(s) no Kanban.", icon="✅")
+            st.rerun()
+    else:
+        st.info("Seu usuário pode consultar o quadro, mas não possui permissão para mover equipamentos.")
+        for status in STATUS_KANBAN_OS:
+            with st.expander(f"{status} ({totais[status]})", expanded=status == "Recebido"):
                 for item in [x for x in equipamentos if (x.get("kanban_status") or "Recebido") == status]:
-                    with st.container(border=True):
-                        st.markdown(f"**OS #{int(item.get('os_id') or 0):05d} · {item.get('numero_item')}**")
-                        st.write(item.get("cliente") or "Cliente não informado")
-                        st.caption(f"{item.get('tipo_equipamento') or ''} — {item.get('equipamento') or ''}")
-                        if item.get("numero_serie"):
-                            st.caption(f"Série/patrimônio: {item.get('numero_serie')}")
-                        if item.get("chamado_id"):
-                            st.caption(f"Chamado vinculado: #{item.get('chamado_id')}")
-                        st.download_button(
-                            "Imprimir etiqueta", data=gerar_etiqueta_equipamento(item, APP_BASE_URL),
-                            file_name=f"etiqueta_{item.get('numero_item')}.pdf", mime="application/pdf",
-                            width="stretch", key=f"kanban_etiqueta_{item['id']}",
-                        )
-                        if tem_permissao("recepcao.edit"):
-                            a1, a2 = st.columns(2)
-                            if a1.button("←", disabled=status == STATUS_KANBAN_OS[0], key=f"kanban_ant_{item['id']}", help="Voltar etapa"):
-                                _mover(item["id"], proximo_status(status, -1)); st.rerun()
-                            if a2.button("→", disabled=status == STATUS_KANBAN_OS[-1], key=f"kanban_prox_{item['id']}", help="Avançar etapa"):
-                                _mover(item["id"], proximo_status(status, 1)); st.rerun()
+                    st.write(f"OS #{int(item.get('os_id') or 0):05d} · {item.get('numero_item')} — {item.get('cliente') or 'Cliente'}")
+
+    st.divider()
+    st.subheader("Detalhes e impressão de etiqueta")
+    equipamentos_por_rotulo = {
+        f"OS #{int(item.get('os_id') or 0):05d} · {item.get('numero_item')} · {item.get('cliente') or 'Cliente'}": item
+        for item in equipamentos
+    }
+    rotulo_selecionado = st.selectbox("Selecionar equipamento:", list(equipamentos_por_rotulo))
+    item_selecionado = equipamentos_por_rotulo[rotulo_selecionado]
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Etapa atual", item_selecionado.get("kanban_status") or "Recebido")
+    d2.write(f"**Equipamento:** {item_selecionado.get('equipamento') or 'Não informado'}")
+    d3.write(f"**Série/patrimônio:** {item_selecionado.get('numero_serie') or 'Não informado'}")
+    d4.write(f"**Técnico:** {item_selecionado.get('atendente') or item_selecionado.get('tecnico_extra') or 'Não definido'}")
+    st.download_button(
+        "Imprimir etiqueta com código de barras e QR Code",
+        data=gerar_etiqueta_equipamento(item_selecionado, APP_BASE_URL),
+        file_name=f"etiqueta_{item_selecionado.get('numero_item')}.pdf",
+        mime="application/pdf",
+        width="stretch",
+        key=f"kanban_etiqueta_{item_selecionado['id']}",
+    )
 
 
-def _mover(equipamento_id: int, novo_status: str) -> None:
-    conn = conectar_banco(); c = conn.cursor()
-    c.execute("UPDATE equipamentos_os SET kanban_status=?, kanban_alterado_por=?, kanban_alterado_em=? WHERE id=?",
-              (novo_status, st.session_state.get("username", ""), agora_br(), equipamento_id))
-    conn.commit(); conn.close()
+def _salvar_alteracoes_quadro(alteracoes: list[dict]) -> None:
+    usuario = st.session_state.get("username", "")
+    momento = agora_br()
+    conn = conectar_banco()
+    c = conn.cursor()
+    try:
+        for alteracao in alteracoes:
+            c.execute(
+                """UPDATE equipamentos_os
+                   SET kanban_status=?, kanban_ordem=?, kanban_alterado_por=?, kanban_alterado_em=?
+                   WHERE id=?""",
+                (alteracao["status"], alteracao["ordem"], usuario, momento, alteracao["id"]),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    for alteracao in alteracoes:
+        if alteracao["status"] != alteracao["status_anterior"]:
+            registrar_evento_sistema(
+                "Movimentação Kanban",
+                "equipamentos_os",
+                alteracao["id"],
+                "",
+                {"de": alteracao["status_anterior"], "para": alteracao["status"]},
+            )

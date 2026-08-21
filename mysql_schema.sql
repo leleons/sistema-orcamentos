@@ -740,7 +740,8 @@ CREATE TABLE IF NOT EXISTS equipamentos_os (
   kanban_status VARCHAR(60) DEFAULT 'Recebido',
   etiqueta_codigo VARCHAR(80),
   kanban_alterado_por VARCHAR(255),
-  kanban_alterado_em VARCHAR(30)
+  kanban_alterado_em VARCHAR(30),
+  kanban_ordem INT DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS funcionarios (

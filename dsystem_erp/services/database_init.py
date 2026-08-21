@@ -357,7 +357,7 @@ def iniciar_banco(conectar_banco):
         except Exception: pass
     for coluna_eq_kanban, tipo_eq_kanban in (
         ("kanban_status", "VARCHAR(60) DEFAULT 'Recebido'"), ("etiqueta_codigo", "VARCHAR(80)"),
-        ("kanban_alterado_por", "TEXT"), ("kanban_alterado_em", "TEXT"),
+        ("kanban_alterado_por", "TEXT"), ("kanban_alterado_em", "TEXT"), ("kanban_ordem", "INTEGER DEFAULT 0"),
     ):
         try: garantir_coluna(c, "equipamentos_os", coluna_eq_kanban, tipo_eq_kanban)
         except Exception: pass
