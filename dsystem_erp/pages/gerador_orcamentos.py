@@ -19,10 +19,16 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
         st.session_state['orc_em_edicao'] = None
     if "orc_form_reset" not in st.session_state:
         st.session_state["orc_form_reset"] = 0
-    aba_padrao_orc = st.session_state.pop("orc_aba_destino", "Gerar/Editar Orçamento")
+    nomes_abas_orcamento = ["Gerar/Editar Orçamento", "Histórico de Orçamentos"]
+    aba_destino_orcamento = st.session_state.pop("orc_aba_destino", None)
+    if aba_destino_orcamento in nomes_abas_orcamento:
+        # A aba possui estado próprio. Atualizá-lo antes de criar o componente
+        # permite trocar do histórico para a edição no mesmo clique da grade.
+        st.session_state["orc_aba_ativa"] = aba_destino_orcamento
     aba1, aba2 = st.tabs(
-        ["Gerar/Editar Orçamento", "Histórico de Orçamentos"],
-        default=aba_padrao_orc,
+        nomes_abas_orcamento,
+        key="orc_aba_ativa",
+        on_change="rerun",
     )
 
     def resetar_formulario_orcamento():
