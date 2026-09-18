@@ -1,6 +1,11 @@
 import unittest
 
-from dsystem_erp.repositories.estoque import listar_alertas_estoque_minimo, listar_estoque
+from dsystem_erp.repositories.estoque import (
+    buscar_foto_estoque,
+    listar_alertas_emprestimos_atrasados,
+    listar_alertas_estoque_minimo,
+    listar_estoque,
+)
 from dsystem_erp.repositories.financeiro import listar_recorrencias
 
 
@@ -16,6 +21,9 @@ class FakeCursor:
 
     def fetchall(self):
         return self.rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
 
 
 class FakeConnection:
@@ -35,13 +43,25 @@ class RepositoryTests(unittest.TestCase):
         conn = FakeConnection(rows)
         return lambda: conn, conn
 
-    def test_listar_estoque_orders_by_product(self):
+    def test_listar_estoque_orders_by_newest_id(self):
         factory, conn = self.make_factory([{"id": 1, "produto": "Mouse"}])
 
         rows = listar_estoque(factory)
 
         self.assertEqual(rows, [{"id": 1, "produto": "Mouse"}])
-        self.assertIn("ORDER BY produto ASC", conn.cursor_obj.sql)
+        self.assertIn("ORDER BY id DESC", conn.cursor_obj.sql)
+        self.assertNotIn("SELECT *", conn.cursor_obj.sql)
+        self.assertNotIn(" foto,", conn.cursor_obj.sql)
+        self.assertTrue(conn.closed)
+
+    def test_buscar_foto_estoque_carrega_blob_somente_para_item_escolhido(self):
+        factory, conn = self.make_factory([{"foto": b"imagem", "foto_nome": "item.png"}])
+
+        row = buscar_foto_estoque(factory, 42)
+
+        self.assertEqual(row["foto"], b"imagem")
+        self.assertIn("WHERE id=?", conn.cursor_obj.sql)
+        self.assertEqual(conn.cursor_obj.params, (42,))
         self.assertTrue(conn.closed)
 
     def test_listar_alertas_estoque_minimo_filters_minimum(self):
@@ -51,6 +71,13 @@ class RepositoryTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["produto"], "Cabo")
         self.assertIn("quantidade <= estoque_minimo", conn.cursor_obj.sql)
+
+    def test_listar_alertas_emprestimos_filtra_prazo_e_status(self):
+        factory, conn = self.make_factory([])
+        listar_alertas_emprestimos_atrasados(factory, "2026-09-03")
+        self.assertIn("status='Em aberto'", conn.cursor_obj.sql)
+        self.assertIn("data_limite<=", conn.cursor_obj.sql)
+        self.assertEqual(conn.cursor_obj.params, ("2026-09-03",))
         self.assertTrue(conn.closed)
 
     def test_listar_recorrencias_filters_tipo(self):

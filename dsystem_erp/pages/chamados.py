@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.ui_consulta import tabela_clicavel_id
 
 def renderizar_chat_chamado(chamado, cliente_portal, ctx=None):
     if ctx is not None:
@@ -33,6 +34,8 @@ def renderizar_chat_chamado(chamado, cliente_portal, ctx=None):
             unsafe_allow_html=True,
         )
         if msg.get("anexo"):
+            if str(msg.get("anexo_mime") or "").startswith("image/"):
+                st.image(msg.get("anexo"), caption=msg.get("anexo_nome") or "Imagem do chamado", width=420)
             st.download_button(
                 f"Baixar anexo: {msg.get('anexo_nome') or 'arquivo'}",
                 data=msg.get("anexo"),
@@ -47,7 +50,7 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
     st.subheader("Abrir chamado")
     if st.session_state.get("acao_portal") == "abrir_chamado":
         st.info("Preencha as informações abaixo para registrar seu chamado.")
-    st.write("Solicite um atendimento remoto ou presencial informando a data, o horário e o que precisa ser feito.")
+    st.write("Descreva o que precisa ser feito. A equipe combinará o atendimento com você pelo próprio chamado.")
     msg_whats = f"Olá, sou {cliente_portal or 'cliente'} e quero abrir um chamado pelo portal."
     st.link_button("Falar pelo WhatsApp oficial", whatsapp_oficial_url(msg_whats), width="stretch")
     with st.form("form_novo_chamado_cliente"):
@@ -55,12 +58,9 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
         area_destino = c0.selectbox("Com quem deseja falar:", AREAS_CHAMADO)
         solicitante = c1.text_input("Solicitante:", value=st.session_state.get("username", ""))
         tipo = c2.selectbox("Tipo de atendimento:", ["Remoto", "Presencial", "Presencial ou remoto"])
-        d1, d2, d3 = st.columns(3)
-        data_solicitada = d1.date_input("Data desejada:", value=date.today(), min_value=date.today())
-        hora_inicio = d2.time_input("Hora de início:", value=None, step=1800)
-        hora_fim = d3.time_input("Hora de término:", value=None, step=1800)
         titulo = st.text_input("Assunto:")
         descricao = st.text_area("Informações do que precisa:", height=130)
+        imagem = st.file_uploader("Imagem opcional:", type=TIPOS_IMAGEM_UPLOAD, key="novo_chamado_imagem")
         enviar = st.form_submit_button("Enviar chamado para Daniel.fabio", type="primary", width="stretch")
 
     if enviar:
@@ -71,10 +71,8 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
             erros.append("Informe o assunto do chamado.")
         if not descricao.strip():
             erros.append("Descreva o que precisa ser feito.")
-        if not hora_inicio or not hora_fim:
-            erros.append("Informe o horário de início e término.")
-        elif hora_fim <= hora_inicio:
-            erros.append("A hora de término precisa ser maior que a hora de início.")
+        if imagem and not upload_dentro_limite(imagem):
+            erros.append("A imagem ultrapassa o limite permitido.")
         if erros:
             for erro in erros:
                 st.error(erro)
@@ -96,9 +94,9 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
                 solicitante,
                 area_destino,
                 tipo,
-                data_solicitada.strftime("%Y-%m-%d"),
-                hora_inicio.strftime("%H:%M"),
-                hora_fim.strftime("%H:%M"),
+                "",
+                "",
+                "",
                 titulo,
                 descricao,
                 "Novo",
@@ -110,11 +108,13 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
             ),
         )
         chamado_id_novo = c.lastrowid
+        anexo_dados, anexo_nome, anexo_mime = dados_upload(imagem)
         c.execute(
             """INSERT INTO chamados_mensagens
-               (chamado_id, autor_tipo, autor_nome, mensagem, criado_em)
-               VALUES (?,?,?,?,?)""",
-            (chamado_id_novo, "cliente", solicitante or cliente_portal, descricao, agora),
+               (chamado_id, autor_tipo, autor_nome, mensagem, anexo_nome, anexo_mime, anexo, criado_em)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (chamado_id_novo, "cliente", solicitante or cliente_portal, descricao,
+             anexo_nome, anexo_mime, anexo_dados, agora),
         )
         conn.commit()
         conn.close()
@@ -122,13 +122,19 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
         st.success(f"Chamado enviado para {area_destino} ({destino}).")
         st.rerun()
 
-def renderizar_chamados_cliente(cliente_portal, ctx=None):
+def renderizar_chamados_cliente(cliente_portal, cliente_id=None, ctx=None):
     if ctx is not None:
         aplicar_contexto_pagina(ctx, globals())
     st.subheader("Meus chamados")
     conn = conectar_banco()
     c = conn.cursor(dictionary=True)
-    c.execute("SELECT * FROM chamados_cliente WHERE cliente_nome=%s ORDER BY id DESC", (cliente_portal,))
+    if cliente_id:
+        c.execute(
+            "SELECT * FROM chamados_cliente WHERE cliente_id=%s OR (cliente_id IS NULL AND cliente_nome=%s) ORDER BY id DESC",
+            (cliente_id, cliente_portal),
+        )
+    else:
+        c.execute("SELECT * FROM chamados_cliente WHERE cliente_nome=%s ORDER BY id DESC", (cliente_portal,))
     chamados = c.fetchall()
     conn.close()
 
@@ -138,7 +144,7 @@ def renderizar_chamados_cliente(cliente_portal, ctx=None):
 
     filtro_status = st.selectbox(
         "Filtrar chamados:",
-        ["Todos", "Abertos", "Aguardando cliente", "Concluídos"],
+        ["Todos", "Abertos", "Aguardando cliente", "Concluídos", "Cancelados"],
         key="portal_chamados_filtro_status",
     )
     if filtro_status == "Abertos":
@@ -147,6 +153,8 @@ def renderizar_chamados_cliente(cliente_portal, ctx=None):
         chamados = [c for c in chamados if "aguardando" in (c.get("status") or "").lower()]
     elif filtro_status == "Concluídos":
         chamados = [c for c in chamados if (c.get("status") or "") in ("Concluído", "Concluido")]
+    elif filtro_status == "Cancelados":
+        chamados = [c for c in chamados if (c.get("status") or "") == "Cancelado"]
 
     if not chamados:
         st.info("Nenhum chamado encontrado neste filtro.")
@@ -166,7 +174,31 @@ def renderizar_chamados_cliente(cliente_portal, ctx=None):
     r4.metric("Responsável", chamado.get("funcionario_designado") or "Fila")
 
     st.markdown(f"#### {chamado.get('titulo') or 'Sem assunto'}")
-    st.caption(f"{tipo_ch or 'Atendimento'} em {texto_data_br(data_ch)} das {inicio_ch or '--:--'} às {fim_ch or '--:--'}")
+    st.caption(f"{tipo_ch or 'Atendimento'} · criado em {chamado.get('criado_em') or '-'}")
+
+    encerrado_cliente = (chamado.get("status") or "") in ("Concluído", "Concluido", "Fechado", "Cancelado")
+    with st.expander("Editar informações do chamado", expanded=False):
+        with st.form(f"form_editar_chamado_cliente_{chamado.get('id')}"):
+            titulo_editado = st.text_input("Assunto:", value=chamado.get("titulo") or "")
+            descricao_editada = st.text_area("Descrição principal:", value=chamado.get("descricao") or "", height=120)
+            salvar_edicao = st.form_submit_button("Salvar informações", width="stretch", disabled=encerrado_cliente)
+        if salvar_edicao:
+            agora_edicao = datetime.now().strftime("%d/%m/%Y %H:%M")
+            conn_ed = conectar_banco()
+            ced = conn_ed.cursor()
+            ced.execute(
+                "UPDATE chamados_cliente SET titulo=?, descricao=?, atualizado_em=? WHERE id=? AND cliente_nome=?",
+                (titulo_editado.strip(), descricao_editada.strip(), agora_edicao, chamado.get("id"), cliente_portal),
+            )
+            ced.execute(
+                "INSERT INTO chamados_mensagens (chamado_id, autor_tipo, autor_nome, mensagem, criado_em) VALUES (?,?,?,?,?)",
+                (chamado.get("id"), "cliente", st.session_state.get("username") or cliente_portal,
+                 "As informações principais do chamado foram atualizadas pelo cliente.", agora_edicao),
+            )
+            conn_ed.commit()
+            conn_ed.close()
+            st.success("Chamado atualizado sem apagar o histórico da conversa.")
+            st.rerun()
 
     if chamado.get("ajuste_descricao") or chamado.get("ajuste_data"):
         st.info("Daniel.fabio sugeriu alterações para este pedido. Confira e aprove ou recuse abaixo.")
@@ -176,8 +208,8 @@ def renderizar_chamados_cliente(cliente_portal, ctx=None):
     st.markdown("#### Responder chamado")
     with st.form(f"form_responder_chamado_{chamado.get('id')}", clear_on_submit=True):
         resposta = st.text_area("Mensagem:", height=110, key=f"chat_resp_{chamado.get('id')}")
-        anexo = st.file_uploader("Anexo opcional:", key=f"chat_anexo_{chamado.get('id')}")
-        enviar = st.form_submit_button("Enviar mensagem", type="primary", width="stretch")
+        anexo = st.file_uploader("Imagem opcional:", type=TIPOS_IMAGEM_UPLOAD, key=f"chat_anexo_{chamado.get('id')}")
+        enviar = st.form_submit_button("Enviar mensagem", type="primary", width="stretch", disabled=encerrado_cliente)
     if enviar:
         if not resposta.strip() and not anexo:
             st.error("Digite uma mensagem ou anexe um arquivo.")
@@ -193,6 +225,28 @@ def renderizar_chamados_cliente(cliente_portal, ctx=None):
             )
             st.success("Mensagem enviada.")
             st.rerun()
+
+    if not encerrado_cliente:
+        with st.expander("Cancelar chamado", expanded=False):
+            st.caption("O chamado sairá dos abertos, mas todo o lançamento e a conversa continuarão no histórico.")
+            motivo_cancelamento = st.text_area("Motivo do cancelamento:", key=f"motivo_cancelar_ch_{chamado.get('id')}")
+            if st.button("Confirmar cancelamento", key=f"cancelar_ch_{chamado.get('id')}", width="stretch"):
+                agora_cancelamento = datetime.now().strftime("%d/%m/%Y %H:%M")
+                conn_can = conectar_banco()
+                ccan = conn_can.cursor()
+                ccan.execute(
+                    "UPDATE chamados_cliente SET status='Cancelado', atualizado_em=? WHERE id=? AND cliente_nome=?",
+                    (agora_cancelamento, chamado.get("id"), cliente_portal),
+                )
+                ccan.execute(
+                    "INSERT INTO chamados_mensagens (chamado_id, autor_tipo, autor_nome, mensagem, criado_em) VALUES (?,?,?,?,?)",
+                    (chamado.get("id"), "cliente", st.session_state.get("username") or cliente_portal,
+                     f"Chamado cancelado pelo cliente. {motivo_cancelamento}".strip(), agora_cancelamento),
+                )
+                conn_can.commit()
+                conn_can.close()
+                st.success("Chamado cancelado e mantido no histórico.")
+                st.rerun()
 
     if chamado.get("status") == "Modificado - aguardando aprovação":
         st.markdown("#### Aprovação de alterações")
@@ -444,9 +498,22 @@ def renderizar_gestao_chamados_chefe(ctx=None):
             "Tipo": tipo_ch,
             "Criado em": chamado.get("criado_em"),
         })
-    st.dataframe(pd.DataFrame(tabela), width="stretch", hide_index=True)
-
-    id_ed = st.number_input("ID do chamado para gerenciar:", min_value=1, step=1, key="gest_ch_id")
+    pesquisa_chamado = st.text_input(
+        "Pesquisar chamado:",
+        placeholder="Cliente, assunto, área, funcionário, status ou ID",
+        key="gest_ch_pesquisa",
+    ).strip().casefold()
+    tabela_filtrada = [
+        linha for linha in tabela
+        if not pesquisa_chamado or pesquisa_chamado in " ".join(str(valor or "") for valor in linha.values()).casefold()
+    ]
+    id_clicado = tabela_clicavel_id(st, tabela_filtrada, "gest_ch_grade", campo_id="ID") if tabela_filtrada else None
+    if id_clicado:
+        st.session_state["gest_ch_id_ativo"] = int(id_clicado)
+    id_ed = int(st.session_state.get("gest_ch_id_ativo") or 0)
+    if not id_ed:
+        st.caption("Clique em qualquer informação do chamado para abrir o gerenciamento.")
+        return
     chamado = next((item for item in chamados if item.get("id") == id_ed), None)
     if not chamado:
         return

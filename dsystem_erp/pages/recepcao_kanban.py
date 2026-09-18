@@ -2,72 +2,13 @@ from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.migrations import garantir_coluna
+from dsystem_erp.kanban_component import quadro_interativo
 from dsystem_erp.services.recepcao_kanban import (
     CORES_KANBAN_OS,
     STATUS_KANBAN_OS,
-    alteracoes_do_quadro,
+    alteracoes_do_quadro_registros,
     gerar_etiqueta_equipamento,
-    montar_quadro_equipamentos,
-)
-
-try:
-    from streamlit_sortables import sort_items
-except ImportError:  # O deploy instala a versão fixada em requirements.txt.
-    sort_items = None
-
-
-ESTILO_KANBAN = """
-.sortable-component {
-  display: flex;
-  gap: 14px;
-  overflow-x: auto;
-  padding: 8px 4px 18px;
-  background: transparent;
-}
-.sortable-container {
-  min-width: 270px;
-  width: 270px;
-  background: #111827;
-  border: 1px solid #293548;
-  border-radius: 14px;
-  overflow: hidden;
-  box-shadow: 0 8px 24px rgba(0,0,0,.18);
-}
-.sortable-container-header {
-  padding: 13px 14px;
-  background: #172033;
-  color: #f8fafc;
-  border-bottom: 1px solid #293548;
-  font-size: 13px;
-  font-weight: 800;
-}
-.sortable-container-body {
-  min-height: 150px;
-  padding: 9px;
-  background: #0d1421;
-}
-.sortable-item, .sortable-item:hover {
-  margin: 8px 0;
-  padding: 12px 13px;
-  border: 1px solid #2b3b52;
-  border-left: 4px solid #1683ff;
-  border-radius: 10px;
-  background: #172033;
-  color: #e5edf8;
-  box-shadow: 0 3px 12px rgba(0,0,0,.2);
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre-line;
-  cursor: grab;
-}
-.sortable-item:hover {
-  border-color: #1683ff;
-  transform: translateY(-1px);
-}
-"""
-ESTILO_KANBAN += "\n".join(
-    f".sortable-container:nth-child({indice}) {{ border-top: 3px solid {CORES_KANBAN_OS[status]}; }}"
-    for indice, status in enumerate(STATUS_KANBAN_OS, start=1)
+    montar_quadro_registros,
 )
 
 
@@ -82,73 +23,122 @@ def renderizar_recepcao_kanban(ctx: dict) -> None:
         st.session_state["kanban_estrutura_verificada"] = True
 
     st.title("Recepção de Equipamentos — Kanban")
-    st.caption("Todo equipamento deste quadro está obrigatoriamente vinculado a uma Ordem de Serviço.")
+    st.caption("Acompanhe em um único quadro as Ordens de Serviço, os atendimentos e os chamados.")
     if st.button("Abrir nova O.S. para receber equipamento", type="primary"):
         st.session_state["pagina_atual"] = "Ordem de Serviço (OS)"
         st.rerun()
 
-    conn = conectar_banco(); c = conn.cursor()
+    modo_kanban = st.radio(
+        "Exibir:", ["Quadro ativo", "Itens arquivados"], horizontal=True,
+        key="kanban_modo_exibicao",
+        help="Itens entregues podem ser arquivados para não acumularem na coluna Entregue.",
+    )
+    valor_arquivado = 1 if modo_kanban == "Itens arquivados" else 0
+
+    conn = conectar_banco()
+    c = conn.cursor()
     c.execute("""SELECT eo.*, os.cliente, os.cpf_cnpj, os.atendente, os.tecnico_extra,
                         os.data_os, os.chamado_id
                  FROM equipamentos_os eo
                  JOIN ordens_servico os ON os.os_id=eo.os_id
-                 ORDER BY eo.id DESC""")
+                 WHERE COALESCE(eo.kanban_arquivado, 0)=?
+                 ORDER BY eo.id DESC""", (valor_arquivado,))
     equipamentos = [dict(item) for item in c.fetchall()]
+    c.execute(
+        "SELECT * FROM atendimentos_checklist WHERE COALESCE(kanban_arquivado, 0)=? ORDER BY id DESC",
+        (valor_arquivado,),
+    )
+    atendimentos = [dict(item) for item in c.fetchall()]
+    c.execute(
+        "SELECT * FROM chamados_cliente WHERE COALESCE(kanban_arquivado, 0)=? ORDER BY id DESC",
+        (valor_arquivado,),
+    )
+    chamados = [dict(item) for item in c.fetchall()]
     conn.close()
-    if not equipamentos:
-        st.info("Nenhuma máquina recebida. Salve uma O.S. para criar o primeiro cartão e a etiqueta.")
+
+    registros = [_registro_os(item) for item in equipamentos]
+    registros.extend(_registro_atendimento(item) for item in atendimentos)
+    registros.extend(_registro_chamado(item) for item in chamados)
+    if not registros:
+        st.info("Nenhuma O.S., atendimento ou chamado encontrado para montar o quadro.")
         return
 
-    k1, k2 = st.columns([2, 1])
+    k1, k2, k3 = st.columns([2, 1, 1])
     busca = k1.text_input("Buscar cliente, O.S., item, equipamento ou série:").strip().casefold()
-    apenas_meus = k2.checkbox("Somente atribuídos a mim")
+    origem_filtro = k2.selectbox(
+        "Origem:", ["Todos", "Ordem de Serviço", "Atendimento", "Chamado"],
+        key="kanban_filtro_origem",
+    )
+    apenas_meus = k3.checkbox("Somente atribuídos a mim")
+    origem_codigo = {
+        "Ordem de Serviço": "os",
+        "Atendimento": "atendimento",
+        "Chamado": "chamado",
+    }.get(origem_filtro)
+    if origem_codigo:
+        registros = [item for item in registros if item.get("_origem_codigo") == origem_codigo]
     if busca:
-        equipamentos = [item for item in equipamentos if busca in f"{item.get('os_id')} {item.get('numero_item')} {item.get('cliente')} {item.get('equipamento')} {item.get('numero_serie')}".casefold()]
+        registros = [
+            item for item in registros
+            if busca in " ".join(str(valor or "") for valor in item.values()).casefold()
+        ]
     if apenas_meus:
         usuario = (st.session_state.get("funcionario_nome") or st.session_state.get("username") or "").casefold()
-        equipamentos = [item for item in equipamentos if usuario in f"{item.get('atendente')} {item.get('tecnico_extra')}".casefold()]
-    if not equipamentos:
-        st.info("Nenhum equipamento corresponde aos filtros selecionados.")
+        registros = [item for item in registros if usuario in str(item.get("_responsavel") or "").casefold()]
+    if not registros:
+        st.info("Nenhum registro corresponde aos filtros selecionados.")
         return
 
     totais = {
-        status: sum(1 for item in equipamentos if (item.get("kanban_status") or "Recebido") == status)
+        status: sum(1 for item in registros if (item.get("kanban_status") or "Recebido") == status)
         for status in STATUS_KANBAN_OS
     }
     metricas = st.columns(len(STATUS_KANBAN_OS))
     for coluna, status in zip(metricas, STATUS_KANBAN_OS):
         coluna.metric(status, totais[status])
 
-    quadro, cartao_para_id = montar_quadro_equipamentos(equipamentos)
-    if sort_items is None:
-        st.error("O componente do Kanban não está instalado. Execute: pip install -r requirements.txt")
-    elif tem_permissao("recepcao.edit"):
+    pode_editar = tem_permissao("recepcao.edit")
+    quadro, cartao_para_chave = montar_quadro_registros(registros)
+    if pode_editar:
         st.caption("Arraste um cartão para mudar a etapa. A alteração é salva automaticamente no banco.")
-        resultado = sort_items(
-            quadro,
-            multi_containers=True,
-            direction="horizontal",
-            custom_style=ESTILO_KANBAN,
-            key=f"recepcao_kanban_{st.session_state.get('kanban_versao', 0)}",
-        )
-        alteracoes = alteracoes_do_quadro(resultado, equipamentos, cartao_para_id)
-        if alteracoes:
-            _salvar_alteracoes_quadro(alteracoes)
-            st.session_state["kanban_versao"] = st.session_state.get("kanban_versao", 0) + 1
-            st.toast(f"{len(alteracoes)} alteração(ões) salva(s) no Kanban.", icon="✅")
-            st.rerun()
     else:
         st.info("Seu usuário pode consultar o quadro, mas não possui permissão para mover equipamentos.")
-        for status in STATUS_KANBAN_OS:
-            with st.expander(f"{status} ({totais[status]})", expanded=status == "Recebido"):
-                for item in [x for x in equipamentos if (x.get("kanban_status") or "Recebido") == status]:
-                    st.write(f"OS #{int(item.get('os_id') or 0):05d} · {item.get('numero_item')} — {item.get('cliente') or 'Cliente'}")
+    evento = quadro_interativo(
+        quadro, CORES_KANBAN_OS, pode_editar=pode_editar,
+        key="recepcao_kanban_interativo_v3", retornar_evento=True,
+    )
+    evento_novo = bool(
+        evento
+        and evento.get("evento_id")
+        and evento.get("evento_id") != st.session_state.get("kanban_ultimo_evento_id")
+    )
+    if evento_novo:
+        st.session_state["kanban_ultimo_evento_id"] = evento.get("evento_id")
+    if evento_novo and evento.get("acao") == "abrir":
+        chave_ativa = cartao_para_chave.get(evento.get("cartao"))
+        if chave_ativa:
+            st.session_state["kanban_registro_ativo"] = chave_ativa
+    if pode_editar and evento_novo and evento.get("acao") == "mover":
+        alteracoes = alteracoes_do_quadro_registros(
+            evento.get("colunas"), registros, cartao_para_chave,
+        )
+        if alteracoes:
+            _salvar_alteracoes_quadro(alteracoes)
+            st.toast(f"{len(alteracoes)} alteração(ões) salva(s) no Kanban.", icon="✅")
+            st.rerun()
 
     st.divider()
-    st.subheader("Detalhes e impressão de etiqueta")
+    _renderizar_detalhes_registro(registros, pode_editar, valor_arquivado)
+
+    equipamentos_visiveis = [
+        item for item in registros if item.get("_origem_codigo") == "os"
+    ]
+    if not equipamentos_visiveis:
+        return
+    st.subheader("Impressão de etiqueta da O.S.")
     equipamentos_por_rotulo = {
         f"OS #{int(item.get('os_id') or 0):05d} · {item.get('numero_item')} · {item.get('cliente') or 'Cliente'}": item
-        for item in equipamentos
+        for item in equipamentos_visiveis
     }
     rotulo_selecionado = st.selectbox("Selecionar equipamento:", list(equipamentos_por_rotulo))
     item_selecionado = equipamentos_por_rotulo[rotulo_selecionado]
@@ -172,12 +162,20 @@ def _salvar_alteracoes_quadro(alteracoes: list[dict]) -> None:
     momento = agora_br()
     conn = conectar_banco()
     c = conn.cursor()
+    tabelas = {
+        "os": "equipamentos_os",
+        "atendimento": "atendimentos_checklist",
+        "chamado": "chamados_cliente",
+    }
     try:
         for alteracao in alteracoes:
+            tabela = tabelas.get(alteracao.get("origem"))
+            if not tabela:
+                continue
             c.execute(
-                """UPDATE equipamentos_os
-                   SET kanban_status=?, kanban_ordem=?, kanban_alterado_por=?, kanban_alterado_em=?
-                   WHERE id=?""",
+                f"""UPDATE {tabela}
+                    SET kanban_status=?, kanban_ordem=?, kanban_alterado_por=?, kanban_alterado_em=?
+                    WHERE id=?""",
                 (alteracao["status"], alteracao["ordem"], usuario, momento, alteracao["id"]),
             )
         conn.commit()
@@ -188,9 +186,12 @@ def _salvar_alteracoes_quadro(alteracoes: list[dict]) -> None:
         conn.close()
     for alteracao in alteracoes:
         if alteracao["status"] != alteracao["status_anterior"]:
+            tabela = tabelas.get(alteracao.get("origem"))
+            if not tabela:
+                continue
             registrar_evento_sistema(
                 "Movimentação Kanban",
-                "equipamentos_os",
+                tabela,
                 alteracao["id"],
                 "",
                 {"de": alteracao["status_anterior"], "para": alteracao["status"]},
@@ -202,7 +203,16 @@ def _garantir_estrutura_kanban() -> None:
     conn = conectar_banco()
     c = conn.cursor()
     try:
-        alterou = garantir_coluna(c, "equipamentos_os", "kanban_ordem", "INTEGER DEFAULT 0")
+        alterou = False
+        for tabela in ("equipamentos_os", "atendimentos_checklist", "chamados_cliente"):
+            for coluna, tipo in (
+                ("kanban_status", "VARCHAR(60) DEFAULT 'Recebido'"),
+                ("kanban_ordem", "INTEGER DEFAULT 0"),
+                ("kanban_alterado_por", "TEXT"),
+                ("kanban_alterado_em", "TEXT"),
+                ("kanban_arquivado", "INTEGER DEFAULT 0"),
+            ):
+                alterou = garantir_coluna(c, tabela, coluna, tipo) or alterou
         if alterou:
             conn.commit()
     except Exception:
@@ -210,3 +220,111 @@ def _garantir_estrutura_kanban() -> None:
         raise
     finally:
         conn.close()
+
+
+def _registro_os(item: dict) -> dict:
+    registro = dict(item)
+    registro.update({
+        "_origem": "O.S.",
+        "_origem_codigo": "os",
+        "_registro_id": int(item.get("id") or 0),
+        "_chave": f"os:{int(item.get('id') or 0)}",
+        "_cliente": item.get("cliente") or "Cliente não informado",
+        "_titulo": item.get("equipamento") or item.get("tipo_equipamento") or "Equipamento",
+        "_complemento": f"OS #{int(item.get('os_id') or 0):05d} · {item.get('numero_item') or ''}",
+        "_responsavel": f"{item.get('atendente') or ''} {item.get('tecnico_extra') or ''}",
+    })
+    return registro
+
+
+def _registro_atendimento(item: dict) -> dict:
+    registro = dict(item)
+    registro.update({
+        "_origem": "Atendimento",
+        "_origem_codigo": "atendimento",
+        "_registro_id": int(item.get("id") or 0),
+        "_chave": f"atendimento:{int(item.get('id') or 0)}",
+        "_cliente": item.get("cliente") or "Cliente não informado",
+        "_titulo": item.get("equipamento") or item.get("tipo_atendimento") or "Atendimento",
+        "_complemento": f"{item.get('tipo_atendimento') or 'Atendimento'} · {item.get('status') or 'Em aberto'}",
+        "_responsavel": f"{item.get('tecnicos') or ''} {item.get('funcionario_atendido') or ''}",
+    })
+    return registro
+
+
+def _registro_chamado(item: dict) -> dict:
+    registro = dict(item)
+    registro.update({
+        "_origem": "Chamado",
+        "_origem_codigo": "chamado",
+        "_registro_id": int(item.get("id") or 0),
+        "_chave": f"chamado:{int(item.get('id') or 0)}",
+        "_cliente": item.get("cliente_nome") or "Cliente não informado",
+        "_titulo": item.get("titulo") or "Chamado sem assunto",
+        "_complemento": f"{item.get('area_destino') or 'Suporte'} · {item.get('status') or 'Novo'}",
+        "_responsavel": f"{item.get('funcionario_designado') or ''} {item.get('administrador') or ''}",
+    })
+    return registro
+
+
+def _renderizar_detalhes_registro(
+    registros: list[dict], pode_editar: bool = False, arquivados: int = 0
+) -> None:
+    chave = st.session_state.get("kanban_registro_ativo")
+    registro = next((item for item in registros if item.get("_chave") == chave), None)
+    if not registro:
+        st.caption("Clique em um cartão para visualizar todas as informações do lançamento.")
+        return
+
+    st.subheader(f"Detalhes — {registro.get('_origem')} #{registro.get('_registro_id')}")
+    with st.container(border=True):
+        d1, d2, d3 = st.columns(3)
+        d1.write(f"**Cliente:** {registro.get('_cliente') or 'Não informado'}")
+        d2.write(f"**Etapa do Kanban:** {registro.get('kanban_status') or 'Recebido'}")
+        d3.write(f"**Responsável:** {registro.get('_responsavel') or 'Não definido'}")
+        origem = registro.get("_origem_codigo")
+        if origem == "os":
+            st.write(f"**O.S.:** #{int(registro.get('os_id') or 0):05d} — item {registro.get('numero_item') or ''}")
+            st.write(f"**Equipamento:** {registro.get('tipo_equipamento') or ''} {registro.get('equipamento') or ''}")
+            st.write(f"**Marca / série:** {registro.get('marca') or ''} / {registro.get('numero_serie') or 'Não informada'}")
+            st.write(f"**Avaria/defeito:** {registro.get('avaria') or ''} {registro.get('defeito') or ''}")
+            st.write(f"**Serviço:** {registro.get('servico') or 'Não informado'}")
+            if registro.get("chamado_id"):
+                st.write(f"**Chamado vinculado:** #{registro.get('chamado_id')}")
+        elif origem == "atendimento":
+            st.write(f"**Tipo:** {registro.get('tipo_atendimento') or 'Não informado'}")
+            st.write(f"**Equipamento:** {registro.get('equipamento') or 'Não informado'}")
+            st.write(f"**Funcionário atendido:** {registro.get('funcionario_atendido') or 'Não informado'}")
+            st.write(f"**Técnico(s):** {registro.get('tecnicos') or 'Não informado'}")
+            st.write(f"**Data de entrada:** {registro.get('data_entrada') or 'Não informada'}")
+            st.write(f"**Status do atendimento:** {registro.get('status') or 'Não informado'}")
+            st.write(f"**Observações:** {registro.get('detalhes_realizado') or registro.get('obs_entrada') or 'Nenhuma'}")
+        else:
+            st.write(f"**Assunto:** {registro.get('titulo') or 'Sem assunto'}")
+            st.write(f"**Status do chamado:** {registro.get('status') or 'Novo'}")
+            st.write(f"**Área:** {registro.get('area_destino') or 'Suporte'}")
+            st.write(f"**Solicitante:** {registro.get('solicitante') or 'Não informado'}")
+            st.write(f"**Descrição:** {registro.get('ajuste_descricao') or registro.get('descricao') or 'Não informada'}")
+            st.write(f"**Data/horário:** {registro.get('ajuste_data') or registro.get('data_solicitada') or ''} {registro.get('ajuste_hora_inicio') or registro.get('hora_inicio') or ''}")
+        if pode_editar:
+            tabelas = {
+                "os": "equipamentos_os", "atendimento": "atendimentos_checklist",
+                "chamado": "chamados_cliente",
+            }
+            tabela = tabelas.get(registro.get("_origem_codigo"))
+            pode_arquivar = arquivados or (registro.get("kanban_status") == "Entregue")
+            if tabela and pode_arquivar:
+                rotulo = "Restaurar item no quadro" if arquivados else "Arquivar e retirar da coluna Entregue"
+                if st.button(rotulo, type="primary", key=f"kanban_arquivar_{chave}"):
+                    conn_arq = conectar_banco(); c_arq = conn_arq.cursor()
+                    c_arq.execute(
+                        f"UPDATE {tabela} SET kanban_arquivado=?, kanban_alterado_por=?, kanban_alterado_em=? WHERE id=?",
+                        (0 if arquivados else 1, st.session_state.get("username", ""), agora_br(), registro.get("_registro_id")),
+                    )
+                    conn_arq.commit(); conn_arq.close()
+                    st.session_state["kanban_registro_ativo"] = None
+                    st.toast("Item restaurado no quadro." if arquivados else "Item entregue arquivado.")
+                    st.rerun()
+        if st.button("Fechar detalhes", key=f"kanban_fechar_{chave}"):
+            st.session_state["kanban_registro_ativo"] = None
+            st.rerun()

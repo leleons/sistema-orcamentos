@@ -91,7 +91,7 @@ foreach ($file in $requiredFiles) {
 
 if (-not $SkipBackup) {
     Write-Step "Gerando backup no servidor antes do deploy"
-    Invoke-Remote "backup pre-deploy" "cd $AppDir && mkdir -p backups/deploy_files && SNAP=backups/deploy_files/antes_`$(date +%Y%m%d_%H%M%S) && mkdir -p `"`$SNAP`" && cp -a orcamento.py requirements.txt mysql_schema.sql dsystem_erp migrations modules scripts tests static modelos_contratos *.png `"`$SNAP`" 2>/dev/null || true && if [ -f scripts/backup_mysql.py ]; then ./.venv/bin/python scripts/backup_mysql.py pre-deploy || true; fi"
+    Invoke-Remote "backup pre-deploy" "cd $AppDir && mkdir -p backups/deploy_files && SNAP=backups/deploy_files/antes_`$(date +%Y%m%d_%H%M%S) && mkdir -p `"`$SNAP`" && cp -a orcamento.py requirements.txt mysql_schema.sql dsystem_erp migrations modules scripts tests static modelos_contratos *.png `"`$SNAP`" 2>/dev/null || true && if [ -f scripts/backup_mysql.py ]; then ./.venv/bin/python scripts/backup_mysql.py pre-deploy || true; fi && ls -1dt backups/deploy_files/antes_* 2>/dev/null | tail -n +3 | xargs -r rm -rf --"
 }
 
 Write-Step "Preparando pastas no servidor"

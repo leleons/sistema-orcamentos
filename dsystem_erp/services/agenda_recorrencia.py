@@ -48,3 +48,68 @@ def gerar_datas_recorrentes(
         return resultado
 
     raise ValueError(f"Periodicidade não reconhecida: {periodicidade}")
+
+
+def gerar_datas_agenda_configurada(
+    data_inicial: date,
+    periodicidade: str,
+    *,
+    quantidade: int | None = None,
+    data_fim: date | None = None,
+    horizonte: date | None = None,
+    dia_semana: int | None = None,
+    dia_mes: int | None = None,
+    data_anual: date | None = None,
+) -> list[date]:
+    """Gera ocorrências com dia semanal/mensal/anual configurável.
+
+    ``horizonte`` é usado pelas recorrências indefinidas para manter uma janela
+    móvel de compromissos, sem criar infinitas linhas no banco de uma vez.
+    """
+    periodicidade = str(periodicidade or "Não").strip()
+    if periodicidade == "Não":
+        return [data_inicial]
+    limite = data_fim or horizonte
+    total = max(1, int(quantidade)) if quantidade else None
+    if total is None and limite is None:
+        raise ValueError("Informe a quantidade, a data final ou o horizonte da recorrência.")
+
+    def adicionar(resultado: list[date], candidata: date) -> bool:
+        if candidata < data_inicial:
+            return True
+        if limite and candidata > limite:
+            return False
+        resultado.append(candidata)
+        return not total or len(resultado) < total
+
+    resultado: list[date] = []
+    if periodicidade == "Diariamente":
+        candidata = data_inicial
+        while adicionar(resultado, candidata):
+            candidata += timedelta(days=1)
+    elif periodicidade == "Semanalmente":
+        alvo = data_inicial.weekday() if dia_semana is None else max(0, min(6, int(dia_semana)))
+        candidata = data_inicial + timedelta(days=(alvo - data_inicial.weekday()) % 7)
+        while adicionar(resultado, candidata):
+            candidata += timedelta(days=7)
+    elif periodicidade == "Mensalmente":
+        alvo = max(1, min(31, int(dia_mes or data_inicial.day)))
+        deslocamento = 0
+        while True:
+            base = _adicionar_meses(data_inicial.replace(day=1), deslocamento)
+            candidata = base.replace(day=min(alvo, calendar.monthrange(base.year, base.month)[1]))
+            if not adicionar(resultado, candidata):
+                break
+            deslocamento += 1
+    elif periodicidade == "Anualmente":
+        modelo = data_anual or data_inicial
+        ano = data_inicial.year
+        while True:
+            dia = min(modelo.day, calendar.monthrange(ano, modelo.month)[1])
+            candidata = date(ano, modelo.month, dia)
+            if not adicionar(resultado, candidata):
+                break
+            ano += 1
+    else:
+        return gerar_datas_recorrentes(data_inicial, periodicidade, total or 1)
+    return resultado

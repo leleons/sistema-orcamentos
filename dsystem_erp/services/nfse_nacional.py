@@ -7,6 +7,7 @@ import gzip
 import json
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -18,6 +19,7 @@ from signxml import XMLSigner, methods
 
 from dsystem_erp.services.nfse_soap import contexto_ssl_certificado_pfx
 from dsystem_erp.utils.formatadores import somente_digitos
+from dsystem_erp.utils.datas import FUSO_SAO_PAULO
 
 
 NS_NFSE = "http://www.sped.fazenda.gov.br/nfse"
@@ -92,6 +94,17 @@ def montar_id_dps(codigo_municipio: str, documento_emitente: str, serie: int | s
     return f"DPS{municipio}{tipo_inscricao}{documento_14}{serie_num:05d}{numero_num:015d}"
 
 
+def normalizar_emissao_dps(valor=None) -> datetime:
+    """Serializa a emissão no fuso do emitente, independente do SO do servidor."""
+    if valor is None:
+        return datetime.now(FUSO_SAO_PAULO)
+    if isinstance(valor, str):
+        valor = datetime.fromisoformat(valor.strip().replace("Z", "+00:00"))
+    if not isinstance(valor, datetime) or valor.tzinfo is None:
+        raise ValueError("Informe a data e hora de emissão da DPS com fuso horário explícito.")
+    return valor.astimezone(FUSO_SAO_PAULO)
+
+
 def gerar_xml_dps_nacional(faturamento: dict, dados: dict) -> bytes:
     cnpj = somente_digitos(dados.get("cnpj_prestador"))
     if len(cnpj) != 14:
@@ -120,18 +133,34 @@ def gerar_xml_dps_nacional(faturamento: dict, dados: dict) -> bytes:
     opcao_simples = str(dados.get("opcao_simples_nacional") or "").strip()
     if opcao_simples not in {"1", "2", "3"}:
         raise ValueError("Selecione a situacao do prestador perante o Simples Nacional.")
+    regime_apuracao = str(dados.get("regime_apuracao_simples") or "").strip()
+    if opcao_simples == "3" and regime_apuracao not in {"1", "2", "3"}:
+        raise ValueError("Selecione o regime de apuracao do Simples Nacional para ME/EPP.")
+    percentual_tributos_simples = dados.get("percentual_tributos_simples")
+    if opcao_simples == "3":
+        try:
+            percentual_tributos_simples = Decimal(str(percentual_tributos_simples))
+            if (not percentual_tributos_simples.is_finite()
+                    or percentual_tributos_simples < 0
+                    or percentual_tributos_simples > 100):
+                raise ValueError()
+            percentual_tributos_simples = percentual_tributos_simples.quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        except (InvalidOperation, ValueError):
+            raise ValueError(
+                "Informe o percentual aproximado total de tributos do Simples Nacional para ME/EPP."
+            ) from None
 
     root = etree.Element(_tag("DPS"), nsmap={None: NS_NFSE}, versao=VERSAO_DPS)
     inf = etree.SubElement(root, _tag("infDPS"), Id=id_dps)
     _texto(inf, "tpAmb", 1 if str(dados.get("ambiente")).lower() == "producao" else 2)
-    emissao = dados.get("data_hora_emissao") or datetime.now().astimezone()
-    if isinstance(emissao, datetime):
-        emissao = emissao.isoformat(timespec="seconds")
-    _texto(inf, "dhEmi", emissao)
+    emissao = normalizar_emissao_dps(dados.get("data_hora_emissao") or None)
+    _texto(inf, "dhEmi", emissao.isoformat(timespec="seconds"))
     _texto(inf, "verAplic", str(dados.get("versao_aplicativo") or "DsystemERP_1.0")[:20])
     _texto(inf, "serie", serie)
     _texto(inf, "nDPS", numero)
-    _texto(inf, "dCompet", _data_iso(dados.get("competencia") or date.today()))
+    _texto(inf, "dCompet", _data_iso(dados.get("competencia") or emissao.date()))
     _texto(inf, "tpEmit", 1)
     _texto(inf, "cLocEmi", municipio)
 
@@ -142,8 +171,8 @@ def gerar_xml_dps_nacional(faturamento: dict, dados: dict) -> bytes:
         _texto(prestador, "IM", inscricao[:15])
     reg_trib = etree.SubElement(prestador, _tag("regTrib"))
     _texto(reg_trib, "opSimpNac", opcao_simples)
-    if opcao_simples == "3" and str(dados.get("regime_apuracao_simples") or "").strip():
-        _texto(reg_trib, "regApTribSN", dados["regime_apuracao_simples"])
+    if opcao_simples == "3":
+        _texto(reg_trib, "regApTribSN", regime_apuracao)
     _texto(reg_trib, "regEspTrib", str(dados.get("regime_especial_tributacao") or "0"))
 
     tomador = etree.SubElement(inf, _tag("toma"))
@@ -163,7 +192,9 @@ def gerar_xml_dps_nacional(faturamento: dict, dados: dict) -> bytes:
     _texto(codigo_servico, "cTribNac", codigo_tributacao)
     codigo_municipal = somente_digitos(dados.get("codigo_tributacao_municipal"))
     if codigo_municipal:
-        _texto(codigo_servico, "cTribMun", codigo_municipal[:3])
+        if len(codigo_municipal) != 3:
+            raise ValueError("O codigo municipal nacional deve ter 3 digitos. Informe o desdobramento municipal correto ou deixe vazio; nao use o codigo completo do sistema municipal antigo.")
+        _texto(codigo_servico, "cTribMun", codigo_municipal)
     _texto(codigo_servico, "xDescServ", descricao[:1000])
     observacoes = str(dados.get("observacoes") or "").strip()
     if observacoes:
@@ -181,7 +212,27 @@ def gerar_xml_dps_nacional(faturamento: dict, dados: dict) -> bytes:
     if aliquota > 0 and dados.get("informar_aliquota", False):
         _texto(trib_municipal, "pAliq", f"{aliquota:.2f}")
     total_tributos = etree.SubElement(trib, _tag("totTrib"))
-    _texto(total_tributos, "indTotTrib", 0)
+    if opcao_simples == "1":
+        # E0713: não optantes não podem enviar indTotTrib ou pTotTribSN.
+        # Valores aproximados da transparência tributária, não retenções/ISS devido.
+        informados = dados.get("totais_tributos")
+        if not isinstance(informados, dict):
+            raise ValueError("Informe os valores aproximados dos tributos federal, estadual e municipal para o prestador não optante pelo Simples Nacional.")
+        grupo_valores = etree.SubElement(total_tributos, _tag("vTotTrib"))
+        for campo, tag in (("federal", "vTotTribFed"), ("estadual", "vTotTribEst"), ("municipal", "vTotTribMun")):
+            try:
+                quantia = Decimal(str(informados.get(campo)))
+                if not quantia.is_finite() or quantia < 0 or quantia >= Decimal("100000000000000"):
+                    raise ValueError()
+                quantia = quantia.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            except (InvalidOperation, ValueError):
+                raise ValueError(f"Informe um valor aproximado válido e não negativo para o tributo {campo}.") from None
+            _texto(grupo_valores, tag, format(quantia, ".2f"))
+    elif opcao_simples == "2":
+        _texto(total_tributos, "indTotTrib", 0)
+    else:
+        # E0712: ME/EPP não pode enviar indTotTrib; deve usar um dos totais permitidos.
+        _texto(total_tributos, "pTotTribSN", format(percentual_tributos_simples, ".2f"))
 
     return etree.tostring(root, encoding="UTF-8", xml_declaration=True, pretty_print=False)
 

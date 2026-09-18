@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.services.cobrancas_recorrentes import (
+    criar_ou_atualizar_cobranca_contrato,
+    sincronizar_lancamentos_recorrentes,
+)
 from dsystem_erp.ui_consulta import tabela_selecionavel_id
 
 
@@ -52,7 +56,7 @@ def renderizar_contratos(ctx: dict) -> None:
     busca = f1.text_input("Buscar nome, tipo ou arquivo:", key="contratos_busca").strip().casefold()
     tipos = sorted({item.get("tipo") or "Sem tipo" for item in contratos})
     tipo_filtro = f2.selectbox("Tipo:", ["Todos"] + tipos, key="contratos_tipo")
-    status_filtro = f3.selectbox("Status:", ["Todos", "Ativo", "Encerrado", "Cancelado", "Em renovação"], key="contratos_status")
+    status_filtro = f3.selectbox("Status:", ["Todos", "Ativo", "Assinado", "Encerrado", "Cancelado", "Em renovação"], key="contratos_status")
     filtrados = contratos
     if busca:
         filtrados = [x for x in filtrados if busca in f"{x.get('parte_nome','')} {x.get('tipo','')} {x.get('nome_arquivo','')}".casefold()]
@@ -65,7 +69,8 @@ def renderizar_contratos(ctx: dict) -> None:
         "ID": x.get("id"), "Tipo": x.get("tipo"), "Vinculado a": x.get("parte_nome"),
         "Classificação": x.get("parte_tipo"), "Início": data_para_br(x.get("data_inicio")),
         "Vencimento": data_para_br(x.get("data_vencimento")), "Valor": x.get("valor") or "",
-        "Status": x.get("status") or "Ativo", "Arquivo": x.get("nome_arquivo"),
+        "Status": x.get("status") or "Ativo", "Assinado": x.get("assinado") or "Não",
+        "Cobrança recorrente": x.get("cobranca_recorrente_id") or "", "Arquivo": x.get("nome_arquivo"),
     } for x in filtrados]
     selecionado_id = tabela_selecionavel_id(st, linhas, "contratos_grade", "ID") if linhas else None
     if not linhas:
@@ -84,15 +89,122 @@ def renderizar_contratos(ctx: dict) -> None:
     ce1, ce2, ce3 = st.columns(3)
     tipo_edit = ce1.text_input("Tipo do contrato:", value=contrato.get("tipo") or "", disabled=not tem_permissao("contratos.edit"), key=f"contrato_tipo_{contrato['id']}")
     parte_edit = ce2.text_input("Cliente/fornecedor/funcionário:", value=contrato.get("parte_nome") or "", disabled=not tem_permissao("contratos.edit"), key=f"contrato_parte_{contrato['id']}")
-    status_edit = ce3.selectbox("Status:", ["Ativo", "Em renovação", "Encerrado", "Cancelado"], index=["Ativo", "Em renovação", "Encerrado", "Cancelado"].index(contrato.get("status") if contrato.get("status") in ["Ativo", "Em renovação", "Encerrado", "Cancelado"] else "Ativo"), disabled=not tem_permissao("contratos.edit"), key=f"contrato_status_{contrato['id']}")
+    status_contrato_opcoes = ["Ativo", "Assinado", "Em renovação", "Encerrado", "Cancelado"]
+    status_edit = ce3.selectbox("Status:", status_contrato_opcoes, index=status_contrato_opcoes.index(contrato.get("status") if contrato.get("status") in status_contrato_opcoes else "Ativo"), disabled=not tem_permissao("contratos.edit"), key=f"contrato_status_{contrato['id']}")
     observacoes = st.text_area("Observações:", value=contrato.get("observacoes") or "", disabled=not tem_permissao("contratos.edit"), key=f"contrato_obs_{contrato['id']}")
+    st.markdown("#### Assinatura e cobrança recorrente")
+    cr1, cr2, cr3 = st.columns(3)
+    assinado = cr1.checkbox(
+        "Contrato assinado", value=str(contrato.get("assinado") or "Não").casefold() == "sim",
+        disabled=not tem_permissao("contratos.edit"), key=f"contrato_assinado_{contrato['id']}",
+    )
+    data_assinatura = cr2.date_input(
+        "Data da assinatura:", value=parse_data_flex(contrato.get("data_assinatura")) or date.today(),
+        disabled=not assinado or not tem_permissao("contratos.edit"), key=f"contrato_data_assinatura_{contrato['id']}",
+    )
+    gerar_recorrencia = cr3.checkbox(
+        "Gerar cobranças conforme o contrato",
+        value=str(contrato.get("gerar_recorrencia") or "Não").casefold() == "sim",
+        disabled=not tem_permissao("contratos.edit"), key=f"contrato_gerar_rec_{contrato['id']}",
+    )
+    rr1, rr2, rr3 = st.columns(3)
+    recorrencia_tipo = rr1.text_input(
+        "Descrição da cobrança:", value=contrato.get("recorrencia_tipo") or contrato.get("tipo") or "Contrato",
+        disabled=not gerar_recorrencia or not tem_permissao("contratos.edit"), key=f"contrato_rec_tipo_{contrato['id']}",
+    )
+    opcoes_periodicidade = ["Diária", "Semanal", "Mensal", "Anual"]
+    periodicidade_atual = contrato.get("recorrencia_periodicidade") or "Mensal"
+    recorrencia_periodicidade = rr2.selectbox(
+        "Periodicidade:", opcoes_periodicidade,
+        index=opcoes_periodicidade.index(periodicidade_atual) if periodicidade_atual in opcoes_periodicidade else 2,
+        disabled=not gerar_recorrencia or not tem_permissao("contratos.edit"), key=f"contrato_rec_periodo_{contrato['id']}",
+    )
+    recorrencia_valor = rr3.number_input(
+        "Valor recorrente R$:", min_value=0.0, value=float(contrato.get("recorrencia_valor") or 0),
+        step=0.01, format="%.2f", disabled=not gerar_recorrencia or not tem_permissao("contratos.edit"),
+        key=f"contrato_rec_valor_{contrato['id']}",
+    )
+    rr4, rr5, rr6 = st.columns(3)
+    recorrencia_primeiro = rr4.date_input(
+        "Primeiro vencimento:",
+        value=parse_data_flex(contrato.get("recorrencia_primeiro_vencimento")) or date.today(),
+        disabled=not gerar_recorrencia or not tem_permissao("contratos.edit"), key=f"contrato_rec_primeiro_{contrato['id']}",
+    )
+    recorrencia_fim = rr5.date_input(
+        "Fim da recorrência:",
+        value=parse_data_flex(contrato.get("recorrencia_fim") or contrato.get("data_vencimento")) or date.today(),
+        disabled=not gerar_recorrencia or not tem_permissao("contratos.edit"), key=f"contrato_rec_fim_{contrato['id']}",
+    )
+    opcoes_pagamento_recorrencia = ["Faturamento via D-System", "Boleto", "PIX", "Cartão", "Transferência"]
+    pagamento_recorrencia_atual = contrato.get("recorrencia_pagamento") or "Faturamento via D-System"
+    recorrencia_pagamento = rr6.selectbox(
+        "Forma de cobrança:", opcoes_pagamento_recorrencia,
+        index=(opcoes_pagamento_recorrencia.index(pagamento_recorrencia_atual)
+               if pagamento_recorrencia_atual in opcoes_pagamento_recorrencia else 0),
+        disabled=not gerar_recorrencia or not tem_permissao("contratos.edit"),
+        key=f"contrato_rec_pagamento_{contrato['id']}",
+    )
+    if gerar_recorrencia and not assinado:
+        st.warning("A recorrência ficará configurada, mas só será gerada depois que o contrato for marcado como assinado.")
+    if contrato.get("cobranca_recorrente_id"):
+        st.info(f"Cobrança recorrente vinculada: #{contrato.get('cobranca_recorrente_id')}")
     if contrato.get("arquivo"):
         st.download_button("Baixar contrato", data=contrato["arquivo"], file_name=contrato.get("nome_arquivo") or f"contrato_{contrato['id']}.pdf", mime=contrato.get("mime_type") or "application/pdf", width="stretch")
     if tem_permissao("contratos.edit"):
         if st.button("Salvar alterações do contrato", type="primary", width="stretch", key=f"contrato_salvar_{contrato['id']}"):
             conn = conectar_banco(); c = conn.cursor()
-            c.execute("UPDATE contratos SET tipo=?, parte_nome=?, status=?, observacoes=?, alterado_por=?, alterado_em=? WHERE id=?", (tipo_edit, parte_edit, status_edit, observacoes, st.session_state.get("username", ""), agora_br(), contrato["id"]))
-            conn.commit(); conn.close(); st.success("Contrato atualizado."); st.rerun()
+            usuario = st.session_state.get("username", "")
+            agora = agora_br()
+            try:
+                c.execute(
+                    """UPDATE contratos SET tipo=?, parte_nome=?, status=?, observacoes=?,
+                       assinado=?, data_assinatura=?, gerar_recorrencia=?, recorrencia_tipo=?,
+                       recorrencia_periodicidade=?, recorrencia_primeiro_vencimento=?, recorrencia_fim=?,
+                       recorrencia_valor=?, recorrencia_pagamento=?, alterado_por=?, alterado_em=? WHERE id=?""",
+                    (tipo_edit, parte_edit, "Assinado" if assinado else status_edit, observacoes,
+                     "Sim" if assinado else "Não", data_para_banco_br(data_assinatura) if assinado else "",
+                     "Sim" if gerar_recorrencia else "Não", recorrencia_tipo,
+                     recorrencia_periodicidade, data_para_banco_br(recorrencia_primeiro),
+                     data_para_banco_br(recorrencia_fim), recorrencia_valor, recorrencia_pagamento,
+                     usuario, agora, contrato["id"]),
+                )
+                contrato_atualizado = dict(contrato)
+                contrato_atualizado.update({
+                    "tipo": tipo_edit, "parte_nome": parte_edit,
+                    "assinado": "Sim" if assinado else "Não",
+                    "gerar_recorrencia": "Sim" if gerar_recorrencia else "Não",
+                    "recorrencia_tipo": recorrencia_tipo,
+                    "recorrencia_periodicidade": recorrencia_periodicidade,
+                    "recorrencia_primeiro_vencimento": data_para_banco_br(recorrencia_primeiro),
+                    "recorrencia_fim": data_para_banco_br(recorrencia_fim),
+                    "recorrencia_valor": recorrencia_valor,
+                    "recorrencia_pagamento": recorrencia_pagamento,
+                })
+                titulos_gerados = 0
+                if assinado and gerar_recorrencia:
+                    cobranca_id, _ = criar_ou_atualizar_cobranca_contrato(conn, contrato_atualizado, usuario, agora)
+                    titulos_gerados = sincronizar_lancamentos_recorrentes(
+                        conn, date.today(), usuario, horizonte_dias=35
+                    )
+                elif contrato.get("cobranca_recorrente_id"):
+                    c.execute(
+                        "UPDATE cobrancas_recorrentes SET status='Encerrada' WHERE id=?",
+                        (contrato.get("cobranca_recorrente_id"),),
+                    )
+                    conn.commit()
+                else:
+                    conn.commit()
+            except Exception as erro_contrato:
+                conn.rollback()
+                st.error(f"Não foi possível atualizar o contrato: {erro_contrato}")
+            else:
+                mensagem = "Contrato atualizado."
+                if assinado and gerar_recorrencia:
+                    mensagem += f" Cobrança #{cobranca_id} vinculada; {titulos_gerados} lançamento(s) gerado(s)."
+                st.success(mensagem)
+                st.rerun()
+            finally:
+                conn.close()
     if tem_permissao("contratos.delete"):
         with st.expander("Excluir contrato"):
             confirmar = st.checkbox("Confirmo a exclusão do contrato e do arquivo armazenado.", key=f"contrato_confirmar_exclusao_{contrato['id']}")

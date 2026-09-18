@@ -1,5 +1,4 @@
 streamlit
-streamlit-sortables==0.3.1
 mysql-connector-python
 pandas
 openpyxl

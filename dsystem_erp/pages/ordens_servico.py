@@ -8,6 +8,7 @@ from dsystem_erp.services.recepcao_kanban import gerar_etiqueta_equipamento
 def renderizar_ordem_servico(ctx: dict) -> None:
     aplicar_contexto_pagina(ctx, globals())
     st.title("Ordens de Serviço")
+    versao_nova_os = int(st.session_state.get("os_nova_versao", 0))
     funcionarios_os = listar_funcionarios_sistema()
     tecnicos_por_label = {
         item["label"]: (item.get("nome") or item.get("username") or "")
@@ -28,29 +29,41 @@ def renderizar_ordem_servico(ctx: dict) -> None:
             return ""
         return tecnicos_por_label.get(escolhido, valor_atual if escolhido == label_atual else escolhido)
 
+    conn_tipos_os = conectar_banco()
+    c_tipos_os = conn_tipos_os.cursor()
+    c_tipos_os.execute("SELECT * FROM os_tipos_aparelhos ORDER BY nome")
+    tipos_os_cadastrados = [dict(item) for item in c_tipos_os.fetchall()]
+    conn_tipos_os.close()
+    tipos_os_ativos = [item.get("nome") for item in tipos_os_cadastrados if item.get("ativo") != "Não"]
+    if "Notebook" not in tipos_os_ativos:
+        tipos_os_ativos.append("Notebook")
+    if not tipos_os_ativos:
+        tipos_os_ativos = ["Desktop", "Notebook", "Outro"]
+
     if not funcionarios_os:
         st.warning("Nenhum funcionário/técnico cadastrado. Cadastre o funcionário em Usuários para vinculá-lo à O.S.")
-    aba1, aba2 = st.tabs(["Gerar Nova O.S.", "Histórico de Registos"])
+    aba1, aba2, aba3 = st.tabs(["Gerar Nova O.S.", "Histórico de Registros", "Tipos / Aparelhos"])
     with aba1:
         cdb = buscar_clientes()
         cn = ["-- Preencher Manualmente --"] + [c['nome'] for c in cdb]
-        cs = st.selectbox("Buscar Cliente:", cn)
+        cs = st.selectbox("Buscar Cliente:", cn, key=f"os_novo_busca_{versao_nova_os}")
         dc = next((c for c in cdb if c['nome'] == cs), {})
+        cliente_indice = cn.index(cs)
         endc = f"{dc.get('endereco','')}, {dc.get('numero','')}"
         
         c1, c2 = st.columns(2)
         with c1: 
-            oc = st.text_input("Nome Cliente:", value=dc.get('nome',''))
+            oc = st.text_input("Nome Cliente:", value=dc.get('nome',''), key=f"os_novo_nome_{versao_nova_os}_{cliente_indice}")
         with c2: 
-            ocpf = st.text_input("CPF/CNPJ:", value=dc.get('cnpj',''))
+            ocpf = st.text_input("CPF/CNPJ:", value=dc.get('cnpj',''), key=f"os_novo_cpf_{versao_nova_os}_{cliente_indice}")
             
         c3, c4, c5 = st.columns([3,1,1])
         with c3: 
-            oend = st.text_input("Endereço Completo:", value=endc)
+            oend = st.text_input("Endereço Completo:", value=endc, key=f"os_novo_endereco_{versao_nova_os}_{cliente_indice}")
         with c4: 
-            ocep = st.text_input("CEP:", value=dc.get('cep',''))
+            ocep = st.text_input("CEP:", value=dc.get('cep',''), key=f"os_novo_cep_{versao_nova_os}_{cliente_indice}")
         with c5: 
-            otel = st.text_input("Telefone:", value=dc.get('telefone',''))
+            otel = st.text_input("Telefone:", value=dc.get('telefone',''), key=f"os_novo_telefone_{versao_nova_os}_{cliente_indice}")
 
         conn_ch_os = conectar_banco(); c_ch_os = conn_ch_os.cursor()
         c_ch_os.execute("""SELECT id, titulo, status FROM chamados_cliente
@@ -62,7 +75,7 @@ def renderizar_ordem_servico(ctx: dict) -> None:
             f"#{item['id']} — {item.get('titulo') or 'Chamado'} ({item.get('status') or 'Aberto'})"
             for item in chamados_abertos_os
         ]
-        chamado_os_label = st.selectbox("Vincular a um chamado aberto (opcional):", opcoes_chamado_os)
+        chamado_os_label = st.selectbox("Vincular a um chamado aberto (opcional):", opcoes_chamado_os, key=f"os_novo_chamado_{versao_nova_os}")
         chamado_os_id = int(chamado_os_label.split(" — ", 1)[0].replace("#", "")) if chamado_os_label.startswith("#") else None
         
         st.write("---")
@@ -78,41 +91,41 @@ def renderizar_ordem_servico(ctx: dict) -> None:
         st.caption(f"Item atual: NOVA-{letra_equipamento(item_idx)}. A numeracao final sera gerada depois de salvar a O.S.")
 
         eqc1, eqc2, eqc3, eqc4 = st.columns([2, 2, 2, 1])
-        tipo_eq = eqc1.selectbox("Tipo:", ["Desktop", "Notebook", "Servidor", "Impressora", "Outro"], key=f"os_tipo_{item_idx}")
-        eq_nome = eqc2.text_input("Aparelho:", key=f"os_equip_{item_idx}")
-        eq_marca = eqc3.text_input("Marca/Modelo:", key=f"os_marca_{item_idx}")
-        eq_avaria = eqc4.selectbox("Avaria?", ["Nao", "Sim"], key=f"os_avaria_{item_idx}")
-        eq_serie = st.text_input("Numero de serie / patrimonio:", key=f"os_serie_{item_idx}")
-        eq_foto = st.file_uploader("Foto deste equipamento (opcional):", type=TIPOS_IMAGEM_UPLOAD, key=f"os_foto_{item_idx}")
+        tipo_eq = eqc1.selectbox("Tipo:", tipos_os_ativos, key=f"os_novo_{versao_nova_os}_tipo_{item_idx}")
+        eq_nome = eqc2.text_input("Aparelho:", key=f"os_novo_{versao_nova_os}_equip_{item_idx}")
+        eq_marca = eqc3.text_input("Marca/Modelo:", key=f"os_novo_{versao_nova_os}_marca_{item_idx}")
+        eq_avaria = eqc4.selectbox("Avaria?", ["Nao", "Sim"], key=f"os_novo_{versao_nova_os}_avaria_{item_idx}")
+        eq_serie = st.text_input("Numero de serie / patrimonio:", key=f"os_novo_{versao_nova_os}_serie_{item_idx}")
+        eq_foto = st.file_uploader("Foto deste equipamento (opcional):", type=TIPOS_IMAGEM_UPLOAD, key=f"os_novo_{versao_nova_os}_foto_{item_idx}")
 
         st.write("**Configuracao do equipamento**")
         cfg1, cfg2, cfg3, cfg4 = st.columns(4)
-        cfg_cpu = cfg1.text_input("CPU:", key=f"os_cpu_{item_idx}")
-        cfg_ram = cfg2.text_input("RAM:", key=f"os_ram_{item_idx}")
-        cfg_hd = cfg3.text_input("HD/SSD:", key=f"os_hd_{item_idx}")
-        cfg_gpu = cfg4.text_input("GPU:", key=f"os_gpu_{item_idx}")
+        cfg_cpu = cfg1.text_input("CPU:", key=f"os_novo_{versao_nova_os}_cpu_{item_idx}")
+        cfg_ram = cfg2.text_input("RAM:", key=f"os_novo_{versao_nova_os}_ram_{item_idx}")
+        cfg_hd = cfg3.text_input("HD/SSD:", key=f"os_novo_{versao_nova_os}_hd_{item_idx}")
+        cfg_gpu = cfg4.text_input("GPU:", key=f"os_novo_{versao_nova_os}_gpu_{item_idx}")
         cfg5, cfg6, cfg7 = st.columns([2, 1, 1])
-        cfg_placa = cfg5.text_input("Placa mae:", key=f"os_placa_{item_idx}")
-        cfg_gab = cfg6.text_input("Gabinete/Carcaca:", key=f"os_gab_{item_idx}")
-        cfg_chave = cfg7.text_input("Chave S.O.:", key=f"os_chave_{item_idx}")
+        cfg_placa = cfg5.text_input("Placa mae:", key=f"os_novo_{versao_nova_os}_placa_{item_idx}")
+        cfg_gab = cfg6.text_input("Gabinete/Carcaca:", key=f"os_novo_{versao_nova_os}_gab_{item_idx}")
+        cfg_chave = cfg7.text_input("Chave S.O.:", key=f"os_novo_{versao_nova_os}_chave_{item_idx}")
 
         st.write("**Servico e checklist deste equipamento**")
         cf1, cf2, cf3, cf4, cf5 = st.columns(5)
-        ofo = cf1.selectbox("Deixou Fonte?", ["Nao", "Sim"], key=f"os_fonte_{item_idx}")
-        ofmt = cf2.selectbox("Formatar?", ["Nao", "Sim"], key=f"os_formatar_{item_idx}")
-        obk = cf3.selectbox("Backup?", ["Nao", "Sim"], key=f"os_backup_{item_idx}")
-        oap = cf4.selectbox("Apps Padroes?", ["Nao", "Sim"], key=f"os_apps_{item_idx}")
-        oso = cf5.text_input("S.O.:", key=f"os_so_{item_idx}")
+        ofo = cf1.selectbox("Deixou Fonte?", ["Nao", "Sim"], key=f"os_novo_{versao_nova_os}_fonte_{item_idx}")
+        ofmt = cf2.selectbox("Formatar?", ["Nao", "Sim"], key=f"os_novo_{versao_nova_os}_formatar_{item_idx}")
+        obk = cf3.selectbox("Backup?", ["Nao", "Sim"], key=f"os_novo_{versao_nova_os}_backup_{item_idx}")
+        oap = cf4.selectbox("Apps Padroes?", ["Nao", "Sim"], key=f"os_novo_{versao_nova_os}_apps_{item_idx}")
+        oso = cf5.text_input("S.O.:", key=f"os_novo_{versao_nova_os}_so_{item_idx}")
         ca1, ca2 = st.columns([1, 4])
-        oac = ca1.selectbox("App Especifico?", ["Nao", "Sim"], key=f"os_app_chk_{item_idx}")
-        oan = ca2.text_input("Qual App?", key=f"os_app_nome_{item_idx}")
-        osrv = st.text_area("Problema/servico relatado deste equipamento:", key=f"os_servico_{item_idx}")
+        oac = ca1.selectbox("App Especifico?", ["Nao", "Sim"], key=f"os_novo_{versao_nova_os}_app_chk_{item_idx}")
+        oan = ca2.text_input("Qual App?", key=f"os_novo_{versao_nova_os}_app_nome_{item_idx}")
+        osrv = st.text_area("Problema/servico relatado deste equipamento:", key=f"os_novo_{versao_nova_os}_servico_{item_idx}")
 
         col_tec1, col_tec2 = st.columns(2)
         with col_tec1:
-            otec = selecionar_tecnico("Técnico responsável:", key="os_tecnico_principal")
+            otec = selecionar_tecnico("Técnico responsável:", key=f"os_novo_tecnico_principal_{versao_nova_os}")
         with col_tec2:
-            otec_extra = selecionar_tecnico("2º técnico / troca no processo:", permitir_vazio=True, key="os_tecnico_extra")
+            otec_extra = selecionar_tecnico("2º técnico / troca no processo:", permitir_vazio=True, key=f"os_novo_tecnico_extra_{versao_nova_os}")
 
         def montar_item_os():
             foto_item = {}
@@ -165,15 +178,31 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                 endf = f"{oend} - CEP: {ocep}" if ocep else oend
                 dt = date.today().strftime("%d/%m/%Y")
                 salvar_cliente_simples(oc, ocpf, oend, otel, ocep)
+                cliente_os_id = dc.get("id")
+                if not cliente_os_id:
+                    conn_cliente_os = conectar_banco(); c_cliente_os = conn_cliente_os.cursor()
+                    c_cliente_os.execute(
+                        "SELECT id FROM clientes WHERE documento_chave=? OR cnpj=? OR nome=? ORDER BY id DESC LIMIT 1",
+                        (normalizar_documento_cliente(ocpf), ocpf, oc),
+                    )
+                    cliente_os_row = c_cliente_os.fetchone() or {}
+                    cliente_os_id = cliente_os_row.get("id")
+                    conn_cliente_os.close()
+                if not cliente_os_id:
+                    st.error(
+                        "A O.S. precisa estar vinculada a um cliente cadastrado. "
+                        "Selecione um cliente da lista ou informe um CPF/CNPJ válido para cadastrá-lo."
+                    )
+                    st.stop()
                 primeiro = eqs[0]; cfg0 = primeiro.get("config", {})
                 conn = conectar_banco(); c = conn.cursor()
                 c.execute("""
                     INSERT INTO ordens_servico (
-                        data_os, cliente, cpf_cnpj, endereco, equipamento, marca, avaria, servico, atendente,
+                        cliente_id, data_os, cliente, cpf_cnpj, endereco, equipamento, marca, avaria, servico, atendente,
                         so, formatar, backup, aplicativos, fonte, hd_ssd, ram, cpu, gpu, placa_mae, gabinete, chave_so, app_especifico_check, app_especifico_nome, tecnico_extra,
                         chamado_id, recebido_por, recebido_em
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (dt, oc, ocpf, endf, "|".join([x.get('equipamento','') for x in eqs]), "|".join([x.get('marca','') for x in eqs]), "|".join([x.get('avaria','') for x in eqs]), "|".join([x.get('servico','') for x in eqs]), otec, cfg0.get('so',''), cfg0.get('formatar',''), cfg0.get('backup',''), cfg0.get('apps_padrao',''), cfg0.get('fonte',''), cfg0.get('hd',''), cfg0.get('ram',''), cfg0.get('cpu',''), cfg0.get('gpu',''), cfg0.get('placa',''), cfg0.get('gabinete',''), cfg0.get('chave_so',''), cfg0.get('app_especifico',''), cfg0.get('app_especifico_nome',''), otec_extra, chamado_os_id, st.session_state.get("username", ""), agora_br()))
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (cliente_os_id, dt, oc, ocpf, endf, "|".join([x.get('equipamento','') for x in eqs]), "|".join([x.get('marca','') for x in eqs]), "|".join([x.get('avaria','') for x in eqs]), "|".join([x.get('servico','') for x in eqs]), otec, cfg0.get('so',''), cfg0.get('formatar',''), cfg0.get('backup',''), cfg0.get('apps_padrao',''), cfg0.get('fonte',''), cfg0.get('hd',''), cfg0.get('ram',''), cfg0.get('cpu',''), cfg0.get('gpu',''), cfg0.get('placa',''), cfg0.get('gabinete',''), cfg0.get('chave_so',''), cfg0.get('app_especifico',''), cfg0.get('app_especifico_nome',''), otec_extra, chamado_os_id, st.session_state.get("username", ""), agora_br()))
                 oid = c.lastrowid
                 salvar_equipamentos_os(c, oid, eqs)
                 conn.commit(); conn.close()
@@ -347,6 +376,9 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                     html_os = "\n".join(folhas_html)
                 st.session_state["os_itens_temp"] = []
                 st.session_state["os_item_idx"] = 0
+                # A próxima renderização usa novas chaves de widgets, deixando
+                # cliente, equipamentos e checklist prontos para uma nova O.S.
+                st.session_state["os_nova_versao"] = versao_nova_os + 1
                 
                 js_print = f"""
                 <script>
@@ -379,6 +411,9 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                     setTimeout(function() {{
                         iframe.contentWindow.focus();
                         iframe.contentWindow.print();
+                        setTimeout(function() {{
+                            window.parent.location.reload();
+                        }}, 250);
                     }}, 500);
                 </script>
                 """
@@ -394,15 +429,46 @@ def renderizar_ordem_servico(ctx: dict) -> None:
         df_os = c.fetchall()
         conn.close()
         df_os = filtrar_registros_por_empresa(df_os, "cliente")
+        filtro_os1, filtro_os2, filtro_os3 = st.columns(3)
+        clientes_historico_os = sorted({item.get("cliente") or "" for item in df_os if item.get("cliente")})
+        filtro_cliente_os = filtro_os1.selectbox(
+            "Filtrar por cliente:", ["Todos"] + clientes_historico_os, key="os_hist_cliente"
+        )
+        filtro_inicio_os = filtro_os2.date_input(
+            "Data inicial:", value=None, format="DD/MM/YYYY", key="os_hist_inicio"
+        )
+        filtro_fim_os = filtro_os3.date_input(
+            "Data final:", value=None, format="DD/MM/YYYY", key="os_hist_fim"
+        )
+        if filtro_cliente_os != "Todos":
+            df_os = [item for item in df_os if item.get("cliente") == filtro_cliente_os]
+        if filtro_inicio_os or filtro_fim_os:
+            df_os = [
+                item for item in df_os
+                if (parse_data_flex(item.get("data_os"))
+                    and (not filtro_inicio_os or parse_data_flex(item.get("data_os")) >= filtro_inicio_os)
+                    and (not filtro_fim_os or parse_data_flex(item.get("data_os")) <= filtro_fim_os))
+            ]
         
         if df_os: 
-            id_os_selecionada = tabela_selecionavel_id(st, [dict(x) for x in df_os], "os_grade_consulta", "os_id")
+            linhas_historico_os = []
+            for registro_os in df_os:
+                linha_os = dict(registro_os)
+                linha_os["Vínculo no portal"] = (
+                    "Vinculada" if registro_os.get("cliente_id") else "Revisar vínculo"
+                )
+                linhas_historico_os.append(linha_os)
+            id_os_selecionada = tabela_selecionavel_id(
+                st, linhas_historico_os, "os_grade_consulta", "os_id"
+            )
             st.caption("Clique na O.S. para abrir automaticamente a consulta/edição.")
             conn_eq_hist = conectar_banco()
             conn_eq_hist.row_factory = None
             ceh = conn_eq_hist.cursor()
             try:
-                ceh.execute('SELECT os_id, numero_item, tipo_equipamento, equipamento, marca, numero_serie, avaria, configuracao, foto_nome FROM equipamentos_os ORDER BY os_id DESC, id ASC')
+                ids_os_historico = [int(item.get("os_id")) for item in df_os]
+                marcadores_os = ",".join("?" for _ in ids_os_historico)
+                ceh.execute(f'SELECT os_id, numero_item, tipo_equipamento, equipamento, marca, numero_serie, avaria, configuracao, foto_nome FROM equipamentos_os WHERE os_id IN ({marcadores_os}) ORDER BY os_id DESC, id ASC', ids_os_historico)
                 eq_hist = ceh.fetchall()
             except Exception:
                 eq_hist = []
@@ -594,15 +660,25 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                         if col_os_btn1.button("Guardar Alterações da O.S.", type="primary", key=f"os_btn_s_{ide}", width="stretch"):
                             conn = conectar_banco()
                             c = conn.cursor()
+                            c.execute(
+                                "SELECT id FROM clientes WHERE nome=? OR cnpj=? ORDER BY id DESC LIMIT 1",
+                                (e_cliente, e_cpf),
+                            )
+                            cliente_edicao_os = c.fetchone() or {}
+                            if not cliente_edicao_os.get("id"):
+                                conn.close()
+                                st.error("Selecione um cliente cadastrado antes de salvar a O.S.")
+                                st.stop()
                             c.execute('''
-                                UPDATE ordens_servico SET 
+                                UPDATE ordens_servico SET
+                                cliente_id=?,
                                 cliente=?, cpf_cnpj=?, endereco=?, equipamento=?, marca=?, avaria=?, servico=?, 
                                 atendente=?, so=?, formatar=?, backup=?, aplicativos=?, fonte=?, hd_ssd=?, 
                                 ram=?, cpu=?, gpu=?, placa_mae=?, gabinete=?, chave_so=?, 
                                 app_especifico_check=?, app_especifico_nome=?, tecnico_extra=? 
                                 WHERE os_id=?
                             ''', (
-                                 e_cliente, e_cpf, e_endereco, "|".join([x['e'] for x in equipamentos_edit]), 
+                                 cliente_edicao_os.get("id"), e_cliente, e_cpf, e_endereco, "|".join([x['e'] for x in equipamentos_edit]),
                                  "|".join([x['m'] for x in equipamentos_edit]), "|".join([x['a'] for x in equipamentos_edit]), 
                                  e_servico, e_tec, e_so, e_formatar, e_backup, e_apps, e_fonte, e_hd, e_ram, 
                                  e_cpu, e_gpu, e_placa, e_gab, e_chave, e_app_chk, e_app_nome, e_tec_extra, ide
@@ -611,4 +687,69 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                             conn.close()
                             st.success("O.S. atualizada e salva no banco de dados!")
                             st.rerun()
+
+    with aba3:
+        st.subheader("Cadastro de tipos e aparelhos")
+        st.caption("Os tipos ativos aparecem no campo Tipo ao lançar uma nova O.S.")
+        novo_tipo_os = st.text_input("Novo tipo/aparelho:", key="os_tipo_novo")
+        if st.button(
+            "Cadastrar tipo", type="primary",
+            disabled=not tem_permissao("os.edit") or not novo_tipo_os.strip(), key="os_tipo_salvar"
+        ):
+            conn_tipo = conectar_banco(); c_tipo = conn_tipo.cursor()
+            try:
+                c_tipo.execute(
+                    "INSERT INTO os_tipos_aparelhos (nome, ativo, criado_por, criado_em) VALUES (?,?,?,?)",
+                    (novo_tipo_os.strip(), "Sim", st.session_state.get("username", ""), agora_br()),
+                )
+                conn_tipo.commit()
+            except Exception:
+                conn_tipo.rollback()
+                st.warning("Esse tipo/aparelho já está cadastrado.")
+            else:
+                st.success("Tipo/aparelho cadastrado.")
+                st.rerun()
+            finally:
+                conn_tipo.close()
+        if tipos_os_cadastrados:
+            st.dataframe([
+                {"ID": item.get("id"), "Tipo/aparelho": item.get("nome"), "Ativo": item.get("ativo") or "Sim"}
+                for item in tipos_os_cadastrados
+            ], width="stretch", hide_index=True)
+            tipo_os_id = st.selectbox(
+                "Tipo para ativar/desativar:", [int(item["id"]) for item in tipos_os_cadastrados],
+                format_func=lambda valor: next(item.get("nome") for item in tipos_os_cadastrados if int(item["id"]) == valor),
+                key="os_tipo_gerenciar",
+            )
+            tipo_os_atual = next(item for item in tipos_os_cadastrados if int(item["id"]) == tipo_os_id)
+            nome_tipo_os_editado = st.text_input(
+                "Nome do tipo/aparelho:", value=tipo_os_atual.get("nome") or "",
+                key=f"os_tipo_nome_{tipo_os_id}",
+            )
+            novo_status_tipo = "Não" if tipo_os_atual.get("ativo") != "Não" else "Sim"
+            bt_tipo_nome, bt_tipo_status = st.columns(2)
+            if bt_tipo_nome.button(
+                "Salvar nome", disabled=not tem_permissao("os.edit") or not nome_tipo_os_editado.strip(),
+                key="os_tipo_salvar_nome", width="stretch",
+            ):
+                conn_tipo = conectar_banco(); c_tipo = conn_tipo.cursor()
+                try:
+                    c_tipo.execute(
+                        "UPDATE os_tipos_aparelhos SET nome=? WHERE id=?",
+                        (nome_tipo_os_editado.strip(), tipo_os_id),
+                    )
+                    conn_tipo.commit()
+                except Exception:
+                    conn_tipo.rollback(); st.warning("Já existe um tipo/aparelho com esse nome.")
+                else:
+                    st.success("Nome atualizado."); st.rerun()
+                finally:
+                    conn_tipo.close()
+            if bt_tipo_status.button(
+                "Desativar tipo" if novo_status_tipo == "Não" else "Reativar tipo",
+                disabled=not tem_permissao("os.edit"), key="os_tipo_alterar_status", width="stretch",
+            ):
+                conn_tipo = conectar_banco(); c_tipo = conn_tipo.cursor()
+                c_tipo.execute("UPDATE os_tipos_aparelhos SET ativo=? WHERE id=?", (novo_status_tipo, tipo_os_id))
+                conn_tipo.commit(); conn_tipo.close(); st.rerun()
 

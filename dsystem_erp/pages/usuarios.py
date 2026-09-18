@@ -1,7 +1,8 @@
 ﻿from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
-from dsystem_erp.ui_consulta import tabela_selecionavel_id
+from dsystem_erp.services.usuarios import cpf_em_uso, cpf_usuario_valido, filtrar_usuarios
+from dsystem_erp.ui_consulta import tabela_clicavel_id
 
 
 def renderizar_gerenciador_usuarios(ctx: dict) -> None:
@@ -70,15 +71,27 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
         )
         st.write("Defina os módulos, submódulos e funções deste usuário:")
         p_adm = st.checkbox("Administrador", value=False, key="novo_usuario_admin")
+        p_gerencial = st.checkbox(
+            "Login gerencial — visualizar informações internas da Dsystem",
+            value=False,
+            key="novo_usuario_gerencial",
+            help="Libera os cadastros e dados que pertencem à própria Dsystem.",
+        )
         permissoes_novo_usuario = editor_permissoes("novo_usuario")
         flags_novo_usuario = flags_legadas(permissoes_novo_usuario)
 
         if st.button("Criar Usuário no Sistema", type="primary"):
-            if u_nome and u_senha:
+            if not cpf_usuario_valido(funcionario_cpf):
+                st.warning("Informe um CPF com 11 dígitos. Ele será o identificador único do funcionário.")
+            elif u_nome and u_senha:
                 conn = conectar_banco()
                 c = conn.cursor()
                 try:
-                    c.execute('''INSERT INTO usuarios (username, password, is_admin, perm_orcamentos, perm_os,
+                    c.execute("SELECT id, funcionario_cpf FROM usuarios")
+                    if cpf_em_uso([dict(item) for item in c.fetchall()], funcionario_cpf):
+                        st.error("Este CPF já pertence a outro usuário.")
+                        st.stop()
+                    c.execute('''INSERT INTO usuarios (username, password, is_admin, modulo_gerencial, perm_orcamentos, perm_os,
                                  perm_del_orc, perm_del_os, perm_edit_os, perm_emails, perm_edit_em,
                                  perm_del_em, perm_infra, perm_edit_infra, perm_del_infra, perm_clientes,
                                  perm_estoque, perm_faturamento, perm_atendimentos, perm_edit_atendimentos, submodulos, empresas_permitidas,
@@ -86,8 +99,8 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                                  funcionario_telefone, funcionario_email, funcionario_endereco,
                                  funcionario_tipo_contrato, funcionario_forma_pagamento, funcionario_emite_nf,
                                  funcionario_deslocamento)
-                                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                              (u_nome, criar_hash_senha(u_senha), int(p_adm), flags_novo_usuario.get("perm_orcamentos", 0), flags_novo_usuario.get("perm_os", 0), flags_novo_usuario.get("perm_del_orc", 0), flags_novo_usuario.get("perm_del_os", 0),
+                                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                              (u_nome, criar_hash_senha(u_senha), int(p_adm), int(p_gerencial), flags_novo_usuario.get("perm_orcamentos", 0), flags_novo_usuario.get("perm_os", 0), flags_novo_usuario.get("perm_del_orc", 0), flags_novo_usuario.get("perm_del_os", 0),
                                flags_novo_usuario.get("perm_edit_os", 0), flags_novo_usuario.get("perm_emails", 0), flags_novo_usuario.get("perm_edit_em", 0), flags_novo_usuario.get("perm_del_em", 0), flags_novo_usuario.get("perm_infra", 0), flags_novo_usuario.get("perm_edit_infra", 0),
                                flags_novo_usuario.get("perm_del_infra", 0), flags_novo_usuario.get("perm_clientes", 0), flags_novo_usuario.get("perm_estoque", 0), flags_novo_usuario.get("perm_faturamento", 0), flags_novo_usuario.get("perm_atendimentos", 0), flags_novo_usuario.get("perm_edit_atendimentos", 0), json.dumps(sorted(permissoes_novo_usuario), ensure_ascii=False), json.dumps(empresas_permitidas_novo, ensure_ascii=False),
                                funcionario_nome, funcionario_cpf, funcionario_rj, funcionario_dados_bancarios,
@@ -108,15 +121,28 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
     conn = conectar_banco()
     conn.row_factory = None
     c = conn.cursor()
-    c.execute('SELECT id, username, funcionario_nome, funcionario_cpf, funcionario_telefone, funcionario_email, funcionario_tipo_contrato, is_admin FROM usuarios ORDER BY id ASC')
+    c.execute('SELECT id, username, funcionario_nome, funcionario_cpf, funcionario_telefone, funcionario_email, funcionario_tipo_contrato, modulo_gerencial, is_admin FROM usuarios ORDER BY id ASC')
     u_rows = c.fetchall()
     conn.close()
 
     if u_rows: 
         usuarios_view = [dict(u) for u in u_rows]
-        st.caption(f"Total de usuários no banco: {len(usuarios_view)}")
-        id_usuario_selecionado = tabela_selecionavel_id(st, usuarios_view, "usuarios_grade_consulta", "id")
-        st.caption("Clique no usuário para abrir automaticamente a consulta/edição.")
+        pesquisa_usuario = st.text_input(
+            "Pesquisar usuário por nome, CPF ou login:",
+            key="pesquisa_base_usuarios",
+            placeholder="Ex.: Maria, 123.456.789-00 ou maria.silva",
+        )
+        usuarios_view = filtrar_usuarios(usuarios_view, pesquisa_usuario)
+        st.caption(f"{len(usuarios_view)} usuário(s) encontrado(s).")
+        id_usuario_clicado = tabela_clicavel_id(st, usuarios_view, "usuarios_grade_consulta", "id")
+        if id_usuario_clicado is not None:
+            st.session_state["usuario_edicao_selecionado"] = int(id_usuario_clicado)
+        id_usuario_selecionado = st.session_state.get("usuario_edicao_selecionado")
+        ids_usuarios_visiveis = {int(item.get("id") or 0) for item in usuarios_view}
+        if pesquisa_usuario.strip() and int(id_usuario_selecionado or 0) not in ids_usuarios_visiveis:
+            st.session_state.pop("usuario_edicao_selecionado", None)
+            id_usuario_selecionado = None
+        st.caption("Clique em qualquer informação da linha para abrir automaticamente a edição.")
 
         with st.expander("Gerar contrato do funcionário", expanded=False):
             conn_contrato_func = conectar_banco()
@@ -388,7 +414,9 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                 conn.close()
             
         elif act_u == "Editar Usuário":
-            id_ed_u = st.number_input("ID Usuário para editar:", min_value=1, step=1, value=int(id_usuario_selecionado or 1), key=f"edit_u_id_{id_usuario_selecionado or 'manual'}")
+            if not id_usuario_selecionado:
+                st.info("Clique em um usuário na tabela para editar seus dados e permissões.")
+            id_ed_u = int(id_usuario_selecionado or 0)
             conn = conectar_banco()
             conn.row_factory = None
             c = conn.cursor()
@@ -432,6 +460,12 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                         st.subheader("Login e Permissões")
                         eu_n = st.text_input("Login:", value=ud['username'], key=f"eu_n_{id_ed_u}")
                         eu_s = st.text_input("Nova senha (deixe em branco para manter):", type="password", key=f"eu_s_{id_ed_u}")
+                        e_modulo_gerencial = st.checkbox(
+                            "Login gerencial — visualizar informações internas da Dsystem",
+                            value=bool(ud.get("modulo_gerencial", 0)),
+                            key=f"eu_gerencial_{id_ed_u}",
+                            help="Libera os cadastros e dados que pertencem à própria Dsystem.",
+                        )
                         clientes_para_acesso_edit = buscar_clientes(aplicar_permissao=False)
                         nomes_empresas_acesso_edit = [cli["nome"] for cli in clientes_para_acesso_edit]
                         empresas_atuais = [empresa for empresa in carregar_submodulos(ud.get("empresas_permitidas")) if empresa in nomes_empresas_acesso_edit]
@@ -448,10 +482,26 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                         if st.button("Guardar Edição de Usuário", type="primary", key=f"btn_save_u_{id_ed_u}"):
                             conn = conectar_banco()
                             c = conn.cursor()
+                            c.execute("SELECT id, funcionario_cpf FROM usuarios")
+                            usuarios_cpf = [dict(item) for item in c.fetchall()]
+                            if not cpf_usuario_valido(e_funcionario_cpf):
+                                conn.close()
+                                st.error("Informe um CPF com 11 dígitos. Ele é o identificador único do funcionário.")
+                                st.stop()
+                            if cpf_em_uso(usuarios_cpf, e_funcionario_cpf, ignorar_id=id_ed_u):
+                                conn.close()
+                                st.error("Este CPF já pertence a outro usuário.")
+                                st.stop()
                             senha_para_salvar = criar_hash_senha(eu_s) if eu_s else ud["password"]
-                            c.execute('''UPDATE usuarios SET username=?, password=?, perm_orcamentos=?, perm_del_orc=?, perm_infra=?, perm_edit_infra=?, perm_os=?, perm_edit_os=?, perm_del_os=?, perm_del_infra=?, perm_emails=?, perm_edit_em=?, perm_del_em=?, perm_clientes=?, perm_estoque=?, perm_faturamento=?, perm_atendimentos=?, perm_edit_atendimentos=?, submodulos=?, empresas_permitidas=?, funcionario_nome=?, funcionario_cpf=?, funcionario_rj=?, funcionario_dados_bancarios=?, funcionario_telefone=?, funcionario_email=?, funcionario_endereco=?, funcionario_tipo_contrato=?, funcionario_forma_pagamento=?, funcionario_emite_nf=?, funcionario_deslocamento=? WHERE id=?''', (eu_n, senha_para_salvar, flags_usuario.get("perm_orcamentos", 0), flags_usuario.get("perm_del_orc", 0), flags_usuario.get("perm_infra", 0), flags_usuario.get("perm_edit_infra", 0), flags_usuario.get("perm_os", 0), flags_usuario.get("perm_edit_os", 0), flags_usuario.get("perm_del_os", 0), flags_usuario.get("perm_del_infra", 0), flags_usuario.get("perm_emails", 0), flags_usuario.get("perm_edit_em", 0), flags_usuario.get("perm_del_em", 0), flags_usuario.get("perm_clientes", 0), flags_usuario.get("perm_estoque", 0), flags_usuario.get("perm_faturamento", 0), flags_usuario.get("perm_atendimentos", 0), flags_usuario.get("perm_edit_atendimentos", 0), json.dumps(sorted(permissoes_usuario), ensure_ascii=False), json.dumps(e_empresas_permitidas, ensure_ascii=False), e_funcionario_nome, e_funcionario_cpf, e_funcionario_rj, e_funcionario_dados_bancarios, e_funcionario_telefone, e_funcionario_email, e_funcionario_endereco, e_funcionario_tipo_contrato, e_funcionario_forma_pagamento, e_funcionario_emite_nf, json.dumps(e_funcionario_deslocamento, ensure_ascii=False), id_ed_u))
+                            c.execute('''UPDATE usuarios SET username=?, password=?, modulo_gerencial=?, perm_orcamentos=?, perm_del_orc=?, perm_infra=?, perm_edit_infra=?, perm_os=?, perm_edit_os=?, perm_del_os=?, perm_del_infra=?, perm_emails=?, perm_edit_em=?, perm_del_em=?, perm_clientes=?, perm_estoque=?, perm_faturamento=?, perm_atendimentos=?, perm_edit_atendimentos=?, submodulos=?, empresas_permitidas=?, funcionario_nome=?, funcionario_cpf=?, funcionario_rj=?, funcionario_dados_bancarios=?, funcionario_telefone=?, funcionario_email=?, funcionario_endereco=?, funcionario_tipo_contrato=?, funcionario_forma_pagamento=?, funcionario_emite_nf=?, funcionario_deslocamento=? WHERE id=?''', (eu_n, senha_para_salvar, int(e_modulo_gerencial), flags_usuario.get("perm_orcamentos", 0), flags_usuario.get("perm_del_orc", 0), flags_usuario.get("perm_infra", 0), flags_usuario.get("perm_edit_infra", 0), flags_usuario.get("perm_os", 0), flags_usuario.get("perm_edit_os", 0), flags_usuario.get("perm_del_os", 0), flags_usuario.get("perm_del_infra", 0), flags_usuario.get("perm_emails", 0), flags_usuario.get("perm_edit_em", 0), flags_usuario.get("perm_del_em", 0), flags_usuario.get("perm_clientes", 0), flags_usuario.get("perm_estoque", 0), flags_usuario.get("perm_faturamento", 0), flags_usuario.get("perm_atendimentos", 0), flags_usuario.get("perm_edit_atendimentos", 0), json.dumps(sorted(permissoes_usuario), ensure_ascii=False), json.dumps(e_empresas_permitidas, ensure_ascii=False), e_funcionario_nome, e_funcionario_cpf, e_funcionario_rj, e_funcionario_dados_bancarios, e_funcionario_telefone, e_funcionario_email, e_funcionario_endereco, e_funcionario_tipo_contrato, e_funcionario_forma_pagamento, e_funcionario_emite_nf, json.dumps(e_funcionario_deslocamento, ensure_ascii=False), id_ed_u))
                             conn.commit()
                             conn.close()
+                            if (st.session_state.get("username") or "") == (ud.get("username") or ""):
+                                st.session_state["username"] = eu_n
+                                st.session_state["modulo_gerencial"] = int(e_modulo_gerencial)
+                                st.session_state["submodulos"] = json.dumps(sorted(permissoes_usuario), ensure_ascii=False)
+                                for nome_flag, valor_flag in flags_usuario.items():
+                                    st.session_state[nome_flag] = valor_flag
                             st.success("Permissões atualizadas com sucesso!")
                             st.rerun()
     else:

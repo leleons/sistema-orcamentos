@@ -1,0 +1,1 @@
+ALTER TABLE estoque ADD COLUMN modelo VARCHAR(255) DEFAULT '';

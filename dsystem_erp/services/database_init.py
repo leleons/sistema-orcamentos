@@ -13,6 +13,8 @@ from dsystem_erp.migrations import (
     registrar_migration,
 )
 from dsystem_erp.services.security import criar_hash_senha
+from dsystem_erp.repositories.uber import garantir_tabelas_uber
+from dsystem_erp.services.nfse_catalogo_ti import cadastrar_catalogo_ti
 
 def garantir_tabela_nova(conn, cursor, nome_tabela, sql_criacao):
     cursor.execute(sql_criacao)
@@ -35,6 +37,7 @@ def iniciar_banco(conectar_banco):
     c = conn.cursor()
     garantir_tabela_migrations(c)
     aplicar_migrations_pendentes(c)
+    garantir_tabelas_uber(c)
     
     c.execute('''CREATE TABLE IF NOT EXISTS logs_sistema (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -60,7 +63,15 @@ def iniciar_banco(conectar_banco):
         alterado_por TEXT,
         alterado_em TEXT
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS ordens_servico (os_id INT PRIMARY KEY AUTO_INCREMENT, data_os TEXT, cliente TEXT, cpf_cnpj TEXT, endereco TEXT, equipamento TEXT, marca TEXT, avaria TEXT, servico TEXT, atendente TEXT, so TEXT, formatar TEXT, backup TEXT, aplicativos TEXT, fonte TEXT, hd_ssd TEXT, ram TEXT, cpu TEXT, gpu TEXT, placa_mae TEXT, gabinete TEXT, chave_so TEXT, app_especifico_check TEXT, app_especifico_nome TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS ordens_servico (os_id INT PRIMARY KEY AUTO_INCREMENT, cliente_id INTEGER, data_os TEXT, cliente TEXT, cpf_cnpj TEXT, endereco TEXT, equipamento TEXT, marca TEXT, avaria TEXT, servico TEXT, atendente TEXT, so TEXT, formatar TEXT, backup TEXT, aplicativos TEXT, fonte TEXT, hd_ssd TEXT, ram TEXT, cpu TEXT, gpu TEXT, placa_mae TEXT, gabinete TEXT, chave_so TEXT, app_especifico_check TEXT, app_especifico_nome TEXT)''')
+    try: garantir_coluna(c, "ordens_servico", "cliente_id", "INTEGER")
+    except Exception: pass
+    c.execute('''CREATE TABLE IF NOT EXISTS os_tipos_aparelhos (
+        id INT PRIMARY KEY AUTO_INCREMENT, nome VARCHAR(120) NOT NULL UNIQUE,
+        ativo VARCHAR(10) DEFAULT 'Sim', criado_por TEXT, criado_em TEXT
+    )''')
+    for tipo_os_padrao in ("Desktop", "Notebook", "Servidor", "Impressora", "DVR", "Câmera", "Outro"):
+        c.execute("INSERT IGNORE INTO os_tipos_aparelhos (nome, ativo) VALUES (?, ?)", (tipo_os_padrao, "Sim"))
     c.execute('''CREATE TABLE IF NOT EXISTS clientes (id INT PRIMARY KEY AUTO_INCREMENT, codigo_cliente TEXT, documento_chave VARCHAR(20) UNIQUE, nome TEXT, telefone TEXT, telefone_secundario TEXT, email TEXT, emails_cobranca TEXT, cnpj TEXT, rg_mei TEXT, endereco TEXT, numero TEXT, complemento TEXT, bairro TEXT, cidade_estado TEXT, cep TEXT, pessoa TEXT, endereco_padrao TEXT, referencia TEXT, codigo_ibge TEXT, uf TEXT, contato_padrao TEXT, contato_cobranca TEXT, contato TEXT, estado_insc_estadual TEXT, data_nascimento TEXT, optante_simples_nacional TEXT, ramo_atividade TEXT, dias_antecedencia_faturamento TEXT, dia_faturamento TEXT, dia_vencimento TEXT, redes_sociais LONGTEXT, funcionarios LONGTEXT, logo_nome TEXT, logo_mime TEXT, logo LONGBLOB, portal_username TEXT, portal_password TEXT, portal_trocar_senha INTEGER DEFAULT 1, portal_2fa_secret TEXT, portal_2fa_ativo INTEGER DEFAULT 0, portal_ultimo_login TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS orcamentos (orc_id INT PRIMARY KEY AUTO_INCREMENT, numero TEXT, data_orc TEXT, cliente TEXT, cpf_cnpj TEXT, valor_total TEXT, forma_pagamento TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS orcamento_pdfs (
@@ -75,8 +86,54 @@ def iniciar_banco(conectar_banco):
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS usuarios (id INT PRIMARY KEY AUTO_INCREMENT, username TEXT UNIQUE, password TEXT, trocar_senha INTEGER DEFAULT 0, is_admin INTEGER, perm_orcamentos INTEGER, perm_del_orc INTEGER, perm_os INTEGER, perm_edit_os INTEGER, perm_del_os INTEGER, perm_emails INTEGER DEFAULT 1, perm_edit_em INTEGER DEFAULT 0, perm_del_em INTEGER DEFAULT 0, perm_infra INTEGER DEFAULT 1, perm_edit_infra INTEGER DEFAULT 0, perm_del_infra INTEGER DEFAULT 0, perm_clientes INTEGER DEFAULT 1, perm_estoque INTEGER DEFAULT 1, perm_faturamento INTEGER DEFAULT 0, submodulos LONGTEXT, empresas_permitidas LONGTEXT, funcionario_nome TEXT, funcionario_cpf TEXT, funcionario_rj TEXT, funcionario_dados_bancarios TEXT, funcionario_telefone TEXT, funcionario_email TEXT, funcionario_endereco TEXT, funcionario_tipo_contrato TEXT, funcionario_forma_pagamento TEXT, funcionario_emite_nf TEXT, funcionario_deslocamento TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS emails_clientes (id INT PRIMARY KEY AUTO_INCREMENT, cliente_vinculado TEXT, funcionario TEXT, email TEXT, senha TEXT, aliases TEXT, provedor TEXT, config_entrada TEXT, config_saida TEXT, capacidade TEXT, data_verificacao TEXT, backup_realizado TEXT, data_backup TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS infra_v4 (id INT PRIMARY KEY AUTO_INCREMENT, cliente_vinc TEXT, fantasia TEXT, razao TEXT, cnpj TEXT, endereco TEXT, contato TEXT, email_prin TEXT, tel_prin TEXT, tel_prov TEXT, contrato_data TEXT, pagto TEXT, venc TEXT, sys_dados TEXT, sys_serial TEXT, sys_cod TEXT, sys_adm TEXT, sys_senha TEXT, sys_sec TEXT, rede_prov TEXT, rede_ip TEXT, rede_log TEXT, rede_sen TEXT, rede_ddns TEXT, rede_dsen TEXT, rede_wire TEXT, rede_wsen TEXT, serv_nome TEXT, serv_ip TEXT, serv_link TEXT, serv_log TEXT, serv_sen TEXT, cert_log TEXT, cert_sen TEXT, fin_b1 TEXT, fin_b2 TEXT, fin_b3 TEXT, pcs_acessos TEXT, faixas_ip LONGTEXT, vpn_acessos LONGTEXT, hospedagem_acessos LONGTEXT, setores LONGTEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS estoque (id INT PRIMARY KEY AUTO_INCREMENT, codigo TEXT, codigo_entrada TEXT, produto TEXT, nome_generico TEXT, categoria TEXT, fileira TEXT, caixa TEXT, quantidade INTEGER, estoque_minimo INTEGER, valor_custo TEXT, valor_venda TEXT, fornecedor TEXT, observacoes TEXT, foto_nome TEXT, foto_mime TEXT, foto LONGBLOB)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS infra_v4 (id INT PRIMARY KEY AUTO_INCREMENT, cliente_vinc TEXT, fantasia TEXT, razao TEXT, cnpj TEXT, endereco TEXT, contato TEXT, email_prin TEXT, tel_prin TEXT, tel_prov TEXT, contrato_data TEXT, pagto TEXT, venc TEXT, sys_dados TEXT, sys_serial TEXT, sys_cod TEXT, sys_adm TEXT, sys_senha TEXT, sys_sec TEXT, rede_prov TEXT, rede_ip TEXT, rede_log TEXT, rede_sen TEXT, rede_ddns TEXT, rede_dsen TEXT, rede_wire TEXT, rede_wsen TEXT, serv_nome TEXT, serv_ip TEXT, serv_link TEXT, serv_log TEXT, serv_sen TEXT, serv_anydesk LONGTEXT, serv_radmin LONGTEXT, serv_google_remote LONGTEXT, serv_info_gerais LONGTEXT, impressoras_acessos LONGTEXT, cert_log TEXT, cert_sen TEXT, fin_b1 TEXT, fin_b2 TEXT, fin_b3 TEXT, pcs_acessos TEXT, faixas_ip LONGTEXT, vpn_acessos LONGTEXT, hospedagem_acessos LONGTEXT, setores LONGTEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS estoque (id INT PRIMARY KEY AUTO_INCREMENT, codigo TEXT, codigo_entrada TEXT, codigo_item INTEGER, produto TEXT, modelo TEXT, nome_generico TEXT, categoria TEXT, fileira TEXT, caixa TEXT, tem_fonte VARCHAR(5) DEFAULT 'Não', quantidade INTEGER, estoque_minimo INTEGER, valor_custo TEXT, valor_venda TEXT, fornecedor TEXT, observacoes TEXT, foto_nome TEXT, foto_mime TEXT, foto LONGBLOB)''')
+    for coluna_estoque_compra, tipo_estoque_compra in (
+        ("data_compra", "DATE"),
+        ("ultima_nota_entrada_id", "INTEGER"),
+    ):
+        try:
+            garantir_coluna(c, "estoque", coluna_estoque_compra, tipo_estoque_compra)
+        except Exception:
+            pass
+    garantir_tabela_nova(conn, c, "estoque_notas_entrada", '''CREATE TABLE IF NOT EXISTS estoque_notas_entrada (
+        id INT PRIMARY KEY AUTO_INCREMENT, fornecedor TEXT NOT NULL, fornecedor_documento TEXT,
+        numero_nota VARCHAR(120) NOT NULL, serie VARCHAR(40), chave_acesso VARCHAR(60) UNIQUE,
+        data_compra DATE NOT NULL, origem VARCHAR(30) DEFAULT 'Manual', observacoes LONGTEXT,
+        criado_por TEXT, criado_em TEXT, INDEX idx_estoque_nota_fornecedor (fornecedor(120)),
+        INDEX idx_estoque_nota_data (data_compra)
+    )''')
+    garantir_tabela_nova(conn, c, "estoque_nota_entrada_itens", '''CREATE TABLE IF NOT EXISTS estoque_nota_entrada_itens (
+        id INT PRIMARY KEY AUTO_INCREMENT, nota_entrada_id INTEGER NOT NULL, produto_id INTEGER NOT NULL,
+        numero_item VARCHAR(30), codigo_fornecedor VARCHAR(120), codigo_barras VARCHAR(120),
+        descricao TEXT, ncm VARCHAR(30), cfop VARCHAR(20), unidade VARCHAR(20),
+        quantidade DECIMAL(14,3) DEFAULT 0, valor_unitario DECIMAL(14,4) DEFAULT 0,
+        valor_total DECIMAL(14,2) DEFAULT 0, INDEX idx_estoque_nota_item_nota (nota_entrada_id),
+        INDEX idx_estoque_nota_item_produto (produto_id)
+    )''')
+    garantir_tabela_nova(conn, c, "estoque_movimentacoes", '''CREATE TABLE IF NOT EXISTS estoque_movimentacoes (
+        id INT PRIMARY KEY AUTO_INCREMENT, produto_id INTEGER NOT NULL, tipo VARCHAR(60) NOT NULL,
+        quantidade DECIMAL(14,3) NOT NULL, estoque_anterior DECIMAL(14,3) DEFAULT 0,
+        estoque_atual DECIMAL(14,3) DEFAULT 0, cliente_id INTEGER, cliente_nome TEXT,
+        fornecedor TEXT, nota_entrada_id INTEGER, origem VARCHAR(60), origem_id INTEGER,
+        observacoes LONGTEXT, criado_por TEXT, criado_em TEXT,
+        INDEX idx_estoque_mov_produto (produto_id), INDEX idx_estoque_mov_cliente (cliente_id),
+        INDEX idx_estoque_mov_nota (nota_entrada_id)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS estoque_emprestimos (
+        id INT PRIMARY KEY AUTO_INCREMENT, responsavel VARCHAR(255) NOT NULL,
+        cliente_id INTEGER, cliente_nome VARCHAR(255), data_retirada DATE NOT NULL,
+        data_limite DATE NOT NULL, status VARCHAR(40) DEFAULT 'Em aberto', observacoes LONGTEXT,
+        criado_por VARCHAR(255), criado_em VARCHAR(30), encerrado_por VARCHAR(255), encerrado_em VARCHAR(30),
+        INDEX idx_emprestimos_status_limite (status, data_limite)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS estoque_emprestimo_itens (
+        id INT PRIMARY KEY AUTO_INCREMENT, emprestimo_id INT NOT NULL, produto_id INT NOT NULL,
+        codigo VARCHAR(255), produto VARCHAR(255), quantidade INT NOT NULL,
+        status VARCHAR(40) DEFAULT 'Emprestado', resolvido_por VARCHAR(255), resolvido_em VARCHAR(30),
+        observacao_resolucao LONGTEXT, INDEX idx_emprestimo_itens_emprestimo (emprestimo_id),
+        INDEX idx_emprestimo_itens_status (status)
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS equipamentos_os (
         id INT PRIMARY KEY AUTO_INCREMENT,
         os_id INTEGER,
@@ -108,7 +165,9 @@ def iniciar_banco(conectar_banco):
         formatacao TEXT, bkp_convencionais TEXT, bkp_c TEXT, bkp_nav TEXT, bkp_email TEXT, data_backup TEXT,
         pasta_dsys TEXT, limpeza_int TEXT, limpeza_ext TEXT, verif_update TEXT, 
         soft_indesejado TEXT, confirma_soft TEXT, bkp_retornou TEXT, testado_hw TEXT, sacola TEXT, 
-        verif_desempenho TEXT, obs_desempenho TEXT, detalhes_realizado TEXT, senhas_alteradas TEXT, historico TEXT
+        verif_desempenho TEXT, obs_desempenho TEXT, detalhes_realizado TEXT, senhas_alteradas TEXT, historico TEXT,
+        kanban_status VARCHAR(60) DEFAULT 'Recebido', kanban_ordem INTEGER DEFAULT 0,
+        kanban_alterado_por TEXT, kanban_alterado_em TEXT
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS atendimentos_intervencoes (
@@ -183,6 +242,30 @@ def iniciar_banco(conectar_banco):
         status VARCHAR(60) DEFAULT 'Agendado',
         criado_em TEXT
     )''')
+    for coluna_agenda_rec, tipo_agenda_rec in (
+        ("recorrencia_id", "INTEGER"), ("recorrencia_indice", "INTEGER")
+    ):
+        try: garantir_coluna(c, "agenda_visitas", coluna_agenda_rec, tipo_agenda_rec)
+        except Exception: pass
+    c.execute('''CREATE TABLE IF NOT EXISTS agenda_tipos_atendimento (
+        id INT PRIMARY KEY AUTO_INCREMENT, nome VARCHAR(120) NOT NULL UNIQUE,
+        ativo VARCHAR(10) DEFAULT 'Sim', criado_por TEXT, criado_em TEXT
+    )''')
+    for tipo_agenda_padrao in ("Suporte Presencial", "Instalação", "Manutenção Preventiva", "Reunião", "Entrega de Equipamento", "Outro"):
+        c.execute("INSERT IGNORE INTO agenda_tipos_atendimento (nome, ativo) VALUES (?, ?)", (tipo_agenda_padrao, "Sim"))
+    c.execute('''CREATE TABLE IF NOT EXISTS agenda_recorrencias (
+        id INT PRIMARY KEY AUTO_INCREMENT, tecnico TEXT, cliente_id INTEGER, cliente_nome TEXT,
+        data_inicio TEXT, hora_inicio TEXT, hora_fim TEXT, tipo_atendimento TEXT, descricao LONGTEXT,
+        periodicidade VARCHAR(40), dia_semana INTEGER, dia_mes INTEGER,
+        mes_anual INTEGER, dia_anual INTEGER, modo_termino VARCHAR(40), quantidade INTEGER,
+        data_fim TEXT, ativa VARCHAR(10) DEFAULT 'Sim', criado_por TEXT, criado_em TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS agenda_atividades (
+        id INT PRIMARY KEY AUTO_INCREMENT, atividade LONGTEXT NOT NULL, cliente_id INTEGER,
+        cliente_nome TEXT, data_execucao TEXT, hora_execucao TEXT, executor TEXT,
+        status VARCHAR(40) DEFAULT 'Pendente', criado_por TEXT, criado_em TEXT,
+        alterado_por TEXT, alterado_em TEXT
+    )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS autorizacoes_cliente (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -217,7 +300,11 @@ def iniciar_banco(conectar_banco):
         resposta_cliente TEXT,
         criado_por TEXT,
         criado_em TEXT,
-        atualizado_em TEXT
+        atualizado_em TEXT,
+        kanban_status VARCHAR(60) DEFAULT 'Recebido',
+        kanban_ordem INTEGER DEFAULT 0,
+        kanban_alterado_por TEXT,
+        kanban_alterado_em TEXT
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS chamados_mensagens (
@@ -261,6 +348,11 @@ def iniciar_banco(conectar_banco):
         armazenamento VARCHAR(40) DEFAULT 'banco',
         criado_por TEXT,
         criado_em TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS base_pesquisa (
+        id INT PRIMARY KEY AUTO_INCREMENT, titulo VARCHAR(255) NOT NULL, categoria VARCHAR(120),
+        palavras_chave TEXT, problema LONGTEXT, solucao LONGTEXT, criado_por TEXT, criado_em TEXT,
+        alterado_por TEXT, alterado_em TEXT, INDEX idx_base_pesquisa_titulo (titulo)
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS contrato_clausulas (
@@ -310,6 +402,16 @@ def iniciar_banco(conectar_banco):
         criado_por TEXT,
         criado_em TEXT
     )''')
+    for coluna_cobranca_contrato, tipo_cobranca_contrato in (
+        ("contrato_id", "INTEGER"),
+        ("origem", "VARCHAR(40) DEFAULT 'Manual'"),
+    ):
+        try: garantir_coluna(c, "cobrancas_recorrentes", coluna_cobranca_contrato, tipo_cobranca_contrato)
+        except Exception: pass
+    try:
+        c.execute("CREATE UNIQUE INDEX uq_cobranca_contrato ON cobrancas_recorrentes (contrato_id)")
+    except Exception:
+        pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS cobrancas_renovacoes (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -357,10 +459,21 @@ def iniciar_banco(conectar_banco):
         except Exception: pass
     for coluna_eq_kanban, tipo_eq_kanban in (
         ("kanban_status", "VARCHAR(60) DEFAULT 'Recebido'"), ("etiqueta_codigo", "VARCHAR(80)"),
+        ("kanban_arquivado", "INTEGER DEFAULT 0"),
         ("kanban_alterado_por", "TEXT"), ("kanban_alterado_em", "TEXT"), ("kanban_ordem", "INTEGER DEFAULT 0"),
     ):
         try: garantir_coluna(c, "equipamentos_os", coluna_eq_kanban, tipo_eq_kanban)
         except Exception: pass
+    for tabela_kanban in ("atendimentos_checklist", "chamados_cliente"):
+        for coluna_kanban, tipo_kanban in (
+            ("kanban_status", "VARCHAR(60) DEFAULT 'Recebido'"),
+            ("kanban_ordem", "INTEGER DEFAULT 0"),
+            ("kanban_alterado_por", "TEXT"),
+            ("kanban_alterado_em", "TEXT"),
+            ("kanban_arquivado", "INTEGER DEFAULT 0"),
+        ):
+            try: garantir_coluna(c, tabela_kanban, coluna_kanban, tipo_kanban)
+            except Exception: pass
     c.execute('''CREATE TABLE IF NOT EXISTS contratos (
         id INT PRIMARY KEY AUTO_INCREMENT, tipo VARCHAR(100), parte_tipo VARCHAR(40), parte_id INTEGER,
         parte_nome TEXT, nome_arquivo TEXT, mime_type TEXT, arquivo LONGBLOB,
@@ -368,6 +481,16 @@ def iniciar_banco(conectar_banco):
         observacoes LONGTEXT, criado_por TEXT, criado_em TEXT, alterado_por TEXT, alterado_em TEXT,
         INDEX idx_contratos_parte (parte_tipo, parte_id)
     )''')
+    for coluna_contrato_rec, tipo_contrato_rec in (
+        ("assinado", "VARCHAR(10) DEFAULT 'Não'"), ("data_assinatura", "TEXT"),
+        ("gerar_recorrencia", "VARCHAR(10) DEFAULT 'Não'"),
+        ("recorrencia_tipo", "TEXT"), ("recorrencia_periodicidade", "VARCHAR(40)"),
+        ("recorrencia_primeiro_vencimento", "TEXT"), ("recorrencia_fim", "TEXT"),
+        ("recorrencia_valor", "DECIMAL(14,2) DEFAULT 0"),
+        ("recorrencia_pagamento", "TEXT"), ("cobranca_recorrente_id", "INTEGER"),
+    ):
+        try: garantir_coluna(c, "contratos", coluna_contrato_rec, tipo_contrato_rec)
+        except Exception: pass
     c.execute('''CREATE TABLE IF NOT EXISTS cotacoes_compra (
         id INT PRIMARY KEY AUTO_INCREMENT,
         pedido_compra_id INTEGER NOT NULL,
@@ -380,6 +503,15 @@ def iniciar_banco(conectar_banco):
         criado_por TEXT,
         criado_em TEXT,
         INDEX idx_cotacoes_pedido (pedido_compra_id)
+    )''')
+    garantir_tabela_nova(conn, c, "garantias_clientes", '''CREATE TABLE IF NOT EXISTS garantias_clientes (
+        id INT PRIMARY KEY AUTO_INCREMENT, numero VARCHAR(40) NOT NULL UNIQUE,
+        cliente_id INTEGER NOT NULL, cliente TEXT NOT NULL, cliente_documento TEXT,
+        faturamento_id INTEGER, data_emissao TEXT NOT NULL, origem TEXT, itens LONGTEXT,
+        condicoes LONGTEXT, historico LONGTEXT, status VARCHAR(30) DEFAULT 'Emitida',
+        pdf_nome TEXT, pdf_mime TEXT, pdf LONGBLOB, criado_por TEXT, criado_em TEXT,
+        alterado_por TEXT, alterado_em TEXT, INDEX idx_garantia_cliente (cliente_id),
+        INDEX idx_garantia_faturamento (faturamento_id)
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS clientes_portal_usuarios (
@@ -411,6 +543,14 @@ def iniciar_banco(conectar_banco):
         nota_fiscal TEXT, boleto TEXT, status VARCHAR(60) DEFAULT 'Aberto',
         alterado_por TEXT, alterado_em TEXT
     )''')
+    for coluna_medicao, tipo_medicao in (
+        ("modalidade_faturamento", "VARCHAR(30) DEFAULT 'Por item'"),
+        ("medicao_numero", "VARCHAR(80)"), ("medicao_inicio", "TEXT"),
+        ("medicao_fim", "TEXT"), ("medicao_percentual", "DECIMAL(10,4) DEFAULT 0"),
+        ("medicao_referencia", "TEXT"), ("medicao_historico", "LONGTEXT"),
+    ):
+        try: garantir_coluna(c, "faturamento", coluna_medicao, tipo_medicao)
+        except Exception: pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS faturamento_anexos (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -460,9 +600,30 @@ def iniciar_banco(conectar_banco):
             ("taxas_baixa", "DECIMAL(14,2) DEFAULT 0"), ("juros_baixa", "DECIMAL(14,2) DEFAULT 0"),
             ("multa_baixa", "DECIMAL(14,2) DEFAULT 0"), ("desconto_baixa", "DECIMAL(14,2) DEFAULT 0"),
             ("cancelado_por", "TEXT"), ("motivo_cancelamento", "LONGTEXT"),
+            ("conciliado", "VARCHAR(10) DEFAULT 'Não'"), ("data_conciliacao", "TEXT"),
+            ("conciliado_por", "TEXT"),
         ]:
             try: c.execute(f"ALTER TABLE {tabela_fin} ADD COLUMN {coluna_fin} {tipo_coluna}")
             except Exception: pass
+    for coluna_fatura, tipo_fatura in [
+        ("fatura_cartao", "VARCHAR(10) DEFAULT 'Não'"),
+        ("cartao_credito", "TEXT"),
+        ("itens_fatura_cartao", "LONGTEXT"),
+        ("conta_receber_origem_id", "INTEGER"),
+    ]:
+        try: garantir_coluna(c, "contas_pagar", coluna_fatura, tipo_fatura)
+        except Exception: pass
+    try:
+        c.execute(
+            "CREATE UNIQUE INDEX uq_pagar_origem_receber ON contas_pagar (conta_receber_origem_id)"
+        )
+    except Exception:
+        pass
+    garantir_tabela_nova(conn, c, "financeiro_fatura_cartao_itens", '''CREATE TABLE IF NOT EXISTS financeiro_fatura_cartao_itens (
+        id INT PRIMARY KEY AUTO_INCREMENT, conta_pagar_id INTEGER NOT NULL, descricao TEXT,
+        data_compra TEXT, categoria TEXT, valor DECIMAL(14,2) DEFAULT 0,
+        criado_por TEXT, criado_em TEXT, INDEX idx_fatura_cartao_conta (conta_pagar_id)
+    )''')
     for coluna_rec, tipo_rec in [
         ("regime_tributario", "VARCHAR(40) DEFAULT 'Normal'"), ("impostos", "LONGTEXT"),
         ("simples_aliquota", "DECIMAL(10,4) DEFAULT 0"), ("simples_valor", "DECIMAL(14,2) DEFAULT 0"),
@@ -475,6 +636,10 @@ def iniciar_banco(conectar_banco):
         ("quantidade_custo", "DECIMAL(14,3) DEFAULT 1"), ("custo_total", "DECIMAL(14,2) DEFAULT 0"),
         ("lucro_estimado", "DECIMAL(14,2) DEFAULT 0"), ("margem_lucro_percentual", "DECIMAL(10,4) DEFAULT 0"),
         ("cobranca_recorrente_id", "INTEGER"), ("cobranca_competencia", "VARCHAR(30)"),
+        ("tem_terceiro", "VARCHAR(10) DEFAULT 'Não'"), ("terceiro_prestador", "TEXT"),
+        ("terceiro_documento", "TEXT"), ("terceiro_valor", "DECIMAL(14,2) DEFAULT 0"),
+        ("terceiro_historico", "LONGTEXT"), ("terceiro_vencimento", "TEXT"),
+        ("terceiro_conta_pagar_id", "INTEGER"),
     ]:
         try: garantir_coluna(c, "contas_receber", coluna_rec, tipo_rec)
         except Exception: pass
@@ -536,17 +701,7 @@ def iniciar_banco(conectar_banco):
         ("Paginas eletronicas / Web design", "01.08.01", "01.08", 0, "Sim", "Planejamento, criacao, manutencao e atualizacao de sites."),
         ("Manutencao de hardware/equipamentos", "14.01.01", "14.01", 0, "Sim", "Manutencao, reparo, limpeza, troca de pecas e revisao de computadores, notebooks e perifericos."),
     ]
-    for servico_padrao in servicos_informatica_padrao:
-        c.execute("SELECT COUNT(*) AS total FROM nfse_bh_servicos WHERE codigo_servico=? AND nome=?", (servico_padrao[1], servico_padrao[0]))
-        total_servico_padrao = c.fetchone()
-        total_servico_padrao = total_servico_padrao.get("total") if isinstance(total_servico_padrao, dict) else total_servico_padrao[0]
-        if not total_servico_padrao:
-            c.execute(
-                """INSERT INTO nfse_bh_servicos
-                   (nome, codigo_servico, item_lista_servico, aliquota_iss, ativo, observacoes)
-                   VALUES (?,?,?,?,?,?)""",
-                servico_padrao,
-            )
+    cadastrar_catalogo_ti(c, servicos_informatica_padrao)
 
     c.execute('''CREATE TABLE IF NOT EXISTS codigos_fiscais_produtos (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -636,6 +791,7 @@ def iniciar_banco(conectar_banco):
         "pessoa", "endereco_padrao", "referencia", "codigo_ibge", "uf",
         "contato_padrao", "contato_cobranca", "contato", "estado_insc_estadual",
         "data_nascimento", "optante_simples_nacional", "ramo_atividade",
+        "situacao_simples_nacional", "emite_nota_fiscal",
         "dias_antecedencia_faturamento", "dia_faturamento", "dia_vencimento",
     ]:
         try: c.execute(f"ALTER TABLE clientes ADD COLUMN {coluna_cliente_nova} TEXT")
@@ -702,6 +858,9 @@ def iniciar_banco(conectar_banco):
     except Exception: pass
     try: c.execute("ALTER TABLE infra_v4 ADD COLUMN hospedagem_acessos LONGTEXT")
     except Exception: pass
+    for coluna_infra_nova in ("serv_anydesk", "serv_radmin", "serv_google_remote", "serv_info_gerais", "impressoras_acessos"):
+        try: c.execute(f"ALTER TABLE infra_v4 ADD COLUMN {coluna_infra_nova} LONGTEXT")
+        except Exception: pass
     try: c.execute("ALTER TABLE atendimentos_intervencoes ADD COLUMN proxima_preventiva TEXT")
     except Exception: pass
     try: c.execute("ALTER TABLE infra_equipamentos ADD COLUMN funcionario_usuario TEXT")
@@ -712,7 +871,11 @@ def iniciar_banco(conectar_banco):
     except Exception: pass
     try: c.execute("ALTER TABLE estoque ADD COLUMN codigo_entrada VARCHAR(255) DEFAULT ''")
     except Exception: pass
+    try: c.execute("ALTER TABLE estoque ADD COLUMN codigo_item INTEGER")
+    except Exception: pass
     try: c.execute("ALTER TABLE estoque ADD COLUMN nome_generico VARCHAR(255) DEFAULT ''")
+    except Exception: pass
+    try: c.execute("ALTER TABLE estoque ADD COLUMN modelo VARCHAR(255) DEFAULT ''")
     except Exception: pass
     try: c.execute("ALTER TABLE estoque ADD COLUMN fileira VARCHAR(255) DEFAULT ''")
     except Exception: pass
@@ -731,9 +894,41 @@ def iniciar_banco(conectar_banco):
         ("preco_revenda_automatico", "VARCHAR(5) DEFAULT 'Não'"),
         ("permitir_ajuste_preco", "INTEGER DEFAULT 0"),
         ("situacao_nota", "VARCHAR(30) DEFAULT 'Comprado com nota'"),
+        ("tem_fonte", "VARCHAR(5) DEFAULT 'Não'"),
     ):
         try: c.execute(f"ALTER TABLE estoque ADD COLUMN {coluna_estoque_preco} {tipo_estoque_preco}")
         except Exception: pass
+    try:
+        c.execute("SELECT id, codigo_item, codigo_entrada, produto FROM estoque ORDER BY id")
+        produtos_sem_codigo = [dict(item) for item in c.fetchall()]
+        codigos_usados = set()
+        for produto_codigo in produtos_sem_codigo:
+            candidato = produto_codigo.get("codigo_item")
+            if not str(candidato or "").strip().isdigit():
+                parte_codigo = str(produto_codigo.get("codigo_entrada") or "").rsplit(".", 1)[-1].strip()
+                candidato = parte_codigo if parte_codigo.isdigit() else None
+            if not candidato and str(produto_codigo.get("produto") or "").strip().isdigit():
+                candidato = str(produto_codigo.get("produto")).strip()
+            candidato = int(candidato) if str(candidato or "").isdigit() else 0
+            if candidato > 0 and candidato not in codigos_usados:
+                produto_codigo["codigo_item"] = candidato
+                codigos_usados.add(candidato)
+                c.execute("UPDATE estoque SET codigo_item=? WHERE id=?", (candidato, produto_codigo.get("id")))
+            else:
+                produto_codigo["codigo_item"] = None
+        proximo_codigo_livre = 1
+        for produto_codigo in produtos_sem_codigo:
+            if produto_codigo.get("codigo_item"):
+                continue
+            while proximo_codigo_livre in codigos_usados:
+                proximo_codigo_livre += 1
+            c.execute(
+                "UPDATE estoque SET codigo_item=? WHERE id=?",
+                (proximo_codigo_livre, produto_codigo.get("id")),
+            )
+            codigos_usados.add(proximo_codigo_livre)
+    except Exception:
+        pass
     try: c.execute('ALTER TABLE usuarios ADD COLUMN perm_faturamento INTEGER DEFAULT 0')
     except Exception: pass
     try: c.execute('ALTER TABLE usuarios ADD COLUMN modulo_gerencial INTEGER DEFAULT 0')
@@ -837,6 +1032,10 @@ def iniciar_banco(conectar_banco):
              0, 0, 0, json.dumps(["os.view", "os.edit", "recepcao.view", "recepcao.edit"]),
              "[]", "Recepção"))
     
+    from dsystem_erp.services.conciliacao import instalar_protecao_conciliacao
+    for coluna_bancaria in ("banco", "agencia", "numero_conta", "titular", "documento_titular", "chave_pix"):
+        garantir_coluna(c, "financeiro_cadastros_aux", coluna_bancaria, "TEXT")
+    instalar_protecao_conciliacao(c)
     registrar_migration(c, "000_schema_legado_iniciar_banco", "Schema atual criado e atualizado pelo iniciar_banco legado.")
     conn.commit()
     conn.close()

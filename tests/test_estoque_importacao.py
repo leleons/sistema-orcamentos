@@ -1,6 +1,7 @@
 from dsystem_erp.services.estoque_importacao import (
     codigo_localizacao_valido,
     interpretar_codigo_localizacao,
+    montar_codigo_localizacao,
     separar_codigo_localizacao,
 )
 
@@ -41,3 +42,11 @@ def test_interpreta_item_usado_da_area_de_infraestrutura():
 def test_rejeita_estado_ou_area_desconhecidos():
     assert not codigo_localizacao_valido("03.01.07")
     assert not codigo_localizacao_valido("01.05.07")
+
+
+def test_monta_codigo_completo_com_as_tres_partes():
+    assert montar_codigo_localizacao("1-01 Novo", "2-04 Infraestrutura", "10") == "01.04.10"
+
+
+def test_monta_codigo_com_item_de_varias_partes():
+    assert montar_codigo_localizacao("1-02 Usado", "2-02 CFTV", "07.03") == "02.02.07.03"

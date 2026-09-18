@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKUP_DIR = ROOT / "backups" / "mysql"
+MAX_BACKUPS = 2
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -33,13 +34,16 @@ def retention_days(kind):
     }.get(kind, 14)
 
 
-def cleanup_old_backups(db, kind):
-    cutoff = datetime.now().timestamp() - retention_days(kind) * 86400
-    for old in BACKUP_DIR.glob(f"{db}_{kind}_*.sql.gz"):
-        if old.stat().st_mtime < cutoff:
-            old.unlink(missing_ok=True)
-            meta = old.with_suffix(old.suffix + ".json")
-            meta.unlink(missing_ok=True)
+def cleanup_old_backups(db, kind=None):
+    """Mantém somente os backups mais recentes do banco, com seus metadados."""
+    backups = sorted(
+        BACKUP_DIR.glob(f"{db}_*.sql.gz"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for old in backups[MAX_BACKUPS:]:
+        old.unlink(missing_ok=True)
+        old.with_suffix(old.suffix + ".json").unlink(missing_ok=True)
 
 
 def encontrar_mysqldump():
@@ -120,6 +124,7 @@ def run_backup(kind):
         "criado_em": datetime.now().isoformat(timespec="seconds"),
         "tamanho_bytes": out_file.stat().st_size,
         "retencao_dias": retention_days(kind),
+        "maximo_backups": MAX_BACKUPS,
     }
     out_file.with_suffix(out_file.suffix + ".json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2),

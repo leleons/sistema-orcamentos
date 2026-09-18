@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -10,6 +10,14 @@ from xml.etree import ElementTree as ET
 
 NFE_NS = "http://www.portalfiscal.inf.br/nfe"
 SOAP_NFE_AUTORIZACAO_NS = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4"
+NOME_HOMOLOGACAO = "NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
+
+
+def endpoint_autorizacao_nfe(uf: str, ambiente: str) -> str:
+    if uf.upper() != "MG":
+        return ""
+    host = "nfe" if _ambiente(ambiente) == "1" else "hnfe"
+    return f"https://{host}.fazenda.mg.gov.br/nfe2/services/NFeAutorizacao4"
 ET.register_namespace("", NFE_NS)
 
 CODIGO_UF = {
@@ -79,7 +87,7 @@ def _data_iso(valor: Any) -> str:
 
 def _decimal_nfe(valor: Any, casas: int = 2) -> str:
     quant = Decimal("1").scaleb(-casas)
-    return str(_decimal(valor).quantize(quant))
+    return str(_decimal(valor).quantize(quant, rounding=ROUND_HALF_UP))
 
 
 def _valor_item(item: dict[str, Any]) -> Decimal:
@@ -161,7 +169,8 @@ def gerar_xml_nfe_produto_400(
     _tag(ide, "nNF", numero_nf)
     _tag(ide, "dhEmi", emissao.isoformat(timespec="seconds"))
     _tag(ide, "tpNF", "1")
-    _tag(ide, "idDest", "1")
+    endereco_dest = dados.get("destinatario") or {}
+    _tag(ide, "idDest", "2" if endereco_dest.get("uf") and endereco_dest["uf"].upper() != uf else "1")
     _tag(ide, "cMunFG", _somente_digitos(dados.get("codigo_municipio") or "3156700"))
     _tag(ide, "tpImp", "1")
     _tag(ide, "tpEmis", "1")
@@ -198,16 +207,30 @@ def gerar_xml_nfe_produto_400(
         _tag(dest, "CNPJ", cpf_cnpj_dest)
     elif len(cpf_cnpj_dest) == 11:
         _tag(dest, "CPF", cpf_cnpj_dest)
-    _tag(dest, "xNome", _limitar(faturamento.get("cliente") or "Consumidor final", 60))
-    _tag(dest, "indIEDest", "9")
+    _tag(dest, "xNome", NOME_HOMOLOGACAO if _ambiente(dados.get("ambiente")) == "2" else _limitar(faturamento.get("cliente") or "Consumidor final", 60))
+    if endereco_dest:
+        ender_dest = _tag(dest, "enderDest")
+        for campo, tag in (("logradouro", "xLgr"), ("numero", "nro"), ("bairro", "xBairro"),
+                           ("codigo_municipio", "cMun"), ("municipio", "xMun"), ("uf", "UF")):
+            _tag(ender_dest, tag, endereco_dest.get(campo))
+        if endereco_dest.get("cep"):
+            _tag(ender_dest, "CEP", _somente_digitos(endereco_dest["cep"]))
+        _tag(ender_dest, "cPais", "1058")
+        _tag(ender_dest, "xPais", "BRASIL")
+    _tag(dest, "indIEDest", str(endereco_dest.get("indicador_ie") or "9"))
+    if endereco_dest.get("indicador_ie") == "1" and endereco_dest.get("ie"):
+        _tag(dest, "IE", _somente_digitos(endereco_dest["ie"]))
 
     total_produtos = Decimal("0")
+    totais_rtc = dict(base=Decimal(0), uf=Decimal(0), municipal=Decimal(0), cbs=Decimal(0))
+    tem_rtc = False
+    totais_impostos = {k: Decimal(0) for k in ("vBC", "vICMS", "vPIS", "vCOFINS")}
     for indice, item in enumerate(itens, start=1):
         quantidade = _decimal(item.get("qtd") or 1)
         valor_unitario = _decimal(item.get("vunit"))
         valor_total = _valor_item(item)
         total_produtos += valor_total
-        ncm = _somente_digitos(item.get("ncm") or dados.get("ncm"))[:8]
+        ncm = _somente_digitos(item.get("ncm") or dados.get("ncm"))
         det = _tag(inf, "det", attrs={"nItem": str(indice)})
         prod = _tag(det, "prod")
         _tag(prod, "cProd", _limitar(item.get("codigo") or item.get("id") or indice, 60))
@@ -228,30 +251,65 @@ def gerar_xml_nfe_produto_400(
         imposto = _tag(det, "imposto")
         _tag(imposto, "vTotTrib", "0.00")
         icms = _tag(imposto, "ICMS")
-        if crt in {"1", "2"}:
+        fiscal = item.get("tributos") or {}
+        base_icms = _decimal(fiscal.get("base_icms"))
+        valor_icms = _decimal(_decimal_nfe(base_icms * _decimal(fiscal.get("icms")) / 100))
+        if crt == "1":
             icms_sn = _tag(icms, "ICMSSN102")
-            _tag(icms_sn, "orig", "0")
+            _tag(icms_sn, "orig", str(item.get("origem") or "0"))
             _tag(icms_sn, "CSOSN", "102")
         else:
             icms_00 = _tag(icms, "ICMS00")
-            _tag(icms_00, "orig", "0")
+            _tag(icms_00, "orig", str(item.get("origem") or "0"))
             _tag(icms_00, "CST", "00")
             _tag(icms_00, "modBC", "3")
-            _tag(icms_00, "vBC", "0.00")
-            _tag(icms_00, "pICMS", "0.00")
-            _tag(icms_00, "vICMS", "0.00")
+            _tag(icms_00, "vBC", _decimal_nfe(base_icms))
+            _tag(icms_00, "pICMS", _decimal_nfe(fiscal.get("icms"), 4))
+            _tag(icms_00, "vICMS", _decimal_nfe(valor_icms))
+            totais_impostos["vBC"] += _decimal(_decimal_nfe(base_icms))
+            totais_impostos["vICMS"] += valor_icms
         pis = _tag(imposto, "PIS")
         pis_aliq = _tag(pis, "PISAliq")
         _tag(pis_aliq, "CST", "01")
-        _tag(pis_aliq, "vBC", "0.00")
-        _tag(pis_aliq, "pPIS", "0.00")
-        _tag(pis_aliq, "vPIS", "0.00")
+        valor_pis = _decimal(_decimal_nfe(_decimal(fiscal.get("base_pis")) * _decimal(fiscal.get("pis")) / 100))
+        _tag(pis_aliq, "vBC", _decimal_nfe(fiscal.get("base_pis")))
+        _tag(pis_aliq, "pPIS", _decimal_nfe(fiscal.get("pis"), 4))
+        _tag(pis_aliq, "vPIS", _decimal_nfe(valor_pis))
+        totais_impostos["vPIS"] += valor_pis
         cofins = _tag(imposto, "COFINS")
         cofins_aliq = _tag(cofins, "COFINSAliq")
         _tag(cofins_aliq, "CST", "01")
-        _tag(cofins_aliq, "vBC", "0.00")
-        _tag(cofins_aliq, "pCOFINS", "0.00")
-        _tag(cofins_aliq, "vCOFINS", "0.00")
+        valor_cofins = _decimal(_decimal_nfe(_decimal(fiscal.get("base_cofins")) * _decimal(fiscal.get("cofins")) / 100))
+        _tag(cofins_aliq, "vBC", _decimal_nfe(fiscal.get("base_cofins")))
+        _tag(cofins_aliq, "pCOFINS", _decimal_nfe(fiscal.get("cofins"), 4))
+        _tag(cofins_aliq, "vCOFINS", _decimal_nfe(valor_cofins))
+        totais_impostos["vCOFINS"] += valor_cofins
+        rtc = item.get("ibscbs") or dados.get("ibscbs")
+        if rtc:
+            if rtc.get("cst") != "000" or rtc.get("classificacao") != "000001":
+                raise ValueError("Este fluxo suporta IBS/CBS de tributação integral 000/000001. Configure outro tratamento antes de emitir operações especiais.")
+            base = _decimal(rtc.get("base"))
+            if base < 0:
+                raise ValueError("Base de IBS/CBS não pode ser negativa.")
+            tem_rtc = True
+            valores_rtc = {campo: _decimal(_decimal_nfe(base * _decimal(rtc.get(campo)) / 100))
+                           for campo in ("uf", "municipal", "cbs")}
+            totais_rtc["base"] += _decimal(_decimal_nfe(base))
+            for campo in valores_rtc:
+                totais_rtc[campo] += valores_rtc[campo]
+            trib_rtc = _tag(imposto, "IBSCBS")
+            _tag(trib_rtc, "CST", rtc["cst"])
+            _tag(trib_rtc, "cClassTrib", rtc["classificacao"])
+            grupo = _tag(trib_rtc, "gIBSCBS")
+            _tag(grupo, "vBC", _decimal_nfe(base))
+            for campo, grupo_nome, ptag, vtag in (("uf", "gIBSUF", "pIBSUF", "vIBSUF"), ("municipal", "gIBSMun", "pIBSMun", "vIBSMun")):
+                sub = _tag(grupo, grupo_nome)
+                _tag(sub, ptag, _decimal_nfe(rtc[campo], 4))
+                _tag(sub, vtag, _decimal_nfe(valores_rtc[campo]))
+            _tag(grupo, "vIBS", _decimal_nfe(valores_rtc["uf"] + valores_rtc["municipal"]))
+            cbs = _tag(grupo, "gCBS")
+            _tag(cbs, "pCBS", _decimal_nfe(rtc["cbs"], 4))
+            _tag(cbs, "vCBS", _decimal_nfe(valores_rtc["cbs"]))
 
     total = _tag(inf, "total")
     icms_tot = _tag(total, "ICMSTot")
@@ -277,13 +335,32 @@ def gerar_xml_nfe_produto_400(
         ("vNF", _decimal_nfe(total_produtos, 2)),
         ("vTotTrib", "0.00"),
     ]:
-        _tag(icms_tot, nome, valor)
+        _tag(icms_tot, nome, _decimal_nfe(totais_impostos[nome]) if nome in totais_impostos else valor)
+    if tem_rtc:
+        tot = _tag(total, "IBSCBSTot")
+        _tag(tot, "vBCIBSCBS", _decimal_nfe(totais_rtc["base"]))
+        ibs = _tag(tot, "gIBS")
+        for campo, grupo_nome, vtag in (("uf", "gIBSUF", "vIBSUF"), ("municipal", "gIBSMun", "vIBSMun")):
+            sub = _tag(ibs, grupo_nome)
+            _tag(sub, "vDif", "0.00")
+            _tag(sub, "vDevTrib", "0.00")
+            _tag(sub, vtag, _decimal_nfe(totais_rtc[campo]))
+        _tag(ibs, "vIBS", _decimal_nfe(totais_rtc["uf"] + totais_rtc["municipal"]))
+        _tag(ibs, "vCredPres", "0.00")
+        _tag(ibs, "vCredPresCondSus", "0.00")
+        cbs = _tag(tot, "gCBS")
+        _tag(cbs, "vDif", "0.00")
+        _tag(cbs, "vDevTrib", "0.00")
+        _tag(cbs, "vCBS", _decimal_nfe(totais_rtc["cbs"]))
+        _tag(cbs, "vCredPres", "0.00")
+        _tag(cbs, "vCredPresCondSus", "0.00")
 
     transp = _tag(inf, "transp")
     _tag(transp, "modFrete", "9")
     pag = _tag(inf, "pag")
     det_pag = _tag(pag, "detPag")
     _tag(det_pag, "tPag", "99")
+    _tag(det_pag, "xPag", "Outros")
     _tag(det_pag, "vPag", _decimal_nfe(total_produtos, 2))
 
     obs = _texto(dados.get("observacoes"))
@@ -314,15 +391,51 @@ def validar_xml_nfe_produto_minimo(xml_bytes: bytes, dados: dict[str, Any], iten
         pendencias.append("Inscricao Estadual do emitente e obrigatoria para NF-e de produto.")
     if not itens:
         pendencias.append("A NF-e de produto precisa ter ao menos um item.")
+    endereco = dados.get("destinatario") or {}
+    for campo in ("logradouro", "numero", "bairro", "municipio", "uf", "codigo_municipio"):
+        if not _texto(endereco.get(campo)):
+            pendencias.append(f"Endereço do destinatário: preencha {campo}.")
+    if endereco.get("uf") not in CODIGO_UF:
+        pendencias.append("UF do destinatário inválida; use duas letras maiúsculas.")
+    if len(str(endereco.get("codigo_municipio") or "")) != 7 or not str(endereco.get("codigo_municipio") or "").isdigit():
+        pendencias.append("Código IBGE do destinatário deve ter 7 dígitos.")
+    if str(endereco.get("indicador_ie")) == "1" and not _somente_digitos(endereco.get("ie")):
+        pendencias.append("Destinatário contribuinte: informe a Inscrição Estadual.")
+    dest_xml = raiz.find(f".//{{{NFE_NS}}}dest")
+    if dest_xml is None or not (dest_xml.findtext(f"{{{NFE_NS}}}CNPJ") or dest_xml.findtext(f"{{{NFE_NS}}}CPF")):
+        pendencias.append("CPF/CNPJ do destinatário deve ter 11 ou 14 dígitos.")
+    if not 1 <= int(_decimal(dados.get("serie") or 1)) <= 889:
+        pendencias.append("Use série entre 1 e 889 para emissão por aplicativo próprio.")
     for idx, item in enumerate(itens, start=1):
-        ncm = _somente_digitos(item.get("ncm") or dados.get("ncm"))
-        cfop = _somente_digitos(item.get("cfop") or dados.get("cfop"))
-        if len(ncm) != 8:
+        ncm_bruto = str(item.get("ncm") or dados.get("ncm") or "").replace(".", "").strip()
+        cfop_bruto = str(item.get("cfop") or dados.get("cfop") or "").strip()
+        ncm = _somente_digitos(ncm_bruto)
+        cfop = _somente_digitos(cfop_bruto)
+        if len(ncm) != 8 or not ncm_bruto.isascii() or not ncm_bruto.isdigit():
             pendencias.append(f"Item {idx}: NCM precisa ter 8 digitos.")
-        if len(cfop) != 4:
+        if len(cfop) != 4 or not cfop_bruto.isascii() or not cfop_bruto.isdigit():
             pendencias.append(f"Item {idx}: CFOP precisa ter 4 digitos.")
         if _valor_item(item) <= 0:
             pendencias.append(f"Item {idx}: valor total precisa ser maior que zero.")
+        if _decimal(item.get("qtd")) <= 0 or _decimal(item.get("vunit")) <= 0:
+            pendencias.append(f"Item {idx}: quantidade e valor unitário devem ser positivos.")
+        if abs(_decimal(_decimal_nfe(_decimal(item.get("qtd")) * _decimal(item.get("vunit")))) - _valor_item(item)) > Decimal("0.01"):
+            pendencias.append(f"Item {idx}: total difere da quantidade multiplicada pelo valor unitário.")
+        fiscal = item.get("tributos") or {}
+        for campo in (("base_icms", "icms") if _crt(dados.get("regime_tributario")) != "1" else ()) + ("base_pis", "pis", "base_cofins", "cofins"):
+            if fiscal.get(campo) is None:
+                pendencias.append(f"Item {idx}: informe {campo} conforme a tributação da operação.")
+            elif _decimal(fiscal[campo]) < 0 or (not campo.startswith("base_") and _decimal(fiscal[campo]) > 100):
+                pendencias.append(f"Item {idx}: valor inválido para {campo}.")
+        rtc = item.get("ibscbs") or dados.get("ibscbs")
+        if rtc:
+            for campo in ("base", "uf", "municipal", "cbs"):
+                if rtc.get(campo) is None:
+                    pendencias.append(f"Item {idx}: informe IBS/CBS {campo}.")
+                elif _decimal(rtc[campo]) < 0 or (campo != "base" and _decimal(rtc[campo]) > 100):
+                    pendencias.append(f"Item {idx}: IBS/CBS {campo} inválido.")
+        if _crt(dados.get("regime_tributario")) in {"2", "3"} and not (item.get("ibscbs") or dados.get("ibscbs")):
+            pendencias.append(f"Item {idx}: preencha IBS/CBS para o regime normal.")
     return pendencias
 
 
@@ -331,8 +444,8 @@ def assinar_xml_nfe_produto(
     cert_path: str,
     cert_password: str,
     *,
-    signature_algorithm: str = "rsa-sha256",
-    digest_algorithm: str = "sha256",
+    signature_algorithm: str = "rsa-sha1",
+    digest_algorithm: str = "sha1",
 ) -> bytes:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.serialization import pkcs12
@@ -360,30 +473,56 @@ def assinar_xml_nfe_produto(
     if inf is None:
         raise ValueError("infNFe nao encontrado para assinatura.")
     reference_uri = f"#{inf.get('Id')}"
-    signer = XMLSigner(
+    # Algoritmos legados exigidos pelo MOC da NF-e, restritos a este assinador.
+    class NFeSigner(XMLSigner):
+        def check_deprecated_methods(self):
+            pass
+
+    signer = NFeSigner(
         method=methods.enveloped,
         signature_algorithm=signature_algorithm,
         digest_algorithm=digest_algorithm,
         c14n_algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
     )
+    signer.namespaces = {None: "http://www.w3.org/2000/09/xmldsig#"}
     signed_root = signer.sign(root, key=key_pem, cert=cert_pem, reference_uri=reference_uri)
+    # Consolida o namespace padrão ds antes da canonicalização final. Algumas
+    # versões do signxml canonicalizam a árvore em memória diferentemente do
+    # XML serializado quando Signature usa namespace padrão (exigência SEFAZ).
+    import base64
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    signed_root = etree.fromstring(etree.tostring(signed_root))
+    ds = "http://www.w3.org/2000/09/xmldsig#"
+    signature = signed_root.find(f"{{{ds}}}Signature")
+    signed_info = signature.find(f"{{{ds}}}SignedInfo")
+    hash_types = {"sha1": hashes.SHA1, "sha256": hashes.SHA256}
+    if digest_algorithm not in hash_types or signature_algorithm not in {"rsa-sha1", "rsa-sha256"}:
+        raise ValueError("Algoritmo de assinatura NF-e não suportado.")
+    digest = hashes.Hash(hash_types[digest_algorithm]())
+    digest.update(etree.tostring(signed_root.find(f"{{{NFE_NS}}}infNFe"), method="c14n"))
+    signed_info.find(f".//{{{ds}}}DigestValue").text = base64.b64encode(digest.finalize()).decode("ascii")
+    assinatura = key.sign(etree.tostring(signed_info, method="c14n"), padding.PKCS1v15(), hash_types[signature_algorithm.removeprefix("rsa-")]())
+    signature.find(f"{{{ds}}}SignatureValue").text = base64.b64encode(assinatura).decode("ascii")
     return etree.tostring(signed_root, encoding="utf-8", xml_declaration=True)
 
 
 def montar_envelope_nfe_autorizacao(xml_assinado: bytes, c_uf: str = "31") -> bytes:
     from xml.sax.saxutils import escape
 
-    xml_texto = xml_assinado.decode("utf-8", errors="ignore")
+    from lxml import etree
+    root = etree.fromstring(xml_assinado)
+    if root.tag != f"{{{NFE_NS}}}NFe":
+        raise ValueError("O lote deve conter uma NFe assinada.")
+    # Remove somente a declaração XML, preservando os bytes da assinatura.
+    xml_texto = xml_assinado.decode("utf-8-sig").strip()
+    if xml_texto.startswith("<?xml"):
+        xml_texto = xml_texto.split("?>", 1)[1].lstrip()
+    lote = root.findtext(f"{{{NFE_NS}}}infNFe/{{{NFE_NS}}}ide/{{{NFE_NS}}}nNF") or "1"
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
-  <soap:Header>
-    <nfeCabecMsg xmlns="{SOAP_NFE_AUTORIZACAO_NS}">
-      <cUF>{escape(c_uf)}</cUF>
-      <versaoDados>4.00</versaoDados>
-    </nfeCabecMsg>
-  </soap:Header>
   <soap:Body>
-    <nfeDadosMsg xmlns="{SOAP_NFE_AUTORIZACAO_NS}">{xml_texto}</nfeDadosMsg>
+    <nfeDadosMsg xmlns="{SOAP_NFE_AUTORIZACAO_NS}"><enviNFe xmlns="{NFE_NS}" versao="4.00"><idLote>{escape(lote)}</idLote><indSinc>1</indSinc>{xml_texto}</enviNFe></nfeDadosMsg>
   </soap:Body>
 </soap:Envelope>""".encode("utf-8")
 
@@ -399,35 +538,35 @@ def enviar_xml_nfe_produto(
 ) -> bytes:
     from urllib.error import HTTPError
     from urllib.request import Request, urlopen
+    from urllib.parse import urlparse
 
     from dsystem_erp.services.nfse_soap import contexto_ssl_certificado_pfx
 
+    root = ET.fromstring(xml_assinado)
+    ambiente = root.findtext(f".//{{{NFE_NS}}}tpAmb")
+    host = urlparse(endpoint).hostname
+    if host in {"nfe.fazenda.mg.gov.br", "hnfe.fazenda.mg.gov.br"}:
+        if (host.startswith("hnfe.") and ambiente != "2") or (host.startswith("nfe.") and ambiente != "1"):
+            raise ValueError("Ambiente do XML não corresponde ao endpoint SEFAZ selecionado.")
     envelope = montar_envelope_nfe_autorizacao(xml_assinado, c_uf=c_uf)
     req = Request(
         endpoint,
         data=envelope,
         headers={
-            "Content-Type": "application/soap+xml; charset=utf-8",
-            "SOAPAction": "",
+            "Content-Type": f'application/soap+xml; charset=utf-8; action="{SOAP_NFE_AUTORIZACAO_NS}/nfeAutorizacaoLote"',
         },
         method="POST",
     )
-    ssl_context, temp_paths = contexto_ssl_certificado_pfx(cert_path, cert_password)
     try:
-        with urlopen(req, timeout=timeout, context=ssl_context) as resp:
-            return resp.read()
+        with contexto_ssl_certificado_pfx(cert_path, cert_password) as ssl_context:
+            with urlopen(req, timeout=timeout, context=ssl_context) as resp:
+                return resp.read()
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="ignore")
         detalhe = f"HTTP Error {exc.code}: {exc.reason}"
         if body:
             detalhe = f"{detalhe}. {body[:1000]}"
         raise RuntimeError(detalhe) from exc
-    finally:
-        for temp_path in temp_paths:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 def analisar_retorno_nfe_produto(xml_retorno: bytes | str) -> dict[str, Any]:
@@ -452,15 +591,25 @@ def analisar_retorno_nfe_produto(xml_retorno: bytes | str) -> dict[str, Any]:
                 return node.text.strip()
         return ""
 
-    cstat = first_text("cStat")
-    motivo = first_text("xMotivo")
+    protocolo = root.find(f".//{{{NFE_NS}}}infProt")
+    cstat = protocolo.findtext(f"{{{NFE_NS}}}cStat", "") if protocolo is not None else first_text("cStat")
+    motivo = protocolo.findtext(f"{{{NFE_NS}}}xMotivo", "") if protocolo is not None else first_text("xMotivo")
+    info["cstat"] = cstat
+    info["recibo"] = first_text("nRec")
     info["mensagem"] = f"{cstat} - {motivo}".strip(" -")
     info["protocolo"] = first_text("nProt")
     info["chave_acesso"] = first_text("chNFe")
     if cstat == "100":
         info["status"] = "Autorizada"
+        if len(info["chave_acesso"]) == 44:
+            info["numero_nota"] = str(int(info["chave_acesso"][25:34]))
+    elif cstat in {"103", "105"}:
+        info["status"] = "Processando"
     elif cstat:
         info["status"] = "Rejeitada"
+    else:
+        info["status"] = "Erro"
+        info["mensagem"] = first_text("Text") or first_text("faultstring") or "Resposta sem código de situação da SEFAZ; consulte antes de reenviar."
     return info
 
 

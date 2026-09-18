@@ -1,7 +1,23 @@
 from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
-from dsystem_erp.services.agenda_recorrencia import gerar_datas_recorrentes
+from dsystem_erp.services.agenda_recorrencia import (
+    gerar_datas_agenda_configurada,
+    gerar_datas_recorrentes,
+)
+from dsystem_erp.ui_consulta import tabela_clicavel_id
+
+
+def filtro_status_agenda(status="Não realizados"):
+    """Retorna o filtro SQL sem remover visitas do histórico."""
+    if status == "Todos":
+        return "", []
+    if status == "Não realizados":
+        return (
+            " AND LOWER(TRIM(COALESCE(status, ''))) NOT IN (?, ?, ?)",
+            ["realizado", "concluído", "concluido"],
+        )
+    return " AND status=?", [status]
 
 
 def _limpar_estado_editor_agenda(visit_id: int) -> None:
@@ -137,8 +153,15 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
         dados = filtrar_registros_por_empresa(dados, "cliente")
         
         if dados:
-            st.dataframe([dict(x) for x in dados], width="stretch", hide_index=True)
-            id_f = st.number_input("ID do Registro:", min_value=1, step=1)
+            linhas_atendimentos = [dict(x) for x in dados]
+            id_atendimento_clicado = tabela_clicavel_id(
+                st, linhas_atendimentos, "atendimentos_historico_grade", campo_id="id"
+            )
+            if id_atendimento_clicado:
+                st.session_state["atendimento_historico_id"] = int(id_atendimento_clicado)
+            id_f = int(st.session_state.get("atendimento_historico_id") or 0)
+            if not id_f:
+                st.caption("Clique em qualquer informação para abrir as ações e a edição.")
             
             pode_editar = tem_permissao("atendimentos.edit")
             
@@ -414,8 +437,7 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                         if termo in " ".join(str(i.get(c) or "") for c in ["equipamento", "identificacao", "tipo_equipamento", "quem_usa", "descricao"]).lower()
                     ]
 
-                st.dataframe(
-                    [{
+                linhas_intervencoes = [{
                         "ID": i.get("id"),
                         "Cliente": i.get("cliente_nome"),
                         "Equipamento": i.get("equipamento"),
@@ -426,12 +448,13 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                         "Preventiva": i.get("preventiva_prevista"),
                         "Realizada": i.get("preventiva_realizada"),
                         "Próxima": i.get("proxima_preventiva"),
-                    } for i in filtradas_int],
-                    width="stretch",
-                    hide_index=True,
-                )
-
-                id_int_ver = st.number_input("ID para ver detalhes:", min_value=1, step=1, key="int_id_ver")
+                    } for i in filtradas_int]
+                id_intervencao_clicado = tabela_clicavel_id(
+                    st, linhas_intervencoes, "intervencoes_grade", campo_id="ID"
+                ) if linhas_intervencoes else None
+                if id_intervencao_clicado:
+                    st.session_state["int_id_ver_ativo"] = int(id_intervencao_clicado)
+                id_int_ver = int(st.session_state.get("int_id_ver_ativo") or 0)
                 int_sel = next((dict(i) for i in intervencoes if int(i.get("id") or 0) == int(id_int_ver)), None)
                 if int_sel:
                     with st.expander(f"Detalhes da intervenção #{id_int_ver}", expanded=True):
@@ -445,10 +468,9 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                         st.write(f"**Preventiva realizada:** {int_sel.get('preventiva_realizada') or 'Não'} | **Data:** {int_sel.get('data_preventiva') or ''}")
                         st.write(f"**Próxima preventiva:** {int_sel.get('proxima_preventiva') or ''}")
                         st.write(f"**Informações gerais:** {int_sel.get('observacoes') or ''}")
-                if tem_permissao("atendimentos.edit"):
-                    id_int_del = st.number_input("ID para excluir intervenção:", min_value=1, step=1, key="int_id_del")
+                if tem_permissao("atendimentos.edit") and int_sel:
                     if st.button("Excluir Intervenção", key="btn_del_intervencao"):
-                        deletar_registro("atendimentos_intervencoes", "id", id_int_del)
+                        deletar_registro("atendimentos_intervencoes", "id", id_int_ver)
                         st.success("Intervenção excluída.")
                         st.rerun()
             else:
@@ -462,12 +484,55 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
         cag = conn_ag.cursor()
         cag.execute("SELECT username FROM usuarios ORDER BY username")
         usuarios_dsystem = [row['username'] for row in cag.fetchall()]
+        cag.execute("SELECT * FROM agenda_tipos_atendimento ORDER BY nome")
+        tipos_agenda_cadastrados = [dict(row) for row in cag.fetchall()]
+        tipos_agenda = [row.get("nome") for row in tipos_agenda_cadastrados if row.get("ativo") != "Não"]
+        if not tipos_agenda:
+            tipos_agenda = ["Suporte Presencial", "Instalação", "Manutenção Preventiva", "Reunião", "Outro"]
+
+        # Mantém doze meses futuros para regras marcadas como indefinidas.
+        cag.execute("SELECT * FROM agenda_recorrencias WHERE ativa='Sim' AND modo_termino='Tempo indefinido'")
+        for regra in [dict(row) for row in cag.fetchall()]:
+            inicio_regra = parse_data_flex(regra.get("data_inicio"))
+            if not inicio_regra:
+                continue
+            try:
+                data_anual_regra = date(
+                    2000,
+                    int(regra.get("mes_anual") or inicio_regra.month),
+                    int(regra.get("dia_anual") or inicio_regra.day),
+                )
+            except ValueError:
+                data_anual_regra = inicio_regra
+            datas_regra = gerar_datas_agenda_configurada(
+                max(inicio_regra, date.today()), regra.get("periodicidade") or "Não",
+                horizonte=date.today() + timedelta(days=365),
+                dia_semana=regra.get("dia_semana"), dia_mes=regra.get("dia_mes"),
+                data_anual=data_anual_regra,
+            )
+            cag.execute("SELECT data_visita FROM agenda_visitas WHERE recorrencia_id=?", (regra.get("id"),))
+            datas_existentes = {str(row.get("data_visita") or "") for row in cag.fetchall()}
+            for indice_regra, data_regra in enumerate(datas_regra, 1):
+                data_iso_regra = data_regra.strftime("%Y-%m-%d")
+                if data_iso_regra in datas_existentes:
+                    continue
+                cag.execute('''INSERT INTO agenda_visitas
+                    (tecnico, cliente_id, cliente_nome, data_visita, hora_inicio, hora_fim,
+                     tipo_visita, descricao, status, criado_em, recorrencia_id, recorrencia_indice)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+                    (regra.get("tecnico"), regra.get("cliente_id"), regra.get("cliente_nome"),
+                     data_iso_regra, regra.get("hora_inicio") or "", regra.get("hora_fim") or "",
+                     regra.get("tipo_atendimento") or "", regra.get("descricao") or "",
+                     "Agendado", regra.get("criado_em") or agora_br(), regra.get("id"), indice_regra))
+        conn_ag.commit()
         conn_ag.close()
 
         clientes_ag = buscar_clientes()
         nomes_clientes_ag = [c['nome'] for c in clientes_ag]
 
-        sub_ag1, sub_ag2 = st.tabs(["Novo Agendamento", "Visualizar / Gerenciar"])
+        sub_ag1, sub_ag2, sub_ag3, sub_ag4 = st.tabs([
+            "Novo Agendamento", "Agenda / Gerenciar", "Tipos de atendimento", "Atividades rápidas"
+        ])
 
         with sub_ag1:
             st.subheader("Novo Agendamento de Visita")
@@ -483,9 +548,7 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                 )
             with ag_col2:
                 ag_tipo = st.selectbox(
-                    "Tipo de Visita:",
-                    ["Suporte Presencial", "Instalação", "Manutenção Preventiva",
-                     "Reunião", "Entrega de Equipamento", "Outro"],
+                    "Tipo de Atendimento:", tipos_agenda,
                     key="ag_tipo"
                 )
 
@@ -528,25 +591,8 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
             ag_rec1, ag_rec2 = st.columns(2)
             ag_recorrencia = ag_rec1.selectbox(
                 "Criar ação recorrente?",
-                ["Não", "Diariamente", "Dias da semana", "Semanalmente", "Mensalmente", "Anualmente"],
+                ["Não", "Diariamente", "Semanalmente", "Mensalmente", "Anualmente"],
                 key="ag_recorrencia",
-            )
-            unidade_recorrencia = {
-                "Diariamente": "Quantos dias?",
-                "Dias da semana": "Por quantas semanas?",
-                "Semanalmente": "Quantas semanas?",
-                "Mensalmente": "Quantos meses?",
-                "Anualmente": "Quantos anos?",
-            }.get(ag_recorrencia, "Quantidade")
-            limite_recorrencia = 365 if ag_recorrencia == "Diariamente" else 120
-            ag_quantidade = ag_rec2.number_input(
-                unidade_recorrencia,
-                min_value=1,
-                max_value=limite_recorrencia,
-                value=1,
-                step=1,
-                key="ag_quantidade_recorrencia",
-                disabled=ag_recorrencia == "Não",
             )
             dias_semana_agenda = {
                 "Segunda": 0,
@@ -557,14 +603,48 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                 "Sábado": 5,
                 "Domingo": 6,
             }
-            ag_dias_semana = []
-            if ag_recorrencia == "Dias da semana":
-                ag_dias_semana = st.multiselect(
-                    "Quais dias da semana?",
-                    list(dias_semana_agenda.keys()),
-                    default=[nome for nome, idx in dias_semana_agenda.items() if idx == ag_data.weekday()],
-                    key="ag_dias_semana",
+            ag_dia_semana = ag_data.weekday()
+            ag_dia_mes = ag_data.day
+            ag_data_anual = ag_data
+            if ag_recorrencia == "Semanalmente":
+                nome_dia_padrao = next(nome for nome, indice in dias_semana_agenda.items() if indice == ag_data.weekday())
+                nome_dia_semanal = ag_rec2.selectbox(
+                    "Dia da semana:", list(dias_semana_agenda),
+                    index=list(dias_semana_agenda).index(nome_dia_padrao), key="ag_dia_semanal",
                 )
+                ag_dia_semana = dias_semana_agenda[nome_dia_semanal]
+            elif ag_recorrencia == "Mensalmente":
+                ag_dia_mes = ag_rec2.number_input(
+                    "Dia do mês:", min_value=1, max_value=31, value=ag_data.day,
+                    step=1, key="ag_dia_mensal",
+                )
+            elif ag_recorrencia == "Anualmente":
+                ag_data_anual = ag_rec2.date_input(
+                    "Data anual:", value=ag_data, format="DD/MM/YYYY", key="ag_data_anual"
+                )
+
+            ag_modo_termino = "Quantidade"
+            ag_quantidade = 1
+            ag_data_fim = ag_data
+            if ag_recorrencia != "Não":
+                at1, at2 = st.columns(2)
+                ag_modo_termino = at1.selectbox(
+                    "Duração da recorrência:",
+                    ["Quantidade", "Até uma data", "Tempo indefinido"],
+                    key="ag_modo_termino",
+                )
+                if ag_modo_termino == "Quantidade":
+                    ag_quantidade = at2.number_input(
+                        "Quantidade de ocorrências:", min_value=1, max_value=500,
+                        value=4, step=1, key="ag_quantidade_recorrencia",
+                    )
+                elif ag_modo_termino == "Até uma data":
+                    ag_data_fim = at2.date_input(
+                        "Repetir até:", value=ag_data + timedelta(days=30),
+                        format="DD/MM/YYYY", key="ag_data_fim_recorrencia",
+                    )
+                else:
+                    at2.info("A agenda manterá automaticamente os próximos 12 meses.")
 
             if st.button("Salvar Agendamento", type="primary", width="stretch", key="btn_salvar_agenda"):
                 erros = []
@@ -573,14 +653,14 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                 nome_final = ag_cliente_nome if ag_manual or ag_cliente_sel == "-- Selecionar --" else ag_cliente_sel
                 if not nome_final.strip():
                     erros.append("Informe o cliente a ser atendido.")
-                dias_escolhidos = {dias_semana_agenda[dia] for dia in ag_dias_semana}
-                if ag_recorrencia == "Dias da semana" and not dias_escolhidos:
-                    erros.append("Selecione pelo menos um dia da semana para a recorrência.")
-                datas_agendamento = gerar_datas_recorrentes(
-                    ag_data,
-                    ag_recorrencia,
-                    int(ag_quantidade),
-                    dias_escolhidos,
+                if ag_modo_termino == "Até uma data" and ag_data_fim < ag_data:
+                    erros.append("A data final da recorrência não pode ser anterior ao primeiro atendimento.")
+                datas_agendamento = gerar_datas_agenda_configurada(
+                    ag_data, ag_recorrencia,
+                    quantidade=int(ag_quantidade) if ag_modo_termino == "Quantidade" else None,
+                    data_fim=ag_data_fim if ag_modo_termino == "Até uma data" else None,
+                    horizonte=(ag_data + timedelta(days=365)) if ag_modo_termino == "Tempo indefinido" else None,
+                    dia_semana=ag_dia_semana, dia_mes=int(ag_dia_mes), data_anual=ag_data_anual,
                 )
                 h_ini = ag_hora_ini.strftime("%H:%M") if ag_hora_ini else ""
                 h_fim = ag_hora_fim.strftime("%H:%M") if ag_hora_fim else ""
@@ -597,21 +677,36 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                     criado = datetime.now().strftime("%d/%m/%Y %H:%M")
                     conn_sv = conectar_banco()
                     csv_ = conn_sv.cursor()
-                    for data_ag_item in datas_agendamento:
+                    recorrencia_id = None
+                    if ag_recorrencia != "Não":
+                        csv_.execute('''INSERT INTO agenda_recorrencias
+                            (tecnico, cliente_id, cliente_nome, data_inicio, hora_inicio, hora_fim,
+                             tipo_atendimento, descricao, periodicidade, dia_semana, dia_mes,
+                             mes_anual, dia_anual, modo_termino, quantidade, data_fim,
+                             ativa, criado_por, criado_em)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                            (ag_tecnico, ag_cliente_id, nome_final, ag_data.strftime("%Y-%m-%d"),
+                             h_ini, h_fim, ag_tipo, ag_descricao, ag_recorrencia,
+                             ag_dia_semana, int(ag_dia_mes), ag_data_anual.month, ag_data_anual.day,
+                             ag_modo_termino, int(ag_quantidade) if ag_modo_termino == "Quantidade" else None,
+                             ag_data_fim.strftime("%Y-%m-%d") if ag_modo_termino == "Até uma data" else None,
+                             "Sim", st.session_state.get("username", ""), criado))
+                        recorrencia_id = csv_.lastrowid
+                    for indice_agendamento, data_ag_item in enumerate(datas_agendamento, 1):
                         descricao_ag_item = ag_descricao
                         if ag_recorrencia != "Não":
-                            dias_texto = f" ({', '.join(ag_dias_semana)})" if ag_dias_semana else ""
                             descricao_ag_item = (
-                                f"{ag_descricao}\n\nRecorrência: {ag_recorrencia}{dias_texto}; "
-                                f"quantidade/período: {int(ag_quantidade)}."
+                                f"{ag_descricao}\n\nRecorrência: {ag_recorrencia}; "
+                                f"duração: {ag_modo_termino}."
                             ).strip()
                         csv_.execute('''INSERT INTO agenda_visitas
                             (tecnico, cliente_id, cliente_nome, data_visita, hora_inicio, hora_fim,
-                             tipo_visita, descricao, status, criado_em)
-                            VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                             tipo_visita, descricao, status, criado_em, recorrencia_id, recorrencia_indice)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
                             (ag_tecnico, ag_cliente_id, nome_final,
                              data_ag_item.strftime("%Y-%m-%d"), h_ini, h_fim,
-                             ag_tipo, descricao_ag_item, "Agendado", criado))
+                             ag_tipo, descricao_ag_item, "Agendado", criado,
+                             recorrencia_id, indice_agendamento))
                     conn_sv.commit()
                     conn_sv.close()
                     st.session_state['agenda_salva'] = len(datas_agendamento)
@@ -620,11 +715,60 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
         with sub_ag2:
             st.subheader("Agenda de Visitas")
 
+            import calendar
+            mes_referencia_agenda = st.date_input(
+                "Mês da agenda:", value=date.today().replace(day=1),
+                format="DD/MM/YYYY", key="agenda_mes_referencia",
+            ).replace(day=1)
+            ultimo_dia_mes = calendar.monthrange(
+                mes_referencia_agenda.year, mes_referencia_agenda.month
+            )[1]
+            conn_cal = conectar_banco(); ccal = conn_cal.cursor()
+            ccal.execute(
+                """SELECT * FROM agenda_visitas WHERE data_visita>=? AND data_visita<=?
+                   ORDER BY data_visita, hora_inicio""",
+                (mes_referencia_agenda.strftime("%Y-%m-%d"),
+                 mes_referencia_agenda.replace(day=ultimo_dia_mes).strftime("%Y-%m-%d")),
+            )
+            visitas_mes = [dict(item) for item in ccal.fetchall()]
+            conn_cal.close()
+            visitas_por_dia = {}
+            for visita_mes in visitas_mes:
+                dia_visita = (parse_data_flex(visita_mes.get("data_visita")) or mes_referencia_agenda).day
+                visitas_por_dia.setdefault(dia_visita, []).append(visita_mes)
+            st.markdown(
+                f"#### {mes_referencia_agenda.strftime('%m/%Y')} — {len(visitas_mes)} compromisso(s)"
+            )
+            cabecalho_semana = st.columns(7)
+            for coluna_dia, nome_dia in zip(cabecalho_semana, ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]):
+                coluna_dia.markdown(f"**{nome_dia}**")
+            for semana in calendar.monthcalendar(mes_referencia_agenda.year, mes_referencia_agenda.month):
+                colunas_semana = st.columns(7)
+                for coluna_dia, numero_dia in zip(colunas_semana, semana):
+                    with coluna_dia.container(border=True):
+                        if not numero_dia:
+                            st.write(" ")
+                            continue
+                        compromissos_dia = visitas_por_dia.get(numero_dia, [])
+                        st.markdown(f"**{numero_dia}**")
+                        for compromisso in compromissos_dia[:3]:
+                            st.caption(
+                                f"{compromisso.get('hora_inicio') or '--:--'} "
+                                f"{compromisso.get('cliente_nome') or 'Sem cliente'}"
+                            )
+                        if len(compromissos_dia) > 3:
+                            st.caption(f"+{len(compromissos_dia) - 3} compromisso(s)")
+
             ag_f1, ag_f2, ag_f3 = st.columns(3)
             with ag_f1:
                 filtro_tec = st.selectbox("Filtrar por Técnico:", ["Todos"] + usuarios_dsystem, key="ag_fil_tec")
             with ag_f2:
-                filtro_status = st.selectbox("Filtrar por Status:", ["Todos", "Agendado", "Realizado", "Adiado", "Cancelado", "Atrasado", "Transferido", "Reagendado", "Concluído"], key="ag_fil_status")
+                filtro_status = st.selectbox(
+                    "Filtrar por Status:",
+                    ["Não realizados", "Todos", "Agendado", "Adiado", "Cancelado", "Atrasado", "Transferido", "Reagendado"],
+                    key="ag_fil_status_v2",
+                    help="Os realizados e concluídos continuam no histórico. Selecione Todos para exibi-los.",
+                )
             with ag_f3:
                 filtro_data = st.date_input(
                     "Filtrar por Data (deixe em branco para ver tudo):",
@@ -642,9 +786,9 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
             if filtro_tec != "Todos":
                 query_ag += " AND tecnico=?"
                 params_ag.append(filtro_tec)
-            if filtro_status != "Todos":
-                query_ag += " AND status=?"
-                params_ag.append(filtro_status)
+            condicao_status, parametros_status = filtro_status_agenda(filtro_status)
+            query_ag += condicao_status
+            params_ag.extend(parametros_status)
             if filtro_data:
                 query_ag += " AND data_visita=?"
                 params_ag.append(filtro_data.strftime("%Y-%m-%d"))
@@ -657,6 +801,22 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
             if not visitas:
                 st.info("Nenhuma visita encontrada com os filtros selecionados.")
             else:
+                linhas_visitas = [{
+                    "ID": vis.get("id"), "Data": vis.get("data_visita"),
+                    "Início": vis.get("hora_inicio"), "Fim": vis.get("hora_fim"),
+                    "Cliente": vis.get("cliente_nome"), "Técnico": vis.get("tecnico"),
+                    "Tipo": vis.get("tipo_visita"), "Status": vis.get("status"),
+                } for vis in visitas]
+                visita_clicada_id = tabela_clicavel_id(
+                    st, linhas_visitas, "agenda_visitas_grade", campo_id="ID"
+                )
+                if visita_clicada_id:
+                    visita_id = int(visita_clicada_id)
+                    if st.session_state.get("ag_id_edicao") != visita_id:
+                        _limpar_estado_editor_agenda(visita_id)
+                    st.session_state["ag_id_edicao"] = visita_id
+                    st.session_state["agenda_edit_expanded_id"] = visita_id
+                st.caption("Clique em qualquer informação da visita para abrir a edição abaixo.")
                 from collections import defaultdict
                 por_data = defaultdict(list)
                 for v in visitas:
@@ -715,7 +875,10 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
 
                 st.write("---")
                 st.subheader("Alterar Status / Editar Visita")
-                ag_id_sel = st.number_input("ID da Visita:", min_value=1, step=1, key="ag_id_edicao")
+                ag_id_sel = int(st.session_state.get("ag_id_edicao") or 0)
+                if not ag_id_sel:
+                    st.info("Selecione uma visita na tabela acima.")
+                    return
 
                 conn_ed2 = conectar_banco()
                 conn_ed2.row_factory = None
@@ -792,12 +955,9 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
 
                         e_tipo_ag = st.selectbox(
                             "Tipo:",
-                            ["Suporte Presencial", "Instalação", "Manutenção Preventiva",
-                             "Reunião", "Entrega de Equipamento", "Outro"],
-                            index=["Suporte Presencial", "Instalação", "Manutenção Preventiva",
-                                   "Reunião", "Entrega de Equipamento", "Outro"].index(vis_ed['tipo_visita'])
-                            if vis_ed['tipo_visita'] in ["Suporte Presencial", "Instalação", "Manutenção Preventiva",
-                                                          "Reunião", "Entrega de Equipamento", "Outro"] else 0,
+                            tipos_agenda + ([vis_ed['tipo_visita']] if vis_ed.get('tipo_visita') not in tipos_agenda else []),
+                            index=(tipos_agenda + ([vis_ed['tipo_visita']] if vis_ed.get('tipo_visita') not in tipos_agenda else [])).index(vis_ed['tipo_visita'])
+                            if vis_ed.get('tipo_visita') else 0,
                             key=f"e_tipo_ag_{edit_key}"
                         )
                         e_desc_ag = st.text_area("Descrição:", value=vis_ed.get('descricao',''), height=80, key=f"e_desc_ag_{edit_key}")
@@ -824,5 +984,180 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                             deletar_registro('agenda_visitas', 'id', ag_id_sel)
                             st.toast("Visita excluída.")
                             st.rerun()
-                        
+
+        with sub_ag3:
+            st.subheader("Tipos de atendimento da agenda")
+            novo_tipo_agenda = st.text_input("Novo tipo de atendimento:", key="agenda_tipo_novo")
+            if st.button(
+                "Cadastrar tipo", type="primary",
+                disabled=not tem_permissao("atendimentos.edit") or not novo_tipo_agenda.strip(),
+                key="agenda_tipo_salvar",
+            ):
+                conn_tipo_ag = conectar_banco(); c_tipo_ag = conn_tipo_ag.cursor()
+                try:
+                    c_tipo_ag.execute(
+                        "INSERT INTO agenda_tipos_atendimento (nome, ativo, criado_por, criado_em) VALUES (?,?,?,?)",
+                        (novo_tipo_agenda.strip(), "Sim", st.session_state.get("username", ""), agora_br()),
+                    )
+                    conn_tipo_ag.commit()
+                except Exception:
+                    conn_tipo_ag.rollback(); st.warning("Esse tipo de atendimento já está cadastrado.")
+                else:
+                    st.success("Tipo de atendimento cadastrado."); st.rerun()
+                finally:
+                    conn_tipo_ag.close()
+            if tipos_agenda_cadastrados:
+                st.dataframe([
+                    {"ID": item.get("id"), "Tipo": item.get("nome"), "Ativo": item.get("ativo") or "Sim"}
+                    for item in tipos_agenda_cadastrados
+                ], width="stretch", hide_index=True)
+                tipo_agenda_id = st.selectbox(
+                    "Tipo para ativar/desativar:", [int(item["id"]) for item in tipos_agenda_cadastrados],
+                    format_func=lambda valor: next(item.get("nome") for item in tipos_agenda_cadastrados if int(item["id"]) == valor),
+                    key="agenda_tipo_gerenciar",
+                )
+                tipo_agenda_atual = next(item for item in tipos_agenda_cadastrados if int(item["id"]) == tipo_agenda_id)
+                nome_tipo_agenda_editado = st.text_input(
+                    "Nome do tipo:", value=tipo_agenda_atual.get("nome") or "",
+                    key=f"agenda_tipo_nome_{tipo_agenda_id}",
+                )
+                status_tipo_agenda = "Não" if tipo_agenda_atual.get("ativo") != "Não" else "Sim"
+                bt_ag_nome, bt_ag_status = st.columns(2)
+                if bt_ag_nome.button(
+                    "Salvar nome", disabled=(not tem_permissao("atendimentos.edit")
+                                              or not nome_tipo_agenda_editado.strip()),
+                    key="agenda_tipo_salvar_nome", width="stretch",
+                ):
+                    conn_tipo_ag = conectar_banco(); c_tipo_ag = conn_tipo_ag.cursor()
+                    try:
+                        c_tipo_ag.execute(
+                            "UPDATE agenda_tipos_atendimento SET nome=? WHERE id=?",
+                            (nome_tipo_agenda_editado.strip(), tipo_agenda_id),
+                        )
+                        conn_tipo_ag.commit()
+                    except Exception:
+                        conn_tipo_ag.rollback(); st.warning("Já existe um tipo com esse nome.")
+                    else:
+                        st.success("Tipo atualizado."); st.rerun()
+                    finally:
+                        conn_tipo_ag.close()
+                if bt_ag_status.button(
+                    "Desativar tipo" if status_tipo_agenda == "Não" else "Reativar tipo",
+                    disabled=not tem_permissao("atendimentos.edit"), key="agenda_tipo_status", width="stretch",
+                ):
+                    conn_tipo_ag = conectar_banco(); c_tipo_ag = conn_tipo_ag.cursor()
+                    c_tipo_ag.execute(
+                        "UPDATE agenda_tipos_atendimento SET ativo=? WHERE id=?",
+                        (status_tipo_agenda, tipo_agenda_id),
+                    )
+                    conn_tipo_ag.commit(); conn_tipo_ag.close(); st.rerun()
+
+            st.divider()
+            st.subheader("Recorrências ativas")
+            conn_regras = conectar_banco(); cregras = conn_regras.cursor()
+            cregras.execute("SELECT * FROM agenda_recorrencias WHERE ativa='Sim' ORDER BY id DESC")
+            regras_ativas = [dict(item) for item in cregras.fetchall()]
+            conn_regras.close()
+            if regras_ativas:
+                st.dataframe([{
+                    "ID": item.get("id"), "Cliente": item.get("cliente_nome"),
+                    "Técnico": item.get("tecnico"), "Tipo": item.get("tipo_atendimento"),
+                    "Periodicidade": item.get("periodicidade"), "Duração": item.get("modo_termino"),
+                } for item in regras_ativas], width="stretch", hide_index=True)
+                regra_encerrar_id = st.selectbox(
+                    "Recorrência para encerrar:", [int(item["id"]) for item in regras_ativas],
+                    format_func=lambda valor: next(
+                        f"#{valor} - {item.get('cliente_nome') or 'Sem cliente'} - {item.get('tipo_atendimento') or ''}"
+                        for item in regras_ativas if int(item["id"]) == valor
+                    ), key="agenda_regra_encerrar_id",
+                )
+                if st.button(
+                    "Encerrar recorrência", disabled=not tem_permissao("atendimentos.edit"),
+                    key="agenda_regra_encerrar",
+                ):
+                    conn_regras = conectar_banco(); cregras = conn_regras.cursor()
+                    cregras.execute("UPDATE agenda_recorrencias SET ativa='Não' WHERE id=?", (regra_encerrar_id,))
+                    conn_regras.commit(); conn_regras.close(); st.success("Recorrência encerrada."); st.rerun()
+            else:
+                st.info("Nenhuma recorrência ativa.")
+
+        with sub_ag4:
+            st.subheader("Lançamento rápido de atividades")
+            st.caption("Registre tarefas do dia a dia com data, horário e responsável pela execução.")
+            atv1, atv2, atv3 = st.columns([2, 1, 1])
+            atividade_rapida = atv1.text_input("Atividade:", key="atividade_rapida_desc")
+            data_atividade = atv2.date_input(
+                "Data de execução:", value=date.today(), format="DD/MM/YYYY", key="atividade_rapida_data"
+            )
+            hora_atividade = atv3.time_input(
+                "Hora de execução:", value=None, step=1800, key="atividade_rapida_hora"
+            )
+            atv4, atv5 = st.columns(2)
+            executor_atividade = atv4.selectbox(
+                "Quem irá executar:", ["-- Selecionar --"] + usuarios_dsystem,
+                key="atividade_rapida_executor",
+            )
+            cliente_atividade_nome = atv5.selectbox(
+                "Cliente (opcional):", ["-- Sem cliente --"] + nomes_clientes_ag,
+                key="atividade_rapida_cliente",
+            )
+            if st.button(
+                "Lançar atividade", type="primary", width="stretch",
+                disabled=(not tem_permissao("atendimentos.edit") or not atividade_rapida.strip()
+                          or executor_atividade == "-- Selecionar --"),
+                key="atividade_rapida_salvar",
+            ):
+                cliente_atividade = next(
+                    (item for item in clientes_ag if item.get("nome") == cliente_atividade_nome), None
+                )
+                conn_atv = conectar_banco(); catv = conn_atv.cursor()
+                catv.execute('''INSERT INTO agenda_atividades
+                    (atividade, cliente_id, cliente_nome, data_execucao, hora_execucao,
+                     executor, status, criado_por, criado_em)
+                    VALUES (?,?,?,?,?,?,?,?,?)''',
+                    (atividade_rapida.strip(), (cliente_atividade or {}).get("id"),
+                     "" if cliente_atividade_nome == "-- Sem cliente --" else cliente_atividade_nome,
+                     data_atividade.strftime("%Y-%m-%d"),
+                     hora_atividade.strftime("%H:%M") if hora_atividade else "",
+                     executor_atividade, "Pendente", st.session_state.get("username", ""), agora_br()))
+                conn_atv.commit(); conn_atv.close(); st.success("Atividade lançada."); st.rerun()
+
+            conn_atv = conectar_banco(); catv = conn_atv.cursor()
+            catv.execute("SELECT * FROM agenda_atividades ORDER BY data_execucao, hora_execucao, id DESC")
+            atividades = [dict(item) for item in catv.fetchall()]
+            conn_atv.close()
+            filtro_atv_status = st.selectbox(
+                "Situação:", ["Pendentes", "Todas", "Concluída", "Cancelada"], key="atividade_filtro_status"
+            )
+            if filtro_atv_status == "Pendentes":
+                atividades = [item for item in atividades if item.get("status") == "Pendente"]
+            elif filtro_atv_status != "Todas":
+                atividades = [item for item in atividades if item.get("status") == filtro_atv_status]
+            linhas_atividades = [{
+                "ID": item.get("id"), "Data": data_para_br(item.get("data_execucao")),
+                "Hora": item.get("hora_execucao"), "Atividade": item.get("atividade"),
+                "Cliente": item.get("cliente_nome"), "Executor": item.get("executor"),
+                "Status": item.get("status"),
+            } for item in atividades]
+            atividade_id = tabela_clicavel_id(
+                st, linhas_atividades, "agenda_atividades_grade", campo_id="ID"
+            ) if linhas_atividades else None
+            if atividade_id:
+                atividade_aberta = next(item for item in atividades if int(item.get("id")) == int(atividade_id))
+                novo_status_atividade = st.selectbox(
+                    "Atualizar atividade:", ["Pendente", "Concluída", "Cancelada"],
+                    index=["Pendente", "Concluída", "Cancelada"].index(atividade_aberta.get("status") or "Pendente"),
+                    key=f"atividade_status_{atividade_id}",
+                )
+                if st.button(
+                    "Salvar situação da atividade",
+                    disabled=not tem_permissao("atendimentos.edit"),
+                    key=f"atividade_status_salvar_{atividade_id}",
+                ):
+                    conn_atv = conectar_banco(); catv = conn_atv.cursor()
+                    catv.execute(
+                        "UPDATE agenda_atividades SET status=?, alterado_por=?, alterado_em=? WHERE id=?",
+                        (novo_status_atividade, st.session_state.get("username", ""), agora_br(), atividade_id),
+                    )
+                    conn_atv.commit(); conn_atv.close(); st.rerun()
 

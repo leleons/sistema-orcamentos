@@ -1,9 +1,24 @@
 import unittest
 
-from dsystem_erp.services.clientes import dados_cliente_padrao, montar_endereco_cliente
+from dsystem_erp.services.clientes import dados_cliente_padrao, filtrar_cadastros_dsystem, montar_endereco_cliente
 
 
 class ClientesTests(unittest.TestCase):
+    def test_oculta_dsystem_de_login_comum(self):
+        clientes = [
+            {"id": 1, "nome": "Dsystem", "cnpj": "23.524.449/0001-54"},
+            {"id": 2, "nome": "Cliente", "cnpj": "15.811.502/0001-70"},
+        ]
+        filtrados = filtrar_cadastros_dsystem(clientes, "23524449000154", {"modulo_gerencial": 0})
+        self.assertEqual([item["id"] for item in filtrados], [2])
+
+    def test_login_gerencial_visualiza_dsystem(self):
+        clientes = [{"id": 1, "nome": "Dsystem", "cnpj": "23.524.449/0001-54"}]
+        self.assertEqual(
+            filtrar_cadastros_dsystem(clientes, "23524449000154", {"modulo_gerencial": 1}),
+            clientes,
+        )
+
     def test_montar_endereco_cliente_ignora_vazios(self):
         cliente = {
             "endereco": "Rua Gloria",

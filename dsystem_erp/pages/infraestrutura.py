@@ -1,10 +1,328 @@
 ﻿from __future__ import annotations
 
+import json
+
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.migrations import garantir_coluna
+from dsystem_erp.ui_consulta import tabela_clicavel_id
+
+
+COLUNAS_INFRA_ACESSO_REMOTO = (
+    "serv_anydesk", "serv_radmin", "serv_google_remote",
+    "serv_info_gerais", "impressoras_acessos",
+)
+
+
+# Alguns blocos antigos são armazenados em uma única coluna por compatibilidade
+# com o banco existente. Esta definição permite apresentá-los como formulários
+# de verdade, sem obrigar o usuário a editar a linha serializada manualmente.
+CAMPOS_COMPOSTOS_INFRA = {
+    "faixas_ip": [
+        {"chave": "faixa", "rotulo": "Faixa de IP", "marcador": "Faixa"},
+        {"chave": "informacao", "rotulo": "Informação da faixa", "marcador": "Informação", "multilinha": True},
+    ],
+    "dvr_acessos": [
+        {"chave": "nome", "rotulo": "DVR / Nome", "marcador": "Nome", "posicional": True},
+        {"chave": "serial", "rotulo": "Serial", "marcador": "Serial"},
+        {"chave": "ip", "rotulo": "IP / DDNS", "marcador": "IP/DDNS"},
+        {"chave": "porta", "rotulo": "Porta de serviço", "marcador": "Porta serviço"},
+        {"chave": "login", "rotulo": "Login", "marcador": "Login"},
+        {"chave": "senha", "rotulo": "Senha", "marcador": "Senha", "sensivel": True},
+    ],
+    "cameras_acessos": [
+        {"chave": "nome", "rotulo": "Câmera / Local", "marcador": "Nome", "posicional": True},
+        {"chave": "serial", "rotulo": "Serial", "marcador": "Serial"},
+        {"chave": "ip", "rotulo": "IP", "marcador": "IP"},
+        {"chave": "login", "rotulo": "Login", "marcador": "Login"},
+        {"chave": "senha", "rotulo": "Senha", "marcador": "Senha", "sensivel": True},
+        {"chave": "email", "rotulo": "E-mail", "marcador": "E-mail"},
+        {"chave": "observacao", "rotulo": "Observação", "marcador": "Obs", "multilinha": True},
+    ],
+    "alarmes_acessos": [
+        {"chave": "nome", "rotulo": "Alarme / Local", "marcador": "Nome", "posicional": True},
+        {"chave": "serial", "rotulo": "Serial", "marcador": "Serial"},
+        {"chave": "central", "rotulo": "Central / Modelo", "marcador": "Central"},
+        {"chave": "login", "rotulo": "Login / Usuário", "marcador": "Login"},
+        {"chave": "senha", "rotulo": "Senha", "marcador": "Senha", "sensivel": True},
+    ],
+    "serv_anydesk": [
+        {"chave": "numero", "rotulo": "AnyDesk — Número", "marcador": "Número"},
+        {"chave": "senha", "rotulo": "AnyDesk — Senha", "marcador": "Senha", "sensivel": True},
+    ],
+    "serv_radmin": [
+        {"chave": "nome", "rotulo": "Radmin — Nome", "marcador": "Nome"},
+        {"chave": "senha", "rotulo": "Radmin — Senha", "marcador": "Senha", "sensivel": True},
+        {"chave": "ip", "rotulo": "Radmin — IP de acesso", "marcador": "IP"},
+    ],
+    "cert_log": [
+        {"chave": "dhcp", "rotulo": "Gerencia DHCP?", "marcador": "Gerencia DHCP", "opcoes": ["Não", "Sim"]},
+    ],
+    "pfsense_acessos": [
+        {"chave": "nome", "rotulo": "Nome PfSense", "marcador": "Nome"},
+        {"chave": "login", "rotulo": "Login de acesso", "marcador": "Login"},
+        {"chave": "senha", "rotulo": "Senha de acesso", "marcador": "Senha", "sensivel": True},
+        {"chave": "acesso_fora", "rotulo": "Acesso fora da rede", "marcador": "Acesso fora da rede"},
+        {"chave": "senha_fora", "rotulo": "Senha do acesso externo", "marcador": "Senha acesso fora", "sensivel": True},
+        {"chave": "dhcp", "rotulo": "Gerencia DHCP?", "marcador": "Gerencia DHCP", "opcoes": ["Não", "Sim"]},
+    ],
+    "vpn_acessos": [
+        {"chave": "nome", "rotulo": "VPN / Nome", "marcador": "VPN"},
+        {"chave": "login", "rotulo": "Login", "marcador": "Login"},
+        {"chave": "senha", "rotulo": "Senha de autenticação", "marcador": "Senha de autenticação", "sensivel": True},
+        {"chave": "dois_fatores", "rotulo": "Autenticação em 2 fatores?", "marcador": "2FA", "opcoes": ["Não", "Sim"]},
+        {"chave": "local_dois_fatores", "rotulo": "Local da autenticação em 2 fatores", "marcador": "Local 2FA"},
+    ],
+    "impressoras_acessos": [
+        {"chave": "modelo", "rotulo": "Modelo", "marcador": "Modelo"},
+        {"chave": "toners", "rotulo": "Tipos de toner", "marcador": "Toners"},
+        {"chave": "ip", "rotulo": "IP", "marcador": "IP"},
+        {"chave": "driver", "rotulo": "Link para baixar o driver", "marcador": "Driver"},
+        {"chave": "setor", "rotulo": "Setor", "marcador": "Setor"},
+    ],
+    "antivirus_acessos": [
+        {"chave": "tipo", "rotulo": "Tipo do antivírus", "marcador": "Tipo"},
+        {"chave": "nome", "rotulo": "Nome do antivírus", "marcador": "Nome"},
+        {"chave": "login", "rotulo": "Login de acesso", "marcador": "Login"},
+        {"chave": "senha", "rotulo": "Senha", "marcador": "Senha", "sensivel": True},
+        {"chave": "email", "rotulo": "E-mail", "marcador": "E-mail"},
+        {"chave": "plataforma", "rotulo": "Plataforma", "marcador": "Plataforma"},
+        {"chave": "compra", "rotulo": "Data de compra", "marcador": "Compra"},
+        {"chave": "vencimento", "rotulo": "Data de vencimento", "marcador": "Vencimento"},
+    ],
+    "pcs_acessos": [
+        {"chave": "tipo", "rotulo": "Tipo", "marcador": "Tipo", "posicional": True, "opcoes": ["Desktop", "Notebook", "Servidor"]},
+        {"chave": "nome", "rotulo": "Nome / Setor", "marcador": "Nome/Setor", "posicional": True},
+        {"chave": "anydesk", "rotulo": "AnyDesk / Senha", "marcador": "AnyDesk", "sensivel": True},
+        {"chave": "remote_email", "rotulo": "Remote — E-mail", "marcador": "Remote e-mail"},
+        {"chave": "remote_nome", "rotulo": "Remote — Nome da máquina", "marcador": "Remote nome máquina"},
+    ],
+    "hospedagem_acessos": [
+        {"chave": "provedor", "rotulo": "Nome do provedor", "marcador": "Provedor"},
+        {"chave": "site_provedor", "rotulo": "Site do provedor", "marcador": "Site Provedor"},
+        {"chave": "login_hospedagem", "rotulo": "Login da hospedagem", "marcador": "Login Hospedagem"},
+        {"chave": "senha_hospedagem", "rotulo": "Senha da hospedagem", "marcador": "Senha Hospedagem", "sensivel": True},
+        {"chave": "dois_fatores_hospedagem", "rotulo": "Hospedagem pede 2FA?", "marcador": "2FA Hospedagem", "opcoes": ["Não", "Sim"]},
+        {"chave": "local_dois_fatores_hospedagem", "rotulo": "Local do 2FA da hospedagem", "marcador": "Local 2FA Hospedagem"},
+        {"chave": "dominio", "rotulo": "Domínio", "marcador": "Domínio"},
+        {"chave": "registrado_em", "rotulo": "Onde está registrado", "marcador": "Registrado em"},
+        {"chave": "site_registro", "rotulo": "Site do registro do domínio", "marcador": "Site Registro Domínio"},
+        {"chave": "login_dominio", "rotulo": "Login do domínio", "marcador": "Login Domínio"},
+        {"chave": "senha_dominio", "rotulo": "Senha do domínio", "marcador": "Senha Domínio", "sensivel": True},
+        {"chave": "dois_fatores_dominio", "rotulo": "Domínio pede 2FA?", "marcador": "2FA Domínio", "opcoes": ["Não", "Sim"]},
+        {"chave": "local_dois_fatores_dominio", "rotulo": "Local do 2FA do domínio", "marcador": "Local 2FA Domínio"},
+    ],
+    "aplicativos_acessos": [
+        {"chave": "sistema", "rotulo": "Sistema / Aplicativo", "marcador": "Sistema"},
+        {"chave": "operador", "rotulo": "Operador", "marcador": "Operador"},
+        {"chave": "email", "rotulo": "E-mail", "marcador": "E-mail"},
+        {"chave": "login", "rotulo": "Login", "marcador": "Login"},
+        {"chave": "senha", "rotulo": "Senha", "marcador": "Senha", "sensivel": True},
+    ],
+}
+
+
+def decompor_item_composto_infra(campo, valor):
+    """Converte uma linha legada da infraestrutura em valores editáveis separados."""
+    definicoes = CAMPOS_COMPOSTOS_INFRA.get(campo, [])
+    resultado = {definicao["chave"]: "" for definicao in definicoes}
+    texto = str(valor or "")
+    if campo == "pcs_acessos" and " | Remote: " in texto:
+        inicio, remoto = texto.split(" | Remote: ", 1)
+        remote_email, _, remote_nome = remoto.partition(" / ")
+        texto = f"{inicio} | Remote e-mail: {remote_email} | Remote nome máquina: {remote_nome}"
+    partes = [parte.strip() for parte in texto.split(" | ")]
+    posicionais = [definicao for definicao in definicoes if definicao.get("posicional")]
+    proximo_posicional = 0
+    ultima_chave = None
+    for parte in partes:
+        encontrado = None
+        conteudo = ""
+        for definicao in definicoes:
+            prefixo = f'{definicao["marcador"]}:'
+            if parte.casefold().startswith(prefixo.casefold()):
+                encontrado = definicao
+                conteudo = parte[len(prefixo):].strip()
+                break
+        if encontrado is None and proximo_posicional < len(posicionais):
+            encontrado = posicionais[proximo_posicional]
+            proximo_posicional += 1
+            conteudo = parte
+        elif encontrado is None and ultima_chave:
+            resultado[ultima_chave] = f'{resultado[ultima_chave]} | {parte}'.strip(" |")
+            continue
+        if encontrado:
+            resultado[encontrado["chave"]] = conteudo
+            ultima_chave = encontrado["chave"]
+            if encontrado.get("posicional"):
+                proximo_posicional = max(proximo_posicional, posicionais.index(encontrado) + 1)
+
+    return resultado
+
+
+def compor_item_composto_infra(campo, valores):
+    """Grava novamente a linha compatível com o banco, agora com marcadores estáveis."""
+    return " | ".join(
+        f'{definicao["marcador"]}: {str(valores.get(definicao["chave"], "") or "").strip()}'
+        for definicao in CAMPOS_COMPOSTOS_INFRA.get(campo, [])
+    )
+
+
+def separar_itens_infra(valor, separador="||"):
+    """Lê o formato legado sem remover posições vazias entre itens relacionados."""
+    if valor in (None, ""):
+        return []
+    return [str(parte).strip() for parte in str(valor).split(separador)]
+
+
+def anexar_itens_infra(valor_atual, novos, separador="||"):
+    """Acrescenta novos registros sem substituir os que já estavam salvos."""
+    atuais = separar_itens_infra(valor_atual, separador)
+    adicionais = [str(valor or "").strip() for valor in (novos or []) if str(valor or "").strip()]
+    return separador.join(atuais + adicionais)
+
+
+def anexar_grupo_infra(ficha, novos_por_campo, separadores=None):
+    """Anexa linhas paralelas, preservando o alinhamento entre campos do mesmo item."""
+    ficha = ficha or {}
+    separadores = separadores or {}
+    campos = list(novos_por_campo)
+    quantidade_nova = max((len(novos_por_campo[campo]) for campo in campos), default=0)
+    indices_novos = [
+        indice for indice in range(quantidade_nova)
+        if any(
+            str(novos_por_campo[campo][indice] if indice < len(novos_por_campo[campo]) else "").strip()
+            for campo in campos
+        )
+    ]
+    listas = {
+        campo: separar_itens_infra(ficha.get(campo), separadores.get(campo, "|"))
+        for campo in campos
+    }
+    quantidade_atual = max((len(lista) for lista in listas.values()), default=0)
+    resultado = {}
+    for campo in campos:
+        valores = listas[campo] + [""] * (quantidade_atual - len(listas[campo]))
+        valores.extend(
+            str(novos_por_campo[campo][indice] if indice < len(novos_por_campo[campo]) else "").strip()
+            for indice in indices_novos
+        )
+        resultado[campo] = separadores.get(campo, "|").join(valores)
+    return resultado
+
+
+def anexar_setores_infra(valor_atual, setores_novos):
+    try:
+        atuais = json.loads(valor_atual or "[]")
+    except (TypeError, ValueError):
+        atuais = []
+    if not isinstance(atuais, list):
+        atuais = []
+    return json.dumps(atuais + list(setores_novos or []), ensure_ascii=False)
+
+
+def garantir_colunas_infra_acesso_remoto(conectar_banco_func) -> None:
+    """Mantém bancos antigos compatíveis antes de a tela consultar a ficha."""
+    conn = conectar_banco_func()
+    try:
+        cursor = conn.cursor()
+        for coluna in COLUNAS_INFRA_ACESSO_REMOTO:
+            garantir_coluna(cursor, "infra_v4", coluna, "LONGTEXT")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def abrir_ficha_infraestrutura(estado, ficha_id):
+    """Sincroniza a ficha clicada e consome a seleção antiga da grade."""
+    ficha_id = int(ficha_id)
+    estado["infra_item_editar_id"] = ficha_id
+    estado["infra_editar_id"] = ficha_id
+    estado["edit_inf_id_selecao"] = ficha_id
+    estado["infra_acao_ficha"] = "Editar Ficha Completa"
+    estado["infra_grade_versao"] = estado.get("infra_grade_versao", 0) + 1
+
+
+def abrir_email_infraestrutura(estado, email_id):
+    """Abre o e-mail e troca a grade para consumir o clique selecionado."""
+    anterior = estado.get("infra_email_editar_id")
+    if anterior and int(anterior) != int(email_id):
+        estado.pop(f"infra_email_senha_liberada_{anterior}", None)
+        estado.pop(f"infra_email_senha_valor_{anterior}", None)
+        estado.setdefault("_infra_widgets_para_limpar", []).extend([
+            f"infra_edit_em_senha_{anterior}", f"infra_edit_em_senha_visivel_{anterior}",
+            f"infra_email_confirmar_senha_{anterior}",
+        ])
+    estado["infra_email_editar_id"] = int(email_id)
+    estado["infra_email_grade_versao"] = estado.get("infra_email_grade_versao", 0) + 1
+
+
+def buscar_senha_email_selecionado(conectar_banco_func, email, permitido):
+    """Carrega o segredo somente do registro selecionado e autorizado."""
+    if not permitido or not email or not email.get("id"):
+        return ""
+    conn = conectar_banco_func()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT senha FROM emails_clientes WHERE id=?", (int(email["id"]),))
+        registro = cursor.fetchone()
+        return (registro or {}).get("senha") or ""
+    finally:
+        conn.close()
+
+
+def fechar_email_infraestrutura(estado):
+    """Fecha a edição sem reaproveitar a seleção antiga da tabela."""
+    email_id = estado.pop("infra_email_editar_id", None)
+    if email_id:
+        estado.setdefault("_infra_widgets_para_limpar", []).extend(
+            chave for chave in list(estado)
+            if str(chave).startswith(f"infra_edit_em_senha_carregada_{email_id}_")
+        )
+        estado.pop(f"infra_email_senha_liberada_{email_id}", None)
+        estado.pop(f"infra_email_senha_valor_{email_id}", None)
+        estado.setdefault("_infra_widgets_para_limpar", []).extend([
+            f"infra_edit_em_senha_{email_id}", f"infra_edit_em_senha_visivel_{email_id}",
+            f"infra_email_confirmar_senha_{email_id}",
+        ])
+    estado["infra_email_grade_versao"] = estado.get("infra_email_grade_versao", 0) + 1
+
+
+def fechar_novos_emails_infraestrutura(estado):
+    """Fecha o cadastro de novas contas e cria widgets vazios na próxima abertura."""
+    estado["infra_novos_emails_versao"] = estado.get("infra_novos_emails_versao", 0) + 1
+
+
+def ids_emails_cadastrados(registros):
+    """Retorna somente IDs válidos e únicos apresentados na gestão de e-mails."""
+    ids = []
+    vistos = set()
+    for registro in registros or []:
+        try:
+            email_id = int(registro.get("id") or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if email_id > 0 and email_id not in vistos:
+            vistos.add(email_id)
+            ids.append(email_id)
+    return ids
 
 
 def renderizar_infraestrutura_ti(ctx: dict) -> None:
     aplicar_contexto_pagina(ctx, globals())
+    garantir_colunas_infra_acesso_remoto(conectar_banco)
+    pode_visualizar_senhas_infra = tem_permissao("infra.senhas.view")
+
+    def campo_secreto_infra(rotulo, valor, chave, altura=90):
+        """Preserva o segredo quando o usuário não pode visualizá-lo."""
+        if pode_visualizar_senhas_infra:
+            return st.text_area(rotulo, value=valor or "", height=altura, key=chave)
+        st.text_area(
+            rotulo, value="••••••" if valor else "", height=altura, key=f"{chave}_bloqueado",
+            disabled=True, help="Somente usuários com a permissão Visualizar senhas salvas podem acessar este conteúdo.",
+        )
+        return valor or ""
+    for chave_widget in st.session_state.pop("_infra_widgets_para_limpar", []):
+        st.session_state.pop(chave_widget, None)
     st.title("Infraestrutura e Acessos de TI")
     infra_edit_id_ativo = st.session_state.get("infra_editar_id")
     infra_editando = None
@@ -34,6 +352,18 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
             idx_cli_infra = n_clis.index(infra_editando.get("cliente_vinc"))
         inf_vinc = st.selectbox("Vincular ao Cadastro de Cliente:", n_clis, index=idx_cli_infra, key=f"infra_vinc_{infra_edit_id_ativo or 'novo'}")
         cliente_infra = next((x for x in clientes_db if x["nome"] == inf_vinc), None)
+        infra_historico_ficha = infra_editando
+        if not infra_historico_ficha and inf_vinc != "-- Selecionar Cliente Existente --":
+            conn_hist_cliente = conectar_banco()
+            chist_cliente = conn_hist_cliente.cursor(dictionary=True)
+            chist_cliente.execute(
+                """SELECT * FROM infra_v4
+                   WHERE cliente_vinc=? OR fantasia=? OR razao=?
+                   ORDER BY id DESC LIMIT 1""",
+                (inf_vinc, inf_vinc, inf_vinc),
+            )
+            infra_historico_ficha = chist_cliente.fetchone()
+            conn_hist_cliente.close()
         infra_cliente_key = f"{infra_edit_id_ativo or 'novo'}_{cliente_infra.get('id') if cliente_infra else 'sem_cliente'}"
         puxar_cliente_selecionado = bool(cliente_infra) and (
             not infra_editando or inf_vinc != (infra_editando.get("cliente_vinc") or "")
@@ -94,7 +424,7 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
         with c11: inf_venc = st.text_input("Dia de Vencimento:", value=valor_infra("venc", "dia_vencimento"), key=f"infra_venc_{infra_cliente_key}")
 
         st.subheader("2. Detalhamento Técnico")
-        abas_infra = ["Sistemas", "Rede", "DVR", "Câmeras", "Alarme", "Wi-Fi", "Servidor", "Antivírus", "Financeiro", "PCs e Acessos", "Setores", "Equipamentos", "Hospedagem"]
+        abas_infra = ["Sistemas", "Rede", "DVR", "Câmeras", "Alarme", "Wi-Fi", "Servidor", "Impressoras", "Antivírus", "Financeiro", "PCs e Acessos", "Setores", "Equipamentos", "Hospedagem"]
         if tem_permissao("infra.emails") or tem_permissao("emails.view"):
             abas_infra.append("Gestão de E-mails")
         if tem_permissao("infra.aplicativos"):
@@ -107,6 +437,7 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
         t_alarme = tabs_infra["Alarme"]
         t_wifi = tabs_infra["Wi-Fi"]
         t_serv = tabs_infra["Servidor"]
+        t_impressoras = tabs_infra["Impressoras"]
         t_antivirus = tabs_infra["Antivírus"]
         t_fin = tabs_infra["Financeiro"]
         t_pcs = tabs_infra["PCs e Acessos"]
@@ -115,6 +446,232 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
         t_hospedagem = tabs_infra.get("Hospedagem")
         t_emails_infra = tabs_infra.get("Gestão de E-mails")
         t_apps = tabs_infra.get("Aplicativos")
+
+        def renderizar_historico_tecnico(slug, titulo, campos, ficha=None):
+            """Lista e edita os itens serializados da ficha escolhida."""
+            ficha_ref = ficha or infra_historico_ficha
+            st.markdown(f"#### Histórico de {titulo}")
+            if not ficha_ref:
+                st.info("Selecione um cliente que já possua uma ficha salva para consultar o histórico.")
+                return
+            listas = {}
+            campos_sensiveis = {
+                "sys_senha", "rede_sen", "rede_dsen", "rede_wsen", "serv_sen", "serv_anydesk",
+                "serv_radmin", "dvr_acessos", "cameras_acessos", "alarmes_acessos",
+                "pfsense_acessos", "vpn_acessos", "antivirus_acessos", "hospedagem_acessos",
+                "aplicativos_acessos", "fin_b1", "fin_b2", "fin_b3", "pcs_acessos",
+            }
+            for campo, _, separador in campos:
+                listas[campo] = [
+                    parte.strip() for parte in str(ficha_ref.get(campo) or "").split(separador)
+                ] if ficha_ref.get(campo) else []
+            quantidade = max((len(valores) for valores in listas.values()), default=0)
+            linhas = []
+            for indice in range(quantidade):
+                linha = {"ID": indice + 1}
+                possui_dados = False
+                for campo, rotulo, _ in campos:
+                    valor = listas[campo][indice] if indice < len(listas[campo]) else ""
+                    possui_dados = possui_dados or bool(valor.strip())
+                    definicoes_compostas = CAMPOS_COMPOSTOS_INFRA.get(campo)
+                    if definicoes_compostas:
+                        valores_compostos = decompor_item_composto_infra(campo, valor)
+                        for definicao in definicoes_compostas:
+                            valor_campo = valores_compostos.get(definicao["chave"], "")
+                            linha[definicao["rotulo"]] = (
+                                "••••••" if definicao.get("sensivel") and valor_campo else valor_campo
+                            )
+                    else:
+                        linha[rotulo] = "••••••" if campo in campos_sensiveis and valor else valor
+                if possui_dados:
+                    linha["_indice"] = indice
+                    linhas.append(linha)
+            if not linhas:
+                st.info(f"Nenhum item de {titulo.lower()} salvo para este cliente.")
+                return
+
+            pesquisa = st.text_input(
+                f"Pesquisar em {titulo.lower()}:",
+                key=f"infra_hist_busca_{slug}_{ficha_ref.get('id')}",
+            ).strip().casefold()
+            filtradas = [
+                linha for linha in linhas
+                if not pesquisa or pesquisa in " ".join(
+                    str(valor or "") for chave, valor in linha.items() if chave != "_indice"
+                ).casefold()
+            ]
+            tabela = [{chave: valor for chave, valor in linha.items() if chave != "_indice"} for linha in filtradas]
+            clicado = tabela_clicavel_id(
+                st, tabela,
+                f"infra_hist_grade_{slug}_{ficha_ref.get('id')}_{st.session_state.get(f'infra_hist_versao_{slug}', 0)}",
+                campo_id="ID",
+            ) if tabela else None
+            if clicado:
+                linha_clicada = next((linha for linha in filtradas if int(linha["ID"]) == int(clicado)), None)
+                if linha_clicada:
+                    st.session_state[f"infra_hist_item_{slug}_{ficha_ref.get('id')}"] = int(linha_clicada["_indice"])
+            chave_item_ativo = f"infra_hist_item_{slug}_{ficha_ref.get('id')}"
+            indice_ativo = st.session_state.get(chave_item_ativo)
+            if indice_ativo is None or not any(linha["_indice"] == int(indice_ativo) for linha in linhas):
+                st.caption("Clique em qualquer informação da tabela para abrir a edição.")
+                return
+
+            with st.expander(f"Editando item {int(indice_ativo) + 1} de {titulo}", expanded=True):
+                valores_editados = {}
+                colunas_campos_simples = st.columns(3)
+                posicao_campo_simples = 0
+                campos_multilinha = {"sys_dados", "serv_info_gerais", "fin_b1", "fin_b2", "fin_b3"}
+                for campo, rotulo, _ in campos:
+                    atual = listas[campo][int(indice_ativo)] if int(indice_ativo) < len(listas[campo]) else ""
+                    definicoes_compostas = CAMPOS_COMPOSTOS_INFRA.get(campo)
+                    if definicoes_compostas:
+                        atuais_compostos = decompor_item_composto_infra(campo, atual)
+                        editados_compostos = {}
+                        colunas_campos = st.columns(3)
+                        for posicao, definicao in enumerate(definicoes_compostas):
+                            chave_widget = (
+                                f"infra_hist_edit_{slug}_{campo}_{definicao['chave']}_"
+                                f"{ficha_ref.get('id')}_{indice_ativo}"
+                            )
+                            valor_campo = atuais_compostos.get(definicao["chave"], "")
+                            with colunas_campos[posicao % 3]:
+                                if definicao.get("sensivel") and not pode_visualizar_senhas_infra:
+                                    st.text_input(
+                                        definicao["rotulo"], value="••••••", type="password", disabled=True,
+                                        help="Seu usuário não possui a permissão Visualizar senhas salvas.",
+                                        key=f"{chave_widget}_bloqueado",
+                                    )
+                                    editados_compostos[definicao["chave"]] = valor_campo
+                                elif definicao.get("opcoes"):
+                                    opcoes = list(definicao["opcoes"])
+                                    if valor_campo and valor_campo not in opcoes:
+                                        opcoes.insert(0, valor_campo)
+                                    editados_compostos[definicao["chave"]] = st.selectbox(
+                                        definicao["rotulo"], opcoes,
+                                        index=opcoes.index(valor_campo) if valor_campo in opcoes else 0,
+                                        key=chave_widget,
+                                    )
+                                elif definicao.get("multilinha"):
+                                    editados_compostos[definicao["chave"]] = st.text_area(
+                                        definicao["rotulo"], value=valor_campo, height=80, key=chave_widget,
+                                    )
+                                else:
+                                    editados_compostos[definicao["chave"]] = st.text_input(
+                                        definicao["rotulo"], value=valor_campo,
+                                        type="password" if definicao.get("sensivel") else "default",
+                                        key=chave_widget,
+                                    )
+                        valores_editados[campo] = compor_item_composto_infra(campo, editados_compostos)
+                    else:
+                        chave_simples = f"infra_hist_edit_{slug}_{campo}_{ficha_ref.get('id')}_{indice_ativo}"
+                        with colunas_campos_simples[posicao_campo_simples % 3]:
+                            if campo in campos_sensiveis and not pode_visualizar_senhas_infra:
+                                st.text_input(
+                                    rotulo, value="••••••", type="password", disabled=True,
+                                    help="Seu usuário não possui a permissão Visualizar senhas salvas.",
+                                    key=f"{chave_simples}_bloqueado",
+                                )
+                                valores_editados[campo] = atual
+                            elif campo in campos_sensiveis:
+                                valores_editados[campo] = st.text_input(
+                                    rotulo, value=atual, type="password", key=chave_simples,
+                                )
+                            elif campo in campos_multilinha:
+                                valores_editados[campo] = st.text_area(
+                                    rotulo, value=atual, height=80, key=chave_simples,
+                                )
+                            else:
+                                valores_editados[campo] = st.text_input(
+                                    rotulo, value=atual, key=chave_simples,
+                                )
+                        posicao_campo_simples += 1
+                salvar_col, cancelar_col = st.columns(2)
+                if salvar_col.button("Salvar somente este item", type="primary", width="stretch", key=f"infra_hist_salvar_{slug}_{ficha_ref.get('id')}_{indice_ativo}"):
+                    atualizacoes = {}
+                    for campo, _, separador in campos:
+                        valores = list(listas[campo])
+                        while len(valores) <= int(indice_ativo):
+                            valores.append("")
+                        valores[int(indice_ativo)] = valores_editados[campo].strip()
+                        atualizacoes[campo] = separador.join(valores)
+                    conn_hist_save = conectar_banco()
+                    chist_save = conn_hist_save.cursor()
+                    set_sql = ", ".join(f"{campo}=?" for campo in atualizacoes)
+                    chist_save.execute(
+                        f"UPDATE infra_v4 SET {set_sql} WHERE id=?",
+                        tuple(atualizacoes.values()) + (ficha_ref.get("id"),),
+                    )
+                    conn_hist_save.commit()
+                    conn_hist_save.close()
+                    st.session_state.pop(chave_item_ativo, None)
+                    st.session_state[f"infra_hist_versao_{slug}"] = st.session_state.get(f"infra_hist_versao_{slug}", 0) + 1
+                    st.success(f"{titulo} atualizado com sucesso.")
+                    st.rerun()
+                if cancelar_col.button("Cancelar edição", width="stretch", key=f"infra_hist_cancelar_{slug}_{ficha_ref.get('id')}_{indice_ativo}"):
+                    st.session_state.pop(chave_item_ativo, None)
+                    st.session_state[f"infra_hist_versao_{slug}"] = st.session_state.get(f"infra_hist_versao_{slug}", 0) + 1
+                    st.rerun()
+
+        def renderizar_historico_setores(ficha=None):
+            ficha_ref = ficha or infra_historico_ficha
+            st.markdown("#### Histórico de Setores")
+            if not ficha_ref:
+                st.info("Selecione um cliente que já possua uma ficha salva para consultar o histórico.")
+                return
+            try:
+                setores_salvos = json.loads(ficha_ref.get("setores") or "[]")
+            except (TypeError, ValueError):
+                setores_salvos = []
+            if not setores_salvos:
+                st.info("Nenhum setor salvo para este cliente.")
+                return
+            pesquisa_setor = st.text_input(
+                "Pesquisar setor:", key=f"infra_hist_setor_busca_{ficha_ref.get('id')}"
+            ).strip().casefold()
+            tabela_setores = [{
+                "ID": indice + 1,
+                "Setor": setor.get("nome") or "",
+                "Informações": setor.get("informacoes") or "",
+                "Softwares": len(setor.get("softwares") or []),
+            } for indice, setor in enumerate(setores_salvos) if not pesquisa_setor or pesquisa_setor in " ".join([
+                str(setor.get("nome") or ""), str(setor.get("informacoes") or ""),
+                json.dumps(setor.get("softwares") or [], ensure_ascii=False),
+            ]).casefold()]
+            setor_clicado = tabela_clicavel_id(
+                st, tabela_setores, f"infra_hist_setores_{ficha_ref.get('id')}", campo_id="ID"
+            ) if tabela_setores else None
+            if pesquisa_setor and not tabela_setores:
+                st.info("Nenhum setor encontrado nessa pesquisa.")
+            if setor_clicado:
+                st.session_state[f"infra_hist_setor_item_{ficha_ref.get('id')}"] = int(setor_clicado) - 1
+            chave_setor_ativo = f"infra_hist_setor_item_{ficha_ref.get('id')}"
+            indice_setor = st.session_state.get(chave_setor_ativo)
+            if indice_setor is None or not (0 <= int(indice_setor) < len(setores_salvos)):
+                st.caption("Clique em qualquer informação do setor para abrir a edição.")
+                return
+            setor = setores_salvos[int(indice_setor)]
+            with st.expander(f"Editando setor: {setor.get('nome') or int(indice_setor) + 1}", expanded=True):
+                nome_setor = st.text_input("Nome do setor:", value=setor.get("nome") or "", key=f"infra_hist_setor_nome_{ficha_ref.get('id')}_{indice_setor}")
+                info_setor = st.text_area("Informações gerais:", value=setor.get("informacoes") or "", height=110, key=f"infra_hist_setor_info_{ficha_ref.get('id')}_{indice_setor}")
+                st.caption(f"Softwares vinculados preservados: {len(setor.get('softwares') or [])}")
+                salvar_setor, cancelar_setor = st.columns(2)
+                if salvar_setor.button("Salvar alterações do setor", type="primary", width="stretch", key=f"infra_hist_setor_salvar_{ficha_ref.get('id')}_{indice_setor}"):
+                    setores_salvos[int(indice_setor)]["nome"] = nome_setor.strip()
+                    setores_salvos[int(indice_setor)]["informacoes"] = info_setor.strip()
+                    conn_setor = conectar_banco()
+                    csetor = conn_setor.cursor()
+                    csetor.execute(
+                        "UPDATE infra_v4 SET setores=? WHERE id=?",
+                        (json.dumps(setores_salvos, ensure_ascii=False), ficha_ref.get("id")),
+                    )
+                    conn_setor.commit()
+                    conn_setor.close()
+                    st.session_state.pop(chave_setor_ativo, None)
+                    st.success("Setor atualizado sem alterar seus softwares vinculados.")
+                    st.rerun()
+                if cancelar_setor.button("Cancelar edição", width="stretch", key=f"infra_hist_setor_cancelar_{ficha_ref.get('id')}_{indice_setor}"):
+                    st.session_state.pop(chave_setor_ativo, None)
+                    st.rerun()
         
         with t_sys:
             qtd_sys = st.number_input("Qtd Sistemas:", min_value=1, max_value=10, value=1)
@@ -222,6 +779,7 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
         with t_serv:
             qtd_serv = st.number_input("Qtd Servidores:", min_value=1, max_value=10, value=1)
             sv_nom_l, sv_ip_l, sv_link_l, sv_log_l, sv_sen_l, ct_log_l, ct_sen_l = [], [], [], [], [], [], []
+            sv_anydesk_l, sv_radmin_l, sv_google_remote_l, sv_info_gerais_l = [], [], [], []
             for i in range(qtd_serv):
                 cv1, cv2, cv3 = st.columns(3)
                 sv_nom = cv1.text_input(f"Nome da rede {i+1}:", key=f"svnom_{i}")
@@ -234,6 +792,19 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                 sv_nom_l.append(sv_nom); sv_ip_l.append(sv_ip); sv_link_l.append(sv_link)
                 sv_log_l.append(sv_log); sv_sen_l.append(sv_sen)
                 ct_log_l.append(f"Gerencia DHCP: {sv_dhcp}"); ct_sen_l.append("")
+                ca1, ca2 = st.columns(2)
+                anydesk_numero = ca1.text_input(f"AnyDesk - número {i+1}:", key=f"sv_anydesk_num_{i}")
+                anydesk_senha = ca2.text_input(f"AnyDesk - senha {i+1}:", type="password", key=f"sv_anydesk_senha_{i}")
+                cr1, cr2, cr3 = st.columns(3)
+                radmin_nome = cr1.text_input(f"Radmin - nome {i+1}:", key=f"sv_radmin_nome_{i}")
+                radmin_senha = cr2.text_input(f"Radmin - senha {i+1}:", type="password", key=f"sv_radmin_senha_{i}")
+                radmin_ip = cr3.text_input(f"Radmin - IP de acesso {i+1}:", key=f"sv_radmin_ip_{i}")
+                google_remote = st.text_input(f"Nome Google Remote {i+1}:", key=f"sv_google_remote_{i}")
+                info_gerais = st.text_area(f"Informações gerais do servidor {i+1}:", height=90, key=f"sv_info_gerais_{i}")
+                sv_anydesk_l.append(f"Número: {anydesk_numero} | Senha: {anydesk_senha}" if anydesk_numero or anydesk_senha else "")
+                sv_radmin_l.append(f"Nome: {radmin_nome} | Senha: {radmin_senha} | IP: {radmin_ip}" if radmin_nome or radmin_senha or radmin_ip else "")
+                sv_google_remote_l.append(google_remote)
+                sv_info_gerais_l.append(info_gerais)
 
             st.write("---")
             st.markdown("**Dados do PfSense**")
@@ -265,6 +836,22 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                 vpn_local_2fa = vpn5.text_input(f"Local de Autenticação 2 Fatores {i+1}:", key=f"vpn_local_2fa_{i}")
                 if vpn_nome or vpn_login or vpn_senha or vpn_local_2fa:
                     vpn_l.append(f"VPN: {vpn_nome} | Login: {vpn_login} | Senha de autenticação: {vpn_senha} | 2FA: {vpn_2fa} | Local 2FA: {vpn_local_2fa}")
+
+        with t_impressoras:
+            qtd_impressoras = st.number_input("Qtd Impressoras:", min_value=0, max_value=100, value=0, key="infra_qtd_impressoras")
+            impressoras_l = []
+            for i in range(qtd_impressoras):
+                ip1, ip2, ip3 = st.columns(3)
+                imp_modelo = ip1.text_input(f"Modelo da impressora {i+1}:", key=f"infra_imp_modelo_{i}")
+                imp_toners = ip2.text_input(f"Tipos de toner {i+1}:", key=f"infra_imp_toners_{i}")
+                imp_ip = ip3.text_input(f"IP {i+1}:", key=f"infra_imp_ip_{i}")
+                ip4, ip5 = st.columns(2)
+                imp_driver = ip4.text_input(f"Link para baixar o driver {i+1}:", key=f"infra_imp_driver_{i}")
+                imp_setor = ip5.text_input(f"Setor {i+1}:", key=f"infra_imp_setor_{i}")
+                if imp_modelo or imp_toners or imp_ip or imp_driver or imp_setor:
+                    impressoras_l.append(
+                        f"Modelo: {imp_modelo} | Toners: {imp_toners} | IP: {imp_ip} | Driver: {imp_driver} | Setor: {imp_setor}"
+                    )
 
         with t_antivirus:
             qtd_antivirus = st.number_input("Qtd Antivírus:", min_value=0, max_value=50, value=0)
@@ -429,22 +1016,40 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                             r for r in filtrados_eq
                             if termo in " ".join(str(r.get(c) or "") for c in ["tipo_equipamento", "nome_equipamento", "ip_equipamento", "quem_usa", "informacoes"]).lower()
                         ]
-                    st.dataframe(
-                        [{k: v for k, v in dict(eq).items() if k not in ("informacoes",)} for eq in filtrados_eq],
-                        width="stretch",
-                        hide_index=True,
-                    )
-                    id_eq_ver = st.number_input("ID para ver fotos/detalhes:", min_value=1, step=1, key="infra_eq_id_ver")
+                    linhas_equipamentos = [
+                        {k: v for k, v in dict(eq).items() if k not in ("informacoes",)} for eq in filtrados_eq
+                    ]
+                    id_eq_clicado = tabela_clicavel_id(
+                        st, linhas_equipamentos, "infra_equipamentos_grade", campo_id="id"
+                    ) if linhas_equipamentos else None
+                    if id_eq_clicado:
+                        st.session_state["infra_eq_id_ativo"] = int(id_eq_clicado)
+                    id_eq_ver = int(st.session_state.get("infra_eq_id_ativo") or 0)
                     eq_sel = next((dict(eq) for eq in equipamentos_rows if int(eq.get("id") or 0) == int(id_eq_ver)), None)
                     if eq_sel:
-                        with st.expander(f"Detalhes do equipamento #{id_eq_ver}", expanded=True):
-                            st.write(f"**Cliente/empresa:** {eq_sel.get('cliente_nome') or ''}")
-                            st.write(f"**Funcionário:** {eq_sel.get('funcionario_nome') or eq_sel.get('funcionario_usuario') or ''}")
-                            st.write(f"**Tipo:** {eq_sel.get('tipo_equipamento') or ''}")
-                            st.write(f"**Equipamento:** {eq_sel.get('nome_equipamento') or ''}")
-                            st.write(f"**IP:** {eq_sel.get('ip_equipamento') or ''}")
-                            st.write(f"**Quem usa:** {eq_sel.get('quem_usa') or ''}")
-                            st.write(f"**Informações Gerais:** {eq_sel.get('informacoes') or ''}")
+                        with st.expander(f"Consultar/editar equipamento #{id_eq_ver}", expanded=True):
+                            eqe1, eqe2 = st.columns(2)
+                            edit_eq_cliente = eqe1.text_input("Cliente/empresa:", value=eq_sel.get("cliente_nome") or "", key=f"infra_eq_edit_cliente_{id_eq_ver}")
+                            edit_eq_funcionario = eqe2.text_input("Funcionário:", value=eq_sel.get("funcionario_nome") or eq_sel.get("funcionario_usuario") or "", key=f"infra_eq_edit_func_{id_eq_ver}")
+                            eqe3, eqe4, eqe5 = st.columns(3)
+                            edit_eq_tipo = eqe3.text_input("Tipo:", value=eq_sel.get("tipo_equipamento") or "", key=f"infra_eq_edit_tipo_{id_eq_ver}")
+                            edit_eq_nome = eqe4.text_input("Equipamento:", value=eq_sel.get("nome_equipamento") or "", key=f"infra_eq_edit_nome_{id_eq_ver}")
+                            edit_eq_ip = eqe5.text_input("IP:", value=eq_sel.get("ip_equipamento") or "", key=f"infra_eq_edit_ip_{id_eq_ver}")
+                            edit_eq_quem_usa = st.text_input("Quem usa:", value=eq_sel.get("quem_usa") or "", key=f"infra_eq_edit_usa_{id_eq_ver}")
+                            edit_eq_info = st.text_area("Informações Gerais:", value=eq_sel.get("informacoes") or "", key=f"infra_eq_edit_info_{id_eq_ver}")
+                            if st.button("Salvar alterações do equipamento", type="primary", width="stretch", key=f"infra_eq_salvar_{id_eq_ver}"):
+                                conn_edit_eq = conectar_banco()
+                                cedit_eq = conn_edit_eq.cursor()
+                                cedit_eq.execute(
+                                    """UPDATE infra_equipamentos SET cliente_nome=?, funcionario_nome=?, tipo_equipamento=?,
+                                       nome_equipamento=?, ip_equipamento=?, quem_usa=?, informacoes=? WHERE id=?""",
+                                    (edit_eq_cliente, edit_eq_funcionario, edit_eq_tipo, edit_eq_nome,
+                                     edit_eq_ip, edit_eq_quem_usa, edit_eq_info, id_eq_ver),
+                                )
+                                conn_edit_eq.commit()
+                                conn_edit_eq.close()
+                                st.success("Equipamento atualizado.")
+                                st.rerun()
                             conn_feq = conectar_banco()
                             cfeq = conn_feq.cursor()
                             cfeq.execute("SELECT foto_nome, foto FROM infra_equipamentos_fotos WHERE equipamento_id=? ORDER BY id", (id_eq_ver,))
@@ -457,13 +1062,14 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                                         st.image(foto.get("foto"), caption=foto.get("foto_nome") or "Foto", width=220)
                             else:
                                 st.info("Nenhuma foto cadastrada para este equipamento.")
-                    if tem_permissao("infra.delete"):
-                        id_eq_del = st.number_input("ID para excluir equipamento:", min_value=1, step=1, key="infra_eq_id_del")
+                    else:
+                        st.caption("Clique em qualquer informação do equipamento para consultar ou editar.")
+                    if tem_permissao("infra.delete") and eq_sel:
                         if st.button("Excluir Equipamento", key="infra_eq_excluir"):
                             conn_del_eq = conectar_banco()
                             cdel_eq = conn_del_eq.cursor()
-                            cdel_eq.execute("DELETE FROM infra_equipamentos_fotos WHERE equipamento_id=?", (id_eq_del,))
-                            cdel_eq.execute("DELETE FROM infra_equipamentos WHERE id=?", (id_eq_del,))
+                            cdel_eq.execute("DELETE FROM infra_equipamentos_fotos WHERE equipamento_id=?", (id_eq_ver,))
+                            cdel_eq.execute("DELETE FROM infra_equipamentos WHERE id=?", (id_eq_ver,))
                             conn_del_eq.commit()
                             conn_del_eq.close()
                             st.success("Equipamento excluído.")
@@ -532,32 +1138,153 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
         if t_emails_infra:
             with t_emails_infra:
                 st.subheader("Gestão de E-mails")
+                mensagem_email = st.session_state.pop("infra_email_mensagem", None)
+                if mensagem_email:
+                    st.success(mensagem_email)
                 cliente_email_infra = inf_vinc if inf_vinc != "-- Selecionar Cliente Existente --" else (inf_fan or inf_emp or "-- Avulso --")
                 st.caption(f"As contas salvas aqui ficam vinculadas a: {cliente_email_infra}")
-                qtd_emails_infra = st.number_input("Qtd contas de e-mail:", min_value=0, max_value=30, value=0, key="infra_qtd_emails")
-                for i in range(qtd_emails_infra):
-                    st.markdown(f"**Conta de E-mail {i+1}**")
-                    em1, em2, em3 = st.columns(3)
-                    em_func = em1.text_input(f"Usuário / Funcionário {i+1}:", key=f"infra_em_func_{i}")
-                    em_email = em2.text_input(f"E-mail {i+1}:", key=f"infra_em_email_{i}")
-                    em_senha = em3.text_input(f"Senha {i+1}:", type="password", key=f"infra_em_senha_{i}")
-                    em4, em5, em6 = st.columns(3)
-                    em_aliases = em4.text_input(f"Aliases {i+1}:", key=f"infra_em_aliases_{i}")
-                    em_provedor = em5.text_input(f"Provedor {i+1}:", key=f"infra_em_provedor_{i}")
-                    em_capacidade = em6.text_input(f"Capacidade {i+1}:", key=f"infra_em_capacidade_{i}")
-                    em7, em8 = st.columns(2)
-                    em_entrada = em7.text_input(f"Entrada (IMAP/POP) {i+1}:", key=f"infra_em_entrada_{i}")
-                    em_saida = em8.text_input(f"Saída (SMTP) {i+1}:", key=f"infra_em_saida_{i}")
-                    if em_email:
-                        emails_infra_para_salvar.append(
-                            (cliente_email_infra, em_func, em_email, em_senha, em_aliases, em_provedor, em_entrada, em_saida, em_capacidade)
-                        )
-
                 emails_existentes_infra = buscar_emails_para_empresa(cliente_email_infra, inf_fan, inf_emp, inf_email)
                 if emails_existentes_infra:
                     st.markdown("**E-mails já cadastrados para este cliente**")
-                    st.dataframe(emails_existentes_infra, width="stretch", hide_index=True)
-                    ids_email_infra = [int(e.get("id")) for e in emails_existentes_infra if e.get("id")]
+                    pesquisa_email_infra = st.text_input(
+                        "Pesquisar e-mail salvo:",
+                        placeholder="E-mail, funcionário, provedor, alias ou configuração",
+                        key=f"infra_pesquisa_email_{infra_cliente_key}",
+                    ).strip().casefold()
+                    emails_filtrados_infra = [
+                        email_item for email_item in emails_existentes_infra
+                        if not pesquisa_email_infra or pesquisa_email_infra in " ".join(
+                            str(valor or "") for valor in email_item.values()
+                        ).casefold()
+                    ]
+                    linhas_email_infra = [
+                        {
+                            "ID": email_item.get("id"),
+                            "Funcionário": email_item.get("funcionario"),
+                            "E-mail": email_item.get("email"),
+                            "Aliases": email_item.get("aliases"),
+                            "Provedor": email_item.get("provedor"),
+                            "Entrada": email_item.get("config_entrada"),
+                            "Saída": email_item.get("config_saida"),
+                            "Capacidade": email_item.get("capacidade"),
+                        }
+                        for email_item in emails_filtrados_infra
+                    ]
+                    email_clicado_id = tabela_clicavel_id(
+                        st, linhas_email_infra,
+                        f"infra_grade_emails_{infra_cliente_key}_{st.session_state.get('infra_email_grade_versao', 0)}",
+                        campo_id="ID",
+                    ) if linhas_email_infra else None
+                    if email_clicado_id:
+                        abrir_email_infraestrutura(st.session_state, email_clicado_id)
+                        st.rerun()
+
+                    ids_email_infra = ids_emails_cadastrados(emails_existentes_infra)
+                    if ids_email_infra and tem_permissao("emails.delete"):
+                        with st.expander("Apagar todos os e-mails cadastrados deste cliente", expanded=False):
+                            st.warning(
+                                f"Esta ação apagará permanentemente {len(ids_email_infra)} conta(s) de e-mail "
+                                f"encontrada(s) para {cliente_email_infra}. Os demais dados da infraestrutura não serão alterados."
+                            )
+                            confirmar_exclusao_emails = st.checkbox(
+                                "Confirmo que desejo apagar todas essas contas de e-mail.",
+                                key=f"infra_confirmar_excluir_emails_{infra_cliente_key}",
+                            )
+                            if st.button(
+                                "Apagar todos os e-mails deste cliente",
+                                type="primary",
+                                width="stretch",
+                                disabled=not confirmar_exclusao_emails,
+                                key=f"infra_excluir_todos_emails_{infra_cliente_key}",
+                            ):
+                                conn_excluir_emails = conectar_banco()
+                                try:
+                                    cursor_excluir_emails = conn_excluir_emails.cursor()
+                                    placeholders_exclusao = ",".join(["?"] * len(ids_email_infra))
+                                    cursor_excluir_emails.execute(
+                                        f"DELETE FROM emails_clientes WHERE id IN ({placeholders_exclusao})",
+                                        tuple(ids_email_infra),
+                                    )
+                                    conn_excluir_emails.commit()
+                                finally:
+                                    conn_excluir_emails.close()
+                                registrar_evento_sistema(
+                                    "delete", "emails_clientes", ",".join(map(str, ids_email_infra)),
+                                    cliente_email_infra,
+                                    {"evento": "Exclusão de todos os e-mails do cliente", "quantidade": len(ids_email_infra)},
+                                )
+                                fechar_email_infraestrutura(st.session_state)
+                                st.session_state["infra_email_mensagem"] = (
+                                    f"{len(ids_email_infra)} conta(s) de e-mail apagada(s). "
+                                    "As demais informações da infraestrutura foram mantidas."
+                                )
+                                st.rerun()
+
+                    email_editar_id = st.session_state.get("infra_email_editar_id")
+                    email_editar = next(
+                        (item for item in emails_existentes_infra if int(item.get("id") or 0) == int(email_editar_id or 0)),
+                        None,
+                    )
+                    if email_editar:
+                        with st.expander(f"Editando: {email_editar.get('email')}", expanded=True):
+                            ee1, ee2, ee3 = st.columns(3)
+                            edit_em_func = ee1.text_input("Usuário / Funcionário:", value=email_editar.get("funcionario") or "", key=f"infra_edit_em_func_{email_editar_id}")
+                            edit_em_email = ee2.text_input("E-mail:", value=email_editar.get("email") or "", key=f"infra_edit_em_email_{email_editar_id}")
+                            if pode_visualizar_senhas_infra:
+                                senha_email_salva = buscar_senha_email_selecionado(
+                                    conectar_banco, email_editar, pode_visualizar_senhas_infra
+                                )
+                                edit_em_senha = ee3.text_input(
+                                    "Senha cadastrada (use o olho para visualizar):",
+                                    value=senha_email_salva,
+                                    type="password",
+                                    key=f"infra_edit_em_senha_carregada_{email_editar_id}_{st.session_state.get('infra_email_grade_versao', 0)}",
+                                )
+                                if not senha_email_salva:
+                                    ee3.caption("Este registro está sem senha salva. Informe a senha e salve as alterações.")
+                            else:
+                                edit_em_senha = ee3.text_input(
+                                    "Nova senha (vazio mantém a atual):",
+                                    type="password",
+                                    key=f"infra_edit_em_senha_{email_editar_id}",
+                                )
+                                ee3.caption("Visualização bloqueada pela permissão do usuário. É possível definir uma nova senha sem ver a atual.")
+                            ee4, ee5, ee6 = st.columns(3)
+                            edit_em_aliases = ee4.text_input("Aliases:", value=email_editar.get("aliases") or "", key=f"infra_edit_em_aliases_{email_editar_id}")
+                            edit_em_provedor = ee5.text_input("Provedor:", value=email_editar.get("provedor") or "", key=f"infra_edit_em_provedor_{email_editar_id}")
+                            edit_em_capacidade = ee6.text_input("Capacidade:", value=email_editar.get("capacidade") or "", key=f"infra_edit_em_capacidade_{email_editar_id}")
+                            ee7, ee8 = st.columns(2)
+                            edit_em_entrada = ee7.text_input("Entrada (IMAP/POP):", value=email_editar.get("config_entrada") or "", key=f"infra_edit_em_entrada_{email_editar_id}")
+                            edit_em_saida = ee8.text_input("Saída (SMTP):", value=email_editar.get("config_saida") or "", key=f"infra_edit_em_saida_{email_editar_id}")
+                            salvar_email_col, cancelar_email_col = st.columns(2)
+                            if salvar_email_col.button("Salvar alterações do e-mail", type="primary", width="stretch", key=f"infra_salvar_email_{email_editar_id}"):
+                                if not edit_em_email.strip():
+                                    st.error("Informe o endereço de e-mail.")
+                                else:
+                                    conn_edit_em = conectar_banco()
+                                    cedit_em = conn_edit_em.cursor()
+                                    if edit_em_senha:
+                                        cedit_em.execute(
+                                            """UPDATE emails_clientes SET funcionario=?, email=?, senha=?, aliases=?, provedor=?,
+                                               config_entrada=?, config_saida=?, capacidade=? WHERE id=?""",
+                                            (edit_em_func, edit_em_email, edit_em_senha, edit_em_aliases, edit_em_provedor,
+                                             edit_em_entrada, edit_em_saida, edit_em_capacidade, email_editar_id),
+                                        )
+                                    else:
+                                        cedit_em.execute(
+                                            """UPDATE emails_clientes SET funcionario=?, email=?, aliases=?, provedor=?,
+                                               config_entrada=?, config_saida=?, capacidade=? WHERE id=?""",
+                                            (edit_em_func, edit_em_email, edit_em_aliases, edit_em_provedor,
+                                             edit_em_entrada, edit_em_saida, edit_em_capacidade, email_editar_id),
+                                        )
+                                    conn_edit_em.commit()
+                                    conn_edit_em.close()
+                                    fechar_email_infraestrutura(st.session_state)
+                                    st.session_state["infra_email_mensagem"] = "E-mail atualizado com sucesso."
+                                    st.rerun()
+                            if cancelar_email_col.button("Cancelar edição", width="stretch", key=f"infra_cancelar_email_{email_editar_id}"):
+                                fechar_email_infraestrutura(st.session_state)
+                                st.rerun()
                     fora_do_vinculo = [e for e in emails_existentes_infra if (e.get("cliente_vinculado") or "") != cliente_email_infra]
                     if fora_do_vinculo and cliente_email_infra != "-- Avulso --":
                         st.warning("Alguns e-mails foram encontrados pelo domínio ou outro nome, mas ainda não estão vinculados a esta empresa.")
@@ -576,6 +1303,35 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                 else:
                     st.info("Nenhum e-mail cadastrado para este cliente ainda.")
 
+                versao_novos_emails = st.session_state.get("infra_novos_emails_versao", 0)
+                mostrar_novos_emails = st.toggle(
+                    "Adicionar novas contas de e-mail",
+                    key=f"infra_adicionar_emails_{versao_novos_emails}",
+                )
+                if mostrar_novos_emails:
+                    with st.container(border=True):
+                        qtd_emails_infra = st.number_input(
+                            "Qtd contas de e-mail:", min_value=1, max_value=30, value=1,
+                            key=f"infra_qtd_emails_{versao_novos_emails}",
+                        )
+                        for i in range(qtd_emails_infra):
+                            st.markdown(f"**Conta de E-mail {i+1}**")
+                            em1, em2, em3 = st.columns(3)
+                            em_func = em1.text_input(f"Usuário / Funcionário {i+1}:", key=f"infra_em_func_{versao_novos_emails}_{i}")
+                            em_email = em2.text_input(f"E-mail {i+1}:", key=f"infra_em_email_{versao_novos_emails}_{i}")
+                            em_senha = em3.text_input(f"Senha {i+1}:", type="password", key=f"infra_em_senha_{versao_novos_emails}_{i}")
+                            em4, em5, em6 = st.columns(3)
+                            em_aliases = em4.text_input(f"Aliases {i+1}:", key=f"infra_em_aliases_{versao_novos_emails}_{i}")
+                            em_provedor = em5.text_input(f"Provedor {i+1}:", key=f"infra_em_provedor_{versao_novos_emails}_{i}")
+                            em_capacidade = em6.text_input(f"Capacidade {i+1}:", key=f"infra_em_capacidade_{versao_novos_emails}_{i}")
+                            em7, em8 = st.columns(2)
+                            em_entrada = em7.text_input(f"Entrada (IMAP/POP) {i+1}:", key=f"infra_em_entrada_{versao_novos_emails}_{i}")
+                            em_saida = em8.text_input(f"Saída (SMTP) {i+1}:", key=f"infra_em_saida_{versao_novos_emails}_{i}")
+                            if em_email:
+                                emails_infra_para_salvar.append(
+                                    (cliente_email_infra, em_func, em_email, em_senha, em_aliases, em_provedor, em_entrada, em_saida, em_capacidade)
+                                )
+
         if t_apps:
             with t_apps:
                 qtd_apps = st.number_input("Qtd Aplicativos/Sistemas:", min_value=0, max_value=50, value=0)
@@ -590,7 +1346,74 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                     if app_nome or app_operador or app_email or app_login or app_senha:
                         aplicativos_l.append(f"Sistema: {app_nome} | Operador: {app_operador} | E-mail: {app_email} | Login: {app_login} | Senha: {app_senha}")
 
-        rotulo_salvar_infra = "Salvar alterações da ficha" if infra_editando else "Salvar Ficha de Infraestrutura"
+        with t_sys:
+            st.divider()
+            renderizar_historico_tecnico("sistemas", "Sistemas", [
+                ("sys_dados", "Dados", "|"), ("sys_serial", "Serial", "|"),
+                ("sys_cod", "Código do cliente", "|"), ("sys_adm", "Login administrativo", "|"),
+                ("sys_senha", "Senha administrativa", "|"), ("sys_sec", "Login secundário", "|"),
+            ])
+        with t_rede:
+            st.divider()
+            renderizar_historico_tecnico("rede", "Redes", [
+                ("rede_prov", "Provedor", "|"), ("rede_ip", "IP", "|"),
+                ("rede_log", "Login", "|"), ("rede_sen", "Senha", "|"),
+            ])
+            renderizar_historico_tecnico("faixas_ip", "Faixas de IP", [("faixas_ip", "Informações", "||")])
+        with t_dvr:
+            st.divider()
+            renderizar_historico_tecnico("dvrs", "DVRs", [("dvr_acessos", "Informações", "||")])
+        with t_cam:
+            st.divider()
+            renderizar_historico_tecnico("cameras", "Câmeras", [("cameras_acessos", "Informações", "||")])
+        with t_alarme:
+            st.divider()
+            renderizar_historico_tecnico("alarmes", "Alarmes", [("alarmes_acessos", "Informações", "||")])
+        with t_wifi:
+            st.divider()
+            renderizar_historico_tecnico("wifi", "Redes Wi-Fi", [
+                ("rede_wire", "SSID", "|"), ("rede_wsen", "Senha", "|"),
+            ])
+        with t_serv:
+            st.divider()
+            renderizar_historico_tecnico("servidores", "Servidores", [
+                ("serv_nome", "Nome", "|"), ("serv_ip", "IP", "|"),
+                ("serv_link", "No-IP", "|"), ("serv_log", "Login", "|"),
+                ("serv_sen", "Senha", "|"), ("serv_anydesk", "AnyDesk", "||"),
+                ("serv_radmin", "Radmin", "||"), ("serv_google_remote", "Google Remote", "|"),
+                ("serv_info_gerais", "Informações gerais", "||"), ("cert_log", "Gerencia DHCP", "|"),
+            ])
+            renderizar_historico_tecnico("pfsense", "PfSense", [("pfsense_acessos", "Informações", "||")])
+            renderizar_historico_tecnico("vpn", "VPN", [("vpn_acessos", "Informações", "||")])
+        with t_impressoras:
+            st.divider()
+            renderizar_historico_tecnico("impressoras", "Impressoras", [("impressoras_acessos", "Informações", "||")])
+        with t_antivirus:
+            st.divider()
+            renderizar_historico_tecnico("antivirus", "Antivírus", [("antivirus_acessos", "Informações", "||")])
+        with t_fin:
+            st.divider()
+            renderizar_historico_tecnico("financeiro", "Acessos financeiros", [
+                ("fin_b1", "Banco 1", "||"), ("fin_b2", "Banco 2", "||"), ("fin_b3", "Banco 3", "||"),
+            ])
+        with t_pcs:
+            st.divider()
+            renderizar_historico_tecnico("pcs", "PCs e Acessos", [("pcs_acessos", "Informações", "||")])
+        if t_setores:
+            with t_setores:
+                st.divider()
+                renderizar_historico_setores()
+        if t_hospedagem:
+            with t_hospedagem:
+                st.divider()
+                renderizar_historico_tecnico("hospedagem", "Hospedagens e Domínios", [("hospedagem_acessos", "Informações", "||")])
+        if t_apps:
+            with t_apps:
+                st.divider()
+                renderizar_historico_tecnico("aplicativos", "Aplicativos", [("aplicativos_acessos", "Informações", "||")])
+
+        ficha_base_salvar = infra_editando or infra_historico_ficha
+        rotulo_salvar_infra = "Salvar alterações da ficha" if ficha_base_salvar else "Salvar Ficha de Infraestrutura"
         if st.button(rotulo_salvar_infra, type="primary", width="stretch"):
             if inf_vinc != "-- Selecionar Cliente Existente --" or inf_fan:
                 for foto_item in fotos_infra_itens:
@@ -631,6 +1454,11 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                     "serv_link": "|".join(sv_link_l),
                     "serv_log": "|".join(sv_log_l),
                     "serv_sen": "|".join(sv_sen_l),
+                    "serv_anydesk": "||".join(sv_anydesk_l),
+                    "serv_radmin": "||".join(sv_radmin_l),
+                    "serv_google_remote": "|".join(sv_google_remote_l),
+                    "serv_info_gerais": "||".join(sv_info_gerais_l),
+                    "impressoras_acessos": "||".join(impressoras_l),
                     "cert_log": "|".join(ct_log_l),
                     "cert_sen": "|".join(ct_sen_l),
                     "fin_b1": fin_l[0],
@@ -649,16 +1477,70 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                     "setores": preparar_setores(setores_l),
                 }
                 colunas_infra_salvar = list(dados_infra_salvar.keys())
-                if infra_editando:
-                    for coluna in colunas_infra_salvar:
+                if ficha_base_salvar:
+                    # Os campos técnicos desta tela são para adicionar registros. Nunca
+                    # substituímos o histórico existente ao preencher apenas um novo item.
+                    dados_infra_salvar.update(anexar_grupo_infra(ficha_base_salvar, {
+                        "sys_dados": sys_dados_l, "sys_serial": sys_ser_l, "sys_cod": sys_cod_l,
+                        "sys_adm": sys_adm_l, "sys_senha": sys_sen_l, "sys_sec": sys_sec_l,
+                    }))
+                    dados_infra_salvar.update(anexar_grupo_infra(ficha_base_salvar, {
+                        "rede_prov": r_pro_l, "rede_ip": r_ip_l,
+                        "rede_log": r_log_l, "rede_sen": r_sen_l,
+                    }))
+                    dados_infra_salvar.update(anexar_grupo_infra(ficha_base_salvar, {
+                        "rede_wire": r_wir_l, "rede_wsen": r_wsen_l,
+                    }))
+                    dados_infra_salvar.update(anexar_grupo_infra(
+                        ficha_base_salvar,
+                        {
+                            "serv_nome": sv_nom_l, "serv_ip": sv_ip_l, "serv_link": sv_link_l,
+                            "serv_log": sv_log_l, "serv_sen": sv_sen_l,
+                            "serv_anydesk": sv_anydesk_l, "serv_radmin": sv_radmin_l,
+                            "serv_google_remote": sv_google_remote_l,
+                            "serv_info_gerais": sv_info_gerais_l,
+                            "cert_log": ct_log_l, "cert_sen": ct_sen_l,
+                        },
+                        {"serv_anydesk": "||", "serv_radmin": "||", "serv_info_gerais": "||"},
+                    ))
+                    for coluna, novos, separador in (
+                        ("dvr_acessos", dvr_l, "||"), ("cameras_acessos", cameras_l, "||"),
+                        ("alarmes_acessos", alarmes_l, "||"), ("impressoras_acessos", impressoras_l, "||"),
+                        ("pcs_acessos", pcs_l, "||"), ("aplicativos_acessos", aplicativos_l, "||"),
+                        ("pfsense_acessos", pfsense_l, "||"), ("antivirus_acessos", antivirus_l, "||"),
+                        ("faixas_ip", faixas_ip_l, "||"), ("vpn_acessos", vpn_l, "||"),
+                        ("hospedagem_acessos", hospedagem_l, "||"),
+                    ):
+                        dados_infra_salvar[coluna] = anexar_itens_infra(
+                            ficha_base_salvar.get(coluna), novos, separador
+                        )
+                    # Campos legados de DVR não podem ser remontados a partir do novo formulário.
+                    dados_infra_salvar["rede_ddns"] = ficha_base_salvar.get("rede_ddns") or ""
+                    dados_infra_salvar["rede_dsen"] = ficha_base_salvar.get("rede_dsen") or ""
+                    bancos_existentes = [
+                        str(ficha_base_salvar.get(campo) or "").strip()
+                        for campo in ("fin_b1", "fin_b2", "fin_b3")
+                        if str(ficha_base_salvar.get(campo) or "").strip()
+                    ]
+                    bancos_mesclados = (bancos_existentes + [str(valor).strip() for valor in fin_l if str(valor).strip()])[:3]
+                    for indice, campo in enumerate(("fin_b1", "fin_b2", "fin_b3")):
+                        dados_infra_salvar[campo] = bancos_mesclados[indice] if indice < len(bancos_mesclados) else ""
+                    dados_infra_salvar["setores"] = anexar_setores_infra(
+                        ficha_base_salvar.get("setores"), setores_l
+                    )
+                    campos_identificacao = {
+                        "cliente_vinc", "fantasia", "razao", "cnpj", "endereco", "contato",
+                        "email_prin", "tel_prin", "tel_prov", "contrato_data", "pagto", "venc",
+                    }
+                    for coluna in campos_identificacao:
                         if dados_infra_salvar[coluna] in (None, "", "-- Selecionar Cliente Existente --"):
-                            dados_infra_salvar[coluna] = infra_editando.get(coluna) or ""
+                            dados_infra_salvar[coluna] = ficha_base_salvar.get(coluna) or ""
                     set_sql_infra = ", ".join([f"{col}=?" for col in colunas_infra_salvar])
                     c.execute(
                         f"UPDATE infra_v4 SET {set_sql_infra} WHERE id=?",
-                        tuple(dados_infra_salvar[col] for col in colunas_infra_salvar) + (infra_edit_id_ativo,),
+                        tuple(dados_infra_salvar[col] for col in colunas_infra_salvar) + (ficha_base_salvar.get("id"),),
                     )
-                    ficha_id = infra_edit_id_ativo
+                    ficha_id = ficha_base_salvar.get("id")
                 else:
                     placeholders_infra = ",".join(["?"] * len(colunas_infra_salvar))
                     c.execute(
@@ -684,7 +1566,8 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                     )
                 conn.commit()
                 conn.close()
-                if infra_editando:
+                fechar_novos_emails_infraestrutura(st.session_state)
+                if ficha_base_salvar:
                     st.session_state.pop("infra_editar_id", None)
                     st.success("Ficha atualizada com sucesso!")
                 else:
@@ -697,13 +1580,64 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
         st.subheader("Base de Infraestrutura Cadastrada")
         conn = conectar_banco()
         c = conn.cursor(dictionary=True)
-        c.execute('SELECT id, fantasia, razao, contato, tel_prin FROM infra_v4 ORDER BY id DESC')
+        c.execute('SELECT * FROM infra_v4 ORDER BY id DESC')
         rows = c.fetchall()
         conn.close()
         rows = filtrar_registros_por_empresa(rows, "cliente_vinc", "fantasia", "razao")
-        
-        if rows: st.dataframe(rows, width="stretch", hide_index=True)
-        else: st.info("Nenhuma ficha encontrada.")
+
+        pesquisa_infra = st.text_input(
+            "Pesquisar em toda a infraestrutura:",
+            placeholder="Cliente, equipamento, IP, sistema, e-mail, servidor, setor ou qualquer informação salva",
+            key="infra_pesquisa_geral",
+        ).strip().casefold()
+        rows_filtradas = [
+            row for row in rows
+            if not pesquisa_infra or pesquisa_infra in " ".join(
+                str(valor or "") for chave, valor in row.items()
+                if chave not in {"foto"}
+            ).casefold()
+        ]
+        linhas_infra = [
+            {
+                "ID": row.get("id"),
+                "Cliente": row.get("cliente_vinc") or row.get("fantasia") or row.get("razao"),
+                "Fantasia": row.get("fantasia"),
+                "Razão social": row.get("razao"),
+                "Contato": row.get("contato"),
+                "Telefone": row.get("tel_prin"),
+                "E-mail": row.get("email_prin"),
+            }
+            for row in rows_filtradas
+        ]
+        ficha_clicada_id = tabela_clicavel_id(
+            st, linhas_infra,
+            f"infra_historico_grade_{st.session_state.get('infra_grade_versao', 0)}",
+            campo_id="ID"
+        ) if linhas_infra else None
+        if ficha_clicada_id:
+            if tem_permissao("infra.edit"):
+                abrir_ficha_infraestrutura(st.session_state, ficha_clicada_id)
+                st.rerun()
+            else:
+                ficha_consulta = next(
+                    (row for row in rows_filtradas if int(row.get("id") or 0) == int(ficha_clicada_id)),
+                    None,
+                )
+                if ficha_consulta:
+                    with st.expander(f"Ficha #{ficha_clicada_id} — Identificação", expanded=True):
+                        for campo, titulo in (
+                            ("cliente_vinc", "Cliente"), ("fantasia", "Fantasia"),
+                            ("razao", "Razão social"), ("cnpj", "CNPJ/CPF"),
+                            ("endereco", "Endereço"), ("contato", "Contato"),
+                            ("tel_prin", "Telefone"), ("email_prin", "E-mail"),
+                        ):
+                            st.write(f"**{titulo}:** {ficha_consulta.get(campo) or 'Não informado'}")
+        if not rows:
+            st.info("Nenhuma ficha encontrada.")
+        elif not linhas_infra:
+            st.warning("Nenhuma ficha contém o texto pesquisado.")
+        else:
+            st.caption("Clique em qualquer informação da ficha para abrir a edição completa.")
         
         acoes_inf = []
         if tem_permissao("infra.edit"): acoes_inf.append("Editar Ficha Completa")
@@ -711,7 +1645,12 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
         
         if acoes_inf:
             st.write("---")
-            a_inf = st.radio("Ação:", acoes_inf, horizontal=True)
+            a_inf = st.radio("Ação:", acoes_inf, horizontal=True, key="infra_acao_ficha")
+            if ficha_clicada_id and tem_permissao("infra.edit"):
+                a_inf = "Editar Ficha Completa"
+            elif a_inf == "Editar Ficha Completa" and not st.session_state.get("infra_item_editar_id"):
+                # A consulta deve permanecer limpa até o usuário escolher uma ficha.
+                a_inf = ""
             if a_inf == "Excluir Ficha":
                 id_di = st.number_input("ID para excluir:", min_value=1, step=1, key="del_inf_id")
                 if st.button("Excluir Definitivamente", key="btn_d_inf"): 
@@ -725,12 +1664,26 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                     st.rerun()
                     
             elif a_inf == "Editar Ficha Completa":
-                id_ei = st.number_input("ID para editar:", min_value=1, step=1, key="edit_inf_id")
-                if st.button("Abrir ficha na tela principal para editar", type="primary", width="stretch", key="btn_abrir_inf_na_tela_principal"):
-                    st.session_state["infra_editar_id"] = int(id_ei)
-                    st.rerun()
-                st.info("Clique no botão acima para carregar essa ficha na aba 'Cadastrar Ficha Completa' em modo edição.")
-                st.stop()
+                ids_infra_disponiveis = [int(row.get("id")) for row in rows_filtradas if row.get("id")]
+                id_salvo_edicao = int(st.session_state.get("infra_item_editar_id") or 0)
+                if id_salvo_edicao not in ids_infra_disponiveis and ids_infra_disponiveis:
+                    id_salvo_edicao = ids_infra_disponiveis[0]
+                if not ids_infra_disponiveis:
+                    st.stop()
+                id_ei = st.selectbox(
+                    "Ficha selecionada para edição:",
+                    ids_infra_disponiveis,
+                    index=ids_infra_disponiveis.index(id_salvo_edicao),
+                    format_func=lambda ficha_id: next(
+                        (
+                            f"#{ficha_id} — {row.get('cliente_vinc') or row.get('fantasia') or row.get('razao') or 'Sem nome'}"
+                            for row in rows_filtradas if int(row.get("id") or 0) == ficha_id
+                        ),
+                        f"#{ficha_id}",
+                    ),
+                    key="edit_inf_id_selecao",
+                )
+                st.session_state["infra_item_editar_id"] = int(id_ei)
                 conn = conectar_banco()
                 conn.row_factory = None
                 c = conn.cursor()
@@ -740,7 +1693,8 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                 
                 if idata:
                     idata = dict(idata) 
-                    with st.expander(f"Editando a Ficha de: {idata.get('fantasia', '')} {idata.get('razao', '')}", expanded=True):
+                    with st.container(border=True):
+                        st.subheader(f"Editando a ficha de: {idata.get('fantasia', '')} {idata.get('razao', '')}")
                         st.markdown("**1. Identificação da Empresa**")
                         st.caption("Informe o ID do cliente cadastrado para puxar os dados para esta ficha. Depois disso, pode alterar qualquer campo e salvar.")
                         puxar1, puxar2 = st.columns([1, 3])
@@ -838,58 +1792,70 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                                     st.success("E-mail salvo e vinculado à ficha.")
                                     st.rerun()
 
-                        st.markdown("**2. Detalhamento Técnico**")
-                        st.caption("Edite um item por linha. Campos antigos separados por | foram mantidos para não perder dados.")
-                        edit_dvr = st.text_area("DVRs:", value=texto_lista_infra(idata.get("dvr_acessos")), height=120, key=f"inf_edit_dvr_{id_ei}")
-                        edit_cameras = st.text_area("Câmeras:", value=texto_lista_infra(idata.get("cameras_acessos")), height=120, key=f"inf_edit_cameras_{id_ei}")
-                        edit_alarmes = st.text_area("Alarmes:", value=texto_lista_infra(idata.get("alarmes_acessos")), height=120, key=f"inf_edit_alarmes_{id_ei}")
-
-                        with st.expander("Editar demais blocos técnicos", expanded=False):
-                            edit_sys_dados = st.text_area("Sistemas - dados:", value=texto_lista_infra(idata.get("sys_dados"), "|"), height=90, key=f"inf_edit_sysdados_{id_ei}")
-                            edit_sys_serial = st.text_area("Sistemas - serial:", value=texto_lista_infra(idata.get("sys_serial"), "|"), height=90, key=f"inf_edit_sysserial_{id_ei}")
-                            edit_sys_cod = st.text_area("Sistemas - código cliente:", value=texto_lista_infra(idata.get("sys_cod"), "|"), height=90, key=f"inf_edit_syscod_{id_ei}")
-                            edit_sys_adm = st.text_area("Sistemas - logins administrativos:", value=texto_lista_infra(idata.get("sys_adm"), "|"), height=90, key=f"inf_edit_sysadm_{id_ei}")
-                            edit_sys_senha = st.text_area("Sistemas - senhas administrativas:", value=texto_lista_infra(idata.get("sys_senha"), "|"), height=90, key=f"inf_edit_syssen_{id_ei}")
-                            edit_sys_sec = st.text_area("Sistemas - logins secundários:", value=texto_lista_infra(idata.get("sys_sec"), "|"), height=90, key=f"inf_edit_syssec_{id_ei}")
-                            edit_rede_prov = st.text_area("Rede - provedor:", value=texto_lista_infra(idata.get("rede_prov"), "|"), height=90, key=f"inf_edit_redeprov_{id_ei}")
-                            edit_rede_ip = st.text_area("Rede - IP:", value=texto_lista_infra(idata.get("rede_ip"), "|"), height=90, key=f"inf_edit_redeip_{id_ei}")
-                            edit_rede_log = st.text_area("Rede - logins modem:", value=texto_lista_infra(idata.get("rede_log"), "|"), height=90, key=f"inf_edit_redelog_{id_ei}")
-                            edit_rede_sen = st.text_area("Rede - senhas modem:", value=texto_lista_infra(idata.get("rede_sen"), "|"), height=90, key=f"inf_edit_redesen_{id_ei}")
-                            edit_wifi = st.text_area("Wi-Fi SSID:", value=texto_lista_infra(idata.get("rede_wire"), "|"), height=90, key=f"inf_edit_wifi_{id_ei}")
-                            edit_wifi_senha = st.text_area("Wi-Fi senha:", value=texto_lista_infra(idata.get("rede_wsen"), "|"), height=90, key=f"inf_edit_wifisen_{id_ei}")
-                            edit_serv_nome = st.text_area("Servidor - nome:", value=texto_lista_infra(idata.get("serv_nome"), "|"), height=90, key=f"inf_edit_servnome_{id_ei}")
-                            edit_serv_ip = st.text_area("Servidor - IP:", value=texto_lista_infra(idata.get("serv_ip"), "|"), height=90, key=f"inf_edit_servip_{id_ei}")
-                            edit_serv_link = st.text_area("Servidor - link/no-ip:", value=texto_lista_infra(idata.get("serv_link"), "|"), height=90, key=f"inf_edit_servlink_{id_ei}")
-                            edit_serv_log = st.text_area("Servidor - login:", value=texto_lista_infra(idata.get("serv_log"), "|"), height=90, key=f"inf_edit_servlog_{id_ei}")
-                            edit_serv_sen = st.text_area("Servidor - senha:", value=texto_lista_infra(idata.get("serv_sen"), "|"), height=90, key=f"inf_edit_servsen_{id_ei}")
-                            edit_fin_b1 = st.text_area("Financeiro/Banco 1:", value=idata.get("fin_b1") or "", height=90, key=f"inf_edit_fin1_{id_ei}")
-                            edit_fin_b2 = st.text_area("Financeiro/Banco 2:", value=idata.get("fin_b2") or "", height=90, key=f"inf_edit_fin2_{id_ei}")
-                            edit_fin_b3 = st.text_area("Financeiro/Banco 3:", value=idata.get("fin_b3") or "", height=90, key=f"inf_edit_fin3_{id_ei}")
-                            edit_pcs = st.text_area("PCs e acessos:", value=texto_lista_infra(idata.get("pcs_acessos")), height=120, key=f"inf_edit_pcs_{id_ei}")
-                            edit_apps = st.text_area("Aplicativos:", value=texto_lista_infra(idata.get("aplicativos_acessos")), height=120, key=f"inf_edit_apps_{id_ei}")
-                            edit_pfsense = st.text_area("PfSense:", value=texto_lista_infra(idata.get("pfsense_acessos")), height=120, key=f"inf_edit_pfsense_{id_ei}")
-                            edit_antivirus = st.text_area("Antivírus:", value=texto_lista_infra(idata.get("antivirus_acessos")), height=120, key=f"inf_edit_antivirus_{id_ei}")
-                            edit_faixas_ip = st.text_area("Faixas de IP:", value=texto_lista_infra(idata.get("faixas_ip")), height=120, key=f"inf_edit_faixas_{id_ei}")
-                            edit_vpn = st.text_area("VPN:", value=texto_lista_infra(idata.get("vpn_acessos")), height=120, key=f"inf_edit_vpn_{id_ei}")
-                            edit_hospedagem = st.text_area("Hospedagem/domínios:", value=texto_lista_infra(idata.get("hospedagem_acessos")), height=120, key=f"inf_edit_hosp_{id_ei}")
-                            edit_setores = st.text_area("Setores:", value=idata.get("setores") or "", height=120, key=f"inf_edit_setores_{id_ei}")
+                        st.markdown("**2. Registros técnicos — edição individual**")
+                        st.caption("Escolha a aba, clique no registro e salve somente aquele item. Os demais registros não serão alterados.")
+                        abas_edicao_itens = st.tabs([
+                            "Sistemas", "Rede", "Wi-Fi", "Servidor", "DVR", "Câmeras", "Alarme",
+                            "Impressoras", "Antivírus", "Financeiro", "PCs", "PfSense", "VPN",
+                            "Hospedagem", "Aplicativos", "Faixas de IP", "Setores",
+                        ])
+                        edicoes_infra = [
+                            ("sistemas", "Sistemas", [("sys_dados", "Dados", "|"), ("sys_serial", "Serial", "|"), ("sys_cod", "Código do cliente", "|"), ("sys_adm", "Login administrativo", "|"), ("sys_senha", "Senha administrativa", "|"), ("sys_sec", "Login secundário", "|")]),
+                            ("rede", "Redes", [("rede_prov", "Provedor", "|"), ("rede_ip", "IP", "|"), ("rede_log", "Login", "|"), ("rede_sen", "Senha", "|")]),
+                            ("wifi", "Redes Wi-Fi", [("rede_wire", "SSID", "|"), ("rede_wsen", "Senha", "|")]),
+                            ("servidores", "Servidores", [("serv_nome", "Nome", "|"), ("serv_ip", "IP", "|"), ("serv_link", "No-IP", "|"), ("serv_log", "Login", "|"), ("serv_sen", "Senha", "|"), ("serv_anydesk", "AnyDesk", "||"), ("serv_radmin", "Radmin", "||"), ("serv_google_remote", "Google Remote", "|"), ("serv_info_gerais", "Informações gerais", "||"), ("cert_log", "Gerencia DHCP", "|")]),
+                            ("dvrs", "DVRs", [("dvr_acessos", "Informações", "||")]),
+                            ("cameras", "Câmeras", [("cameras_acessos", "Informações", "||")]),
+                            ("alarmes", "Alarmes", [("alarmes_acessos", "Informações", "||")]),
+                            ("impressoras", "Impressoras", [("impressoras_acessos", "Informações", "||")]),
+                            ("antivirus", "Antivírus", [("antivirus_acessos", "Informações", "||")]),
+                            ("financeiro", "Acessos financeiros", [("fin_b1", "Banco 1", "||"), ("fin_b2", "Banco 2", "||"), ("fin_b3", "Banco 3", "||")]),
+                            ("pcs", "PCs e Acessos", [("pcs_acessos", "Informações", "||")]),
+                            ("pfsense", "PfSense", [("pfsense_acessos", "Informações", "||")]),
+                            ("vpn", "VPN", [("vpn_acessos", "Informações", "||")]),
+                            ("hospedagem", "Hospedagens e Domínios", [("hospedagem_acessos", "Informações", "||")]),
+                            ("aplicativos", "Aplicativos", [("aplicativos_acessos", "Informações", "||")]),
+                            ("faixas_ip", "Faixas de IP", [("faixas_ip", "Informações", "||")]),
+                        ]
+                        for aba_item, (slug_item, titulo_item, campos_item) in zip(abas_edicao_itens, edicoes_infra):
+                            with aba_item:
+                                renderizar_historico_tecnico(slug_item, titulo_item, campos_item, ficha=idata)
+                        with abas_edicao_itens[-1]:
+                            renderizar_historico_setores(ficha=idata)
 
                         st.markdown("**Fotos de DVR, câmeras e alarmes**")
                         conn_fotos_item = conectar_banco()
                         cfotos_item = conn_fotos_item.cursor()
-                        cfotos_item.execute("SELECT * FROM infra_item_fotos WHERE ficha_id=? ORDER BY tipo_item, item_indice, id", (id_ei,))
+                        cfotos_item.execute(
+                            """SELECT id, ficha_id, tipo_item, item_indice, item_nome, foto_nome, foto_mime, criado_em
+                               FROM infra_item_fotos WHERE ficha_id=? ORDER BY tipo_item, item_indice, id""",
+                            (id_ei,),
+                        )
                         fotos_item_salvas = [dict(r) for r in cfotos_item.fetchall()]
                         conn_fotos_item.close()
 
                         if fotos_item_salvas:
-                            for foto_salva in fotos_item_salvas:
-                                st.write(f"**ID {foto_salva.get('id')} - {foto_salva.get('tipo_item')} {foto_salva.get('item_indice')}: {foto_salva.get('item_nome') or ''}**")
-                                st.image(foto_salva.get("foto"), caption=foto_salva.get("foto_nome") or "Foto", width=240)
-                            id_foto_excluir = st.number_input("ID da foto para excluir/trocar:", min_value=1, step=1, key=f"infra_item_foto_del_{id_ei}")
-                            if st.button("Excluir foto selecionada", key=f"infra_item_foto_btn_del_{id_ei}"):
+                            foto_item_clicada = tabela_clicavel_id(
+                                st, fotos_item_salvas, f"infra_fotos_grade_{id_ei}", campo_id="id"
+                            )
+                            if foto_item_clicada:
+                                st.session_state[f"infra_foto_ativa_{id_ei}"] = int(foto_item_clicada)
+                            id_foto_ativa = int(st.session_state.get(f"infra_foto_ativa_{id_ei}") or 0)
+                            foto_meta = next((foto for foto in fotos_item_salvas if int(foto.get("id") or 0) == id_foto_ativa), None)
+                            if foto_meta:
+                                conn_foto_blob = conectar_banco()
+                                cfoto_blob = conn_foto_blob.cursor()
+                                cfoto_blob.execute("SELECT foto FROM infra_item_fotos WHERE id=? AND ficha_id=?", (id_foto_ativa, id_ei))
+                                foto_blob = cfoto_blob.fetchone()
+                                conn_foto_blob.close()
+                                if foto_blob and foto_blob.get("foto"):
+                                    st.image(foto_blob.get("foto"), caption=foto_meta.get("foto_nome") or "Foto", width=240)
+                            else:
+                                st.caption("Clique em uma foto para visualizar, trocar ou excluir.")
+                            if foto_meta and st.button("Excluir foto selecionada", key=f"infra_item_foto_btn_del_{id_ei}"):
                                 conn_del_item_foto = conectar_banco()
                                 cdel_item_foto = conn_del_item_foto.cursor()
-                                cdel_item_foto.execute("DELETE FROM infra_item_fotos WHERE id=? AND ficha_id=?", (id_foto_excluir, id_ei))
+                                cdel_item_foto.execute("DELETE FROM infra_item_fotos WHERE id=? AND ficha_id=?", (id_foto_ativa, id_ei))
                                 conn_del_item_foto.commit()
                                 conn_del_item_foto.close()
                                 st.success("Foto excluída. Você pode enviar outra abaixo.")
@@ -923,38 +1889,25 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                                 st.success("Foto salva.")
                                 st.rerun()
                         
-                        if st.button("Guardar Edição Completa da Ficha", type="primary", key=f"btn_save_inf_{id_ei}"):
+                        if st.button("Guardar dados da empresa", type="primary", key=f"btn_save_inf_{id_ei}"):
                             conn_save_inf = conectar_banco()
                             csave_inf = conn_save_inf.cursor()
                             csave_inf.execute(
                                 """UPDATE infra_v4 SET cliente_vinc=?, fantasia=?, razao=?, cnpj=?, endereco=?,
-                                   contato=?, email_prin=?, tel_prin=?, tel_prov=?, contrato_data=?, pagto=?, venc=?,
-                                   sys_dados=?, sys_serial=?, sys_cod=?, sys_adm=?, sys_senha=?, sys_sec=?,
-                                   rede_prov=?, rede_ip=?, rede_log=?, rede_sen=?, rede_wire=?, rede_wsen=?,
-                                   serv_nome=?, serv_ip=?, serv_link=?, serv_log=?, serv_sen=?,
-                                   fin_b1=?, fin_b2=?, fin_b3=?, pcs_acessos=?, dvr_acessos=?, cameras_acessos=?,
-                                   alarmes_acessos=?, aplicativos_acessos=?, pfsense_acessos=?, antivirus_acessos=?,
-                                   faixas_ip=?, vpn_acessos=?, hospedagem_acessos=?, setores=? WHERE id=?""",
+                                   contato=?, email_prin=?, tel_prin=?, tel_prov=?, contrato_data=?, pagto=?, venc=?
+                                   WHERE id=?""",
                                 (
                                     edit_cliente_vinc, edit_fantasia, edit_razao, edit_cnpj, edit_endereco,
-                                    edit_contato, edit_email, edit_tel_prin, edit_tel_prov, edit_contrato, edit_pagto, edit_venc,
-                                    lista_texto_infra(edit_sys_dados, "|"), lista_texto_infra(edit_sys_serial, "|"),
-                                    lista_texto_infra(edit_sys_cod, "|"), lista_texto_infra(edit_sys_adm, "|"),
-                                    lista_texto_infra(edit_sys_senha, "|"), lista_texto_infra(edit_sys_sec, "|"),
-                                    lista_texto_infra(edit_rede_prov, "|"), lista_texto_infra(edit_rede_ip, "|"),
-                                    lista_texto_infra(edit_rede_log, "|"), lista_texto_infra(edit_rede_sen, "|"),
-                                    lista_texto_infra(edit_wifi, "|"), lista_texto_infra(edit_wifi_senha, "|"),
-                                    lista_texto_infra(edit_serv_nome, "|"), lista_texto_infra(edit_serv_ip, "|"),
-                                    lista_texto_infra(edit_serv_link, "|"), lista_texto_infra(edit_serv_log, "|"),
-                                    lista_texto_infra(edit_serv_sen, "|"), edit_fin_b1, edit_fin_b2, edit_fin_b3,
-                                    lista_texto_infra(edit_pcs), lista_texto_infra(edit_dvr), lista_texto_infra(edit_cameras),
-                                    lista_texto_infra(edit_alarmes), lista_texto_infra(edit_apps), lista_texto_infra(edit_pfsense),
-                                    lista_texto_infra(edit_antivirus), lista_texto_infra(edit_faixas_ip),
-                                    lista_texto_infra(edit_vpn), lista_texto_infra(edit_hospedagem), edit_setores, id_ei,
+                                    edit_contato, edit_email, edit_tel_prin, edit_tel_prov,
+                                    edit_contrato, edit_pagto, edit_venc, id_ei,
                                 ),
                             )
                             conn_save_inf.commit()
                             conn_save_inf.close()
+                            st.session_state.pop("infra_item_editar_id", None)
+                            st.session_state.setdefault("_infra_widgets_para_limpar", []).extend(
+                                ["infra_historico_grade", "edit_inf_id_selecao"]
+                            )
                             st.success("Ficha atualizada.")
                             st.rerun()
 

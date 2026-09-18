@@ -59,18 +59,20 @@ def renderizar_portal_cliente_page(ctx: dict) -> None:
         if secao_portal == "documentos":
             renderizar_portal_documentos_cliente(cliente_portal, cliente_portal_id)
         elif secao_portal == "os":
-            renderizar_portal_ordens_servico(cliente_portal, c, conn)
+            renderizar_portal_ordens_servico(
+                cliente_portal, c, conn, cliente_portal_id=cliente_portal_id
+            )
         elif secao_portal == "abrir_chamado":
             if tem_permissao("cliente.chamados"):
                 renderizar_abertura_chamado(cliente_portal, cliente_portal_id)
             else:
                 st.info("Seu usuário não tem permissão para abrir chamados.")
         elif secao_portal == "meus_chamados":
-            renderizar_chamados_cliente(cliente_portal)
+            renderizar_chamados_cliente(cliente_portal, cliente_portal_id)
         elif secao_portal == "notas":
             renderizar_portal_notas_cliente(cliente_portal)
         elif secao_portal == "financeiro":
-            renderizar_portal_financeiro_cliente(cliente_portal)
+            renderizar_portal_financeiro_cliente(cliente_portal, cliente_portal_id)
         elif secao_portal == "contato":
             renderizar_portal_contato_cliente(cliente_portal)
         elif secao_portal == "gestao_chamados" and eh_chefe_chamados():

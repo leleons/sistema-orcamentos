@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.services.faturamento_espelho import gerar_pdf_espelho_faturamento
 
 def injetar_css_portal_cliente(ctx=None):
     if ctx is not None:
@@ -306,7 +307,16 @@ def contar_portal_cliente(cliente_portal, cliente_portal_id=None, ctx=None):
     except Exception:
         pass
     try:
-        c.execute("SELECT COUNT(*) AS total FROM ordens_servico WHERE cliente=%s", (cliente_portal,))
+        vinculo_os = "(os.cliente_id=%s OR (os.cliente_id IS NULL AND os.cliente=%s))" if cliente_portal_id else "os.cliente=%s"
+        params_os = (cliente_portal_id, cliente_portal) if cliente_portal_id else (cliente_portal,)
+        c.execute(
+            f"""SELECT COUNT(DISTINCT os.os_id) AS total FROM ordens_servico os
+                LEFT JOIN equipamentos_os eq ON eq.os_id=os.os_id
+                WHERE {vinculo_os}
+                  AND COALESCE(eq.kanban_arquivado,0)=0
+                  AND COALESCE(eq.kanban_status,'Recebido') NOT IN ('Entregue','Cancelado')""",
+            params_os,
+        )
         dados["os"] = (c.fetchone() or {}).get("total") or 0
     except Exception:
         pass
@@ -319,12 +329,34 @@ def contar_portal_cliente(cliente_portal, cliente_portal_id=None, ctx=None):
     except Exception:
         pass
     try:
-        c.execute("SELECT COUNT(*) AS total FROM notas_fiscais WHERE cliente=%s", (cliente_portal,))
-        dados["notas"] = (c.fetchone() or {}).get("total") or 0
+        c.execute("SELECT data_competencia, emitido_em, criado_em FROM notas_fiscais WHERE cliente=%s", (cliente_portal,))
+        hoje = date.today()
+        notas_mes = 0
+        for nota in c.fetchall():
+            data_nota = None
+            for valor_data in (nota.get("data_competencia"), nota.get("emitido_em"), nota.get("criado_em")):
+                data_nota = parse_data_flex(valor_data) or parse_data_flex(str(valor_data or "")[:10])
+                if data_nota:
+                    break
+            if data_nota and (data_nota.year, data_nota.month) == (hoje.year, hoje.month):
+                notas_mes += 1
+        dados["notas"] = notas_mes
     except Exception:
         pass
     try:
-        c.execute("SELECT COALESCE(SUM(valor_total),0) AS total FROM faturamento WHERE cliente=%s AND COALESCE(status,'Aberto') IN ('Aberto','Faturado')", (cliente_portal,))
+        if cliente_portal_id:
+            c.execute(
+                """SELECT COALESCE(SUM(GREATEST(COALESCE(valor_total,0)-COALESCE(valor_baixado,0),0)),0) AS total
+                   FROM contas_receber WHERE (cliente_id=%s OR (cliente_id IS NULL AND cliente=%s))
+                   AND COALESCE(status,'Aberto') NOT IN ('Recebido','Pago','Cancelado')""",
+                (cliente_portal_id, cliente_portal),
+            )
+        else:
+            c.execute(
+                """SELECT COALESCE(SUM(GREATEST(COALESCE(valor_total,0)-COALESCE(valor_baixado,0),0)),0) AS total
+                   FROM contas_receber WHERE cliente=%s AND COALESCE(status,'Aberto') NOT IN ('Recebido','Pago','Cancelado')""",
+                (cliente_portal,),
+            )
         dados["financeiro"] = float((c.fetchone() or {}).get("total") or 0)
     except Exception:
         pass
@@ -428,9 +460,9 @@ def renderizar_portal_cliente_home(cliente_portal, cliente_portal_id=None, ctx=N
     st.markdown(f"""
 <div class="portal-grid">
   {portal_card_html("meus_chamados", "Chamados em aberto", dados["chamados_abertos"], "Solicitações em acompanhamento")}
-  {portal_card_html("os", "Ordens de serviço", dados["os"], "Histórico técnico registrado")}
-  {portal_card_html("notas", "Notas fiscais", dados["notas"], "XML e PDF quando emitidas")}
-  {portal_card_html("financeiro", "Financeiro", formatar_moeda_br(dados["financeiro"]), "Total em acompanhamento")}
+  {portal_card_html("os", "Ordens de serviço abertas", dados["os"], "Equipamentos ainda em atendimento")}
+  {portal_card_html("notas", "Notas fiscais do mês", dados["notas"], "XML e PDF quando emitidas")}
+  {portal_card_html("financeiro", "Financeiro em aberto", formatar_moeda_br(dados["financeiro"]), "Saldo total a pagar")}
 </div>
 """, unsafe_allow_html=True)
 
@@ -442,13 +474,20 @@ def renderizar_portal_cliente_home(cliente_portal, cliente_portal_id=None, ctx=N
         if sair_col.button("Sair do portal", width="stretch", key="portal_logout"):
             logout()
 
-def renderizar_portal_ordens_servico(cliente_portal, cursor, conn, ctx=None):
+def renderizar_portal_ordens_servico(cliente_portal, cursor, conn, ctx=None, cliente_portal_id=None):
     if ctx is not None:
         aplicar_contexto_pagina(ctx, globals())
-    cursor.execute(
-        "SELECT os_id, data_os, cliente, equipamento, servico FROM ordens_servico WHERE cliente=%s ORDER BY os_id DESC",
-        (cliente_portal,),
-    )
+    if cliente_portal_id:
+        cursor.execute(
+            """SELECT os_id, data_os, cliente, equipamento, servico FROM ordens_servico
+               WHERE cliente_id=%s OR (cliente_id IS NULL AND cliente=%s) ORDER BY os_id DESC""",
+            (cliente_portal_id, cliente_portal),
+        )
+    else:
+        cursor.execute(
+            "SELECT os_id, data_os, cliente, equipamento, servico FROM ordens_servico WHERE cliente=%s ORDER BY os_id DESC",
+            (cliente_portal,),
+        )
     ordens_cliente = cursor.fetchall()
     st.markdown("### Ordens de serviço")
     if ordens_cliente:
@@ -507,11 +546,23 @@ def renderizar_portal_notas_cliente(cliente_portal, ctx=None):
     nota = next((n for n in notas if int(n.get("id") or 0) == int(id_nota)), None)
     if nota:
         c1, c2, c3 = st.columns(3)
-        if nota.get("pdf_base64"):
-            c1.download_button("Baixar PDF", data=base64.b64decode(nota.get("pdf_base64")), file_name=f"nota_{id_nota}.pdf", mime="application/pdf", width="stretch")
+        pdf_disponivel = nota.get("pdf_base64")
+        if nota.get("tipo_nota") == "Serviço":
+            pdf_disponivel = pdf_disponivel if str(nota.get("link_nota") or "").startswith(
+                ("https://www.nfse.gov.br/ConsultaPublica/", "https://www.producaorestrita.nfse.gov.br/ConsultaPublica/")
+            ) else None
+        if pdf_disponivel:
+            c1.download_button(
+                "Baixar DANFSe" if nota.get("tipo_nota") == "Serviço" else "Baixar PDF",
+                data=base64.b64decode(pdf_disponivel),
+                file_name=(f"danfse_{nota.get('numero_nota') or id_nota}.pdf" if nota.get("tipo_nota") == "Serviço" else f"nota_{id_nota}.pdf"),
+                mime="application/pdf", width="stretch",
+            )
+        elif nota.get("tipo_nota") == "Serviço" and nota.get("status") == "Autorizada":
+            c1.info("DANFSe aguardando geração pela equipe.")
         if nota.get("xml_autorizado") or nota.get("xml_retorno"):
             c2.download_button("Baixar XML", data=nota.get("xml_autorizado") or nota.get("xml_retorno"), file_name=f"nota_{id_nota}.xml", mime="application/xml", width="stretch")
-        if nota.get("link_nota"):
+        if nota.get("link_nota") and nota.get("tipo_nota") != "Serviço":
             c3.link_button("Abrir link da nota", nota.get("link_nota"), width="stretch")
 
 def renderizar_portal_documentos_cliente(cliente_portal, cliente_portal_id=None, ctx=None):
@@ -525,29 +576,86 @@ def renderizar_portal_documentos_cliente(cliente_portal, cliente_portal_id=None,
 </div>
 """, unsafe_allow_html=True)
 
-    aba_docs, aba_notas = st.tabs(["Propostas/Contratos", "Notas"])
+    aba_docs, aba_orcamentos, aba_espelhos, aba_contratos, aba_notas = st.tabs(
+        ["Propostas", "Orçamentos", "Espelhos de nota", "Contratos", "Notas"]
+    )
     with aba_docs:
         renderizar_propostas_contratos(cliente_portal, cliente_portal_id)
+
+    with aba_orcamentos:
+        conn = conectar_banco()
+        co = conn.cursor(dictionary=True)
+        co.execute("SELECT * FROM orcamentos WHERE cliente=%s ORDER BY orc_id DESC", (cliente_portal,))
+        orcamentos = co.fetchall()
+        if not orcamentos:
+            st.info("Nenhum orçamento encontrado para este cliente.")
+        for orcamento in orcamentos:
+            with st.expander(f"Orçamento #{orcamento.get('numero') or orcamento.get('orc_id')} - {orcamento.get('status') or 'Aberto'}"):
+                st.write(f"**Data:** {orcamento.get('data_orc') or '-'}")
+                st.write(f"**Valor:** {orcamento.get('valor_total') or '-'}")
+                co.execute("SELECT nome_arquivo, mime_type, arquivo FROM orcamento_pdfs WHERE orc_id=%s AND empresa=%s ORDER BY id DESC LIMIT 1", (orcamento.get("orc_id"), "Dsystem Tecnologia"))
+                pdf_orc = co.fetchone()
+                if pdf_orc and pdf_orc.get("arquivo"):
+                    st.download_button("Baixar orçamento", pdf_orc.get("arquivo"), file_name=pdf_orc.get("nome_arquivo") or "orcamento.pdf", mime=pdf_orc.get("mime_type") or "application/pdf", key=f"portal_orc_pdf_{orcamento.get('orc_id')}")
+                else:
+                    st.info("O PDF Dsystem deste orçamento ainda não está disponível. Solicite à equipe a geração do documento.")
+        conn.close()
+
+    with aba_espelhos:
+        conn = conectar_banco()
+        cf = conn.cursor(dictionary=True)
+        cf.execute("SELECT * FROM faturamento WHERE cliente=%s ORDER BY id DESC", (cliente_portal,))
+        faturamentos = cf.fetchall()
+        conn.close()
+        if not faturamentos:
+            st.info("Nenhum espelho de nota encontrado para este cliente.")
+        for fat in faturamentos:
+            st.download_button(
+                f"Baixar espelho do faturamento #{fat.get('id')}",
+                data=gerar_pdf_espelho_faturamento(fat), file_name=f"espelho_faturamento_{fat.get('id')}.pdf",
+                mime="application/pdf", key=f"portal_espelho_{fat.get('id')}", width="stretch",
+            )
+
+    with aba_contratos:
+        conn = conectar_banco()
+        cc = conn.cursor(dictionary=True)
+        if cliente_portal_id:
+            cc.execute("SELECT * FROM contratos WHERE parte_tipo='Cliente' AND (parte_id=%s OR parte_nome=%s) ORDER BY id DESC", (cliente_portal_id, cliente_portal))
+        else:
+            cc.execute("SELECT * FROM contratos WHERE parte_tipo='Cliente' AND parte_nome=%s ORDER BY id DESC", (cliente_portal,))
+        contratos = cc.fetchall()
+        conn.close()
+        if not contratos:
+            st.info("Nenhum contrato encontrado para este cliente.")
+        for contrato in contratos:
+            with st.expander(f"Contrato #{contrato.get('id')} - {contrato.get('tipo') or 'Contrato'}"):
+                st.write(f"**Status:** {contrato.get('status') or '-'}")
+                st.write(f"**Vigência:** {contrato.get('data_inicio') or '-'} a {contrato.get('data_vencimento') or '-'}")
+                if contrato.get("arquivo"):
+                    st.download_button("Baixar contrato", contrato.get("arquivo"), file_name=contrato.get("nome_arquivo") or "contrato", mime=contrato.get("mime_type") or "application/octet-stream", key=f"portal_contrato_{contrato.get('id')}")
 
     with aba_notas:
         st.info("As notas fiscais ficam separadas para facilitar o download de XML e PDF.")
         if st.button("Abrir notas fiscais", width="stretch", key="portal_docs_abrir_notas"):
             selecionar_secao_portal("notas")
 
-def renderizar_portal_financeiro_cliente(cliente_portal, ctx=None):
+def renderizar_portal_financeiro_cliente(cliente_portal, cliente_portal_id=None, ctx=None):
     if ctx is not None:
         aplicar_contexto_pagina(ctx, globals())
     st.markdown("### Financeiro")
     conn = conectar_banco()
     c = conn.cursor(dictionary=True)
-    try:
-        c.execute("""SELECT id, data_lanc, vencimento, tipo, forma_pag, valor_total, status, itens, boleto, nota_fiscal
-                     FROM faturamento WHERE cliente=%s ORDER BY id DESC""", (cliente_portal,))
-    except mysql.connector.Error as ex:
-        if getattr(ex, "errno", None) != 1054:
-            raise
-        c.execute("""SELECT id, data_lanc, vencimento, tipo, forma_pag, valor_total, status, itens
-                     FROM faturamento WHERE cliente=%s ORDER BY id DESC""", (cliente_portal,))
+    if cliente_portal_id:
+        c.execute("""SELECT id, data_emissao AS data_lanc, data_vencimento AS vencimento,
+                     tipo_receita AS tipo, forma_recebimento AS forma_pag, valor_total, valor_baixado,
+                     status, observacoes AS itens, boleto, nota_fiscal
+                     FROM contas_receber WHERE cliente_id=%s OR (cliente_id IS NULL AND cliente=%s) ORDER BY id DESC""",
+                  (cliente_portal_id, cliente_portal))
+    else:
+        c.execute("""SELECT id, data_emissao AS data_lanc, data_vencimento AS vencimento,
+                     tipo_receita AS tipo, forma_recebimento AS forma_pag, valor_total, valor_baixado,
+                     status, observacoes AS itens, boleto, nota_fiscal
+                     FROM contas_receber WHERE cliente=%s ORDER BY id DESC""", (cliente_portal,))
     rows = c.fetchall()
     for r in rows:
         r.setdefault("boleto", "")
@@ -557,7 +665,7 @@ def renderizar_portal_financeiro_cliente(cliente_portal, ctx=None):
         st.info("Nenhum lançamento financeiro encontrado para este cliente.")
         return
     hoje = date.today()
-    total_aberto = sum(float(r.get("valor_total") or 0) for r in rows if (r.get("status") or "Aberto") in ("Aberto", "Faturado", "A faturar"))
+    total_aberto = sum(max(float(r.get("valor_total") or 0) - float(r.get("valor_baixado") or 0), 0) for r in rows if (r.get("status") or "Aberto") not in ("Pago", "Recebido", "Cancelado"))
     vencidos = []
     for r in rows:
         venc = parse_data_flex(r.get("vencimento"))

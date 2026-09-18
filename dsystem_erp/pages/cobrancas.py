@@ -2,6 +2,7 @@
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.services.cobrancas_recorrentes import sincronizar_lancamentos_recorrentes
+from dsystem_erp.ui_consulta import tabela_clicavel_id
 
 
 def renderizar_cobrancas(ctx: dict) -> None:
@@ -168,23 +169,27 @@ def renderizar_cobrancas(ctx: dict) -> None:
                     if termo in " ".join(str(c.get(k) or "") for k in ["tipo_cobranca", "motivo", "tipo_backup", "servidor_backup", "maquina_backup", "informacoes"]).lower()
                 ]
 
-            st.dataframe(
-                [{
+            linhas_cobrancas = [{
                     "ID": c.get("id"),
                     "Cliente": c.get("cliente_nome"),
                     "Cobrança": c.get("tipo_cobranca"),
                     "Valor": formatar_moeda_br(c.get("valor_cobranca")),
                     "Periodicidade": c.get("periodicidade"),
                     "Pagamento": c.get("pagamento"),
+                    "Origem": c.get("origem") or "Manual",
+                    "Contrato": c.get("contrato_id") or "",
                     "Início": data_para_br(c.get("vigencia_inicio")),
                     "Fim": data_para_br(c.get("vigencia_fim")),
                     "Status": c.get("status"),
-                } for c in cobrancas_filtradas],
-                width="stretch",
-                hide_index=True,
-            )
-
-            id_cobr = st.number_input("ID para detalhes/ações:", min_value=1, step=1, key="cobr_id_acao")
+                } for c in cobrancas_filtradas]
+            id_cobr_clicado = tabela_clicavel_id(
+                st, linhas_cobrancas, "cobrancas_grade", campo_id="ID"
+            ) if linhas_cobrancas else None
+            if id_cobr_clicado:
+                st.session_state["cobr_id_ativo"] = int(id_cobr_clicado)
+            id_cobr = int(st.session_state.get("cobr_id_ativo") or 0)
+            if not id_cobr:
+                st.caption("Clique em qualquer informação da cobrança para abrir os detalhes e ações.")
             cobr_sel = next((dict(c) for c in cobrancas if int(c.get("id") or 0) == int(id_cobr)), None)
             if cobr_sel:
                 with st.expander(f"Detalhes da cobrança #{id_cobr}", expanded=True):
@@ -196,6 +201,10 @@ def renderizar_cobrancas(ctx: dict) -> None:
                     st.write(f"**Backup:** {cobr_sel.get('tipo_backup') or ''} | **Servidor:** {cobr_sel.get('servidor_backup') or ''} | **Máquina:** {cobr_sel.get('maquina_backup') or ''}")
                     st.write(f"**Licenças:** Servidor {cobr_sel.get('licencas_servidor') or 0} | Máquinas {cobr_sel.get('licencas_maquinas') or 0}")
                     st.write(f"**Informações Gerais:** {cobr_sel.get('informacoes') or ''}")
+                    if cobr_sel.get("contrato_id"):
+                        st.info(
+                            f"Esta recorrência foi criada pelo contrato assinado #{cobr_sel.get('contrato_id')}."
+                        )
 
                 r1, r2, r3 = st.columns(3)
                 nova_ini = r1.date_input("Nova vigência - início:", value=data_input_valor(cobr_sel.get("vigencia_fim"), date.today()), key=f"ren_ini_{id_cobr}")

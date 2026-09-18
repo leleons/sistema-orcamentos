@@ -5,19 +5,23 @@ from pathlib import Path
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.pages.faturado_documentos import renderizar_central_documentos_faturados
 from dsystem_erp.services.faturamento_parcelas import gerar_parcelas_faturamento
+from dsystem_erp.services.faturamento_espelho import gerar_pdf_espelho_faturamento
 from dsystem_erp.services.estoque_fiscal import (
     COMPRADO_SEM_NOTA,
     normalizar_situacao_compra,
     tipo_fiscal_produto_estoque,
 )
 from dsystem_erp.services.nfse_certificado import certificado_bate_com_cnpj, inspecionar_certificado_pfx
+from dsystem_erp.services.nfse_catalogo_ti import codigo_nacional_salvo, desdobramento_suporte_bh, FONTE_CATALOGO_TI
 from dsystem_erp.services.nfse_nacional import (
     assinar_xml_dps_nacional,
     endpoint_nacional,
     executar_fluxo_nfse_nacional,
     gerar_xml_dps_nacional,
 )
+from dsystem_erp.services.nfse_sequencia import proximo_numero_nfse
 from dsystem_erp.services.nfe_produto import (
+    endpoint_autorizacao_nfe,
     analisar_retorno_nfe_produto,
     assinar_xml_nfe_produto,
     enviar_xml_nfe_produto,
@@ -27,7 +31,7 @@ from dsystem_erp.services.nfe_produto import (
 )
 from dsystem_erp.utils.formatadores import somente_digitos
 from dsystem_erp.services.precificacao_estoque import preco_revenda_produto
-from dsystem_erp.ui_consulta import tabela_selecionavel_id
+from dsystem_erp.ui_consulta import tabela_clicavel_id
 try:
     from dsystem_erp.services.settings import endpoint_nfse_nacional_rest
 except ImportError:
@@ -50,6 +54,10 @@ MENSAGEM_ENDPOINT_NACIONAL_REST = (
 
 def mensagem_erro_emissao_nfse(ex: Exception, endpoint: str) -> str:
     texto = str(ex)
+    if "E0160" in texto:
+        return texto + " Confira a situação do Simples Nacional na competência e no ambiente selecionados. Não altere o regime apenas para passar no teste; homologação pode ter cadastro diferente de produção."
+    if "E0312" in texto:
+        return texto + " Confira também o desdobramento municipal (cTribMun), além do código nacional. Belo Horizonte exige os dois códigos."
     if "HTTP Error 404" in texto:
         return (
             f"Endpoint nao encontrado: {endpoint}. "
@@ -77,9 +85,17 @@ def renderizar_a_faturar(ctx: dict) -> None:
     clientes_fat = buscar_clientes()
     nomes_clientes = ["-- Selecionar --"] + [c['nome'] for c in clientes_fat]
 
-    aba_fat1, aba_fat2, aba_fat3 = st.tabs([
-        "Lançar a faturar", "Histórico", "Exportar Modelo Excel"
-    ])
+    nomes_abas_faturamento = [
+        "Lançar a faturar", "Histórico / Editar", "Exportar Modelo Excel"
+    ]
+    aba_destino_faturamento = st.session_state.pop("fat_aba_destino", None)
+    if aba_destino_faturamento in nomes_abas_faturamento:
+        st.session_state["fat_aba_ativa"] = aba_destino_faturamento
+    aba_fat1, aba_fat2, aba_fat3 = st.tabs(
+        nomes_abas_faturamento,
+        key="fat_aba_ativa",
+        on_change="rerun",
+    )
 
     with aba_fat1:
         st.subheader("Novo lançamento a faturar")
@@ -109,6 +125,30 @@ def renderizar_a_faturar(ctx: dict) -> None:
         with f_col5:
             fat_emite_nf = st.selectbox("Emite Nota Fiscal?", ["Sim", "Não"], key="fat_emite_nf")
 
+        fat_modalidade = st.radio(
+            "Modalidade do faturamento:", ["Por item", "Por medição"],
+            horizontal=True, key="fat_modalidade",
+        )
+        medicao_numero = medicao_referencia = medicao_historico = ""
+        medicao_inicio = medicao_fim = fat_data
+        medicao_percentual = 0.0
+        if fat_modalidade == "Por medição":
+            fm1, fm2, fm3 = st.columns(3)
+            medicao_numero = fm1.text_input("Número da medição:", key="fat_medicao_numero")
+            medicao_inicio = fm2.date_input("Período medido - início:", value=fat_data, key="fat_medicao_inicio")
+            medicao_fim = fm3.date_input("Período medido - fim:", value=fat_data, key="fat_medicao_fim")
+            fm4, fm5 = st.columns([1, 2])
+            medicao_percentual = fm4.number_input(
+                "Percentual executado (%):", min_value=0.0, max_value=100.0,
+                step=0.01, format="%.2f", key="fat_medicao_percentual",
+            )
+            medicao_referencia = fm5.text_input(
+                "Contrato, O.S. ou referência da medição:", key="fat_medicao_referencia"
+            )
+            medicao_historico = st.text_area(
+                "Histórico completo da medição:", height=100, key="fat_medicao_historico"
+            )
+
         f_col6, f_col7 = st.columns(2)
         with f_col6:
             fat_tipo_nota = st.selectbox("Tipo de Nota Fiscal (ajustado automaticamente pelos itens):", ["Serviço", "Produto", "Produto e Serviço", "N/A"], key="fat_tipo_nota")
@@ -121,7 +161,7 @@ def renderizar_a_faturar(ctx: dict) -> None:
         qtd_itens = st.number_input("Quantidade de Itens:", min_value=1, max_value=20, value=1, key="fat_qtd_itens")
         produtos_estoque_fat = repo_listar_estoque(conectar_banco)
         opcoes_produto_fat = ["-- Selecionar produto do estoque --"] + [
-            f"{p['id']} - {p.get('produto') or p.get('codigo_entrada')} — {normalizar_situacao_compra(p.get('situacao_nota'))} (Estoque: {p.get('quantidade') or 0})"
+            f"{p['id']} - {p.get('nome_generico') or p.get('modelo') or p.get('produto') or p.get('codigo_entrada')} — {normalizar_situacao_compra(p.get('situacao_nota'))} (Estoque: {p.get('quantidade') or 0})"
             for p in produtos_estoque_fat
         ]
         itens_fat = []
@@ -144,7 +184,7 @@ def renderizar_a_faturar(ctx: dict) -> None:
                     if produto_fat:
                         situacao_nota_fat = normalizar_situacao_compra(produto_fat.get("situacao_nota"))
                         tipo_item_fiscal_fat = tipo_fiscal_produto_estoque(produto_fat)
-                        desc = produto_fat.get("produto") or produto_fat.get("codigo_entrada") or desc
+                        desc = produto_fat.get("nome_generico") or produto_fat.get("modelo") or produto_fat.get("produto") or produto_fat.get("codigo_entrada") or desc
                         if produto_fat.get("permitir_ajuste_preco"):
                             ajuste_fat = st.number_input(f"Ajuste comercial do produto {i+1} (%):", min_value=-100.0, value=0.0, step=0.1, key=f"fat_ajuste_produto_{i}")
                         preco_fat = float(preco_revenda_produto(produto_fat, ajuste_fat))
@@ -207,13 +247,18 @@ def renderizar_a_faturar(ctx: dict) -> None:
                         INSERT INTO faturamento (
                             data_lanc, cliente, cnpj, tipo, emite_nf, tipo_nota,
                             forma_pag, itens, valor_total, parcelas, vencimento,
-                            orc_ref, obs_interna, obs_nota
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            orc_ref, obs_interna, obs_nota, modalidade_faturamento,
+                            medicao_numero, medicao_inicio, medicao_fim, medicao_percentual,
+                            medicao_referencia, medicao_historico
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ''', (
                         data_para_banco_br(fat_data), fat_cliente, fat_cnpj, fat_tipo, fat_emite_nf,
                         fat_tipo_nota_calculado, fat_forma_pag, _json.dumps(itens_fat), total_fat,
                         fat_parcelas, data_para_banco_br(fat_venc), fat_orc_ref,
-                        fat_obs_interna, fat_obs_nota
+                        fat_obs_interna, fat_obs_nota, fat_modalidade,
+                        medicao_numero, data_para_banco_br(medicao_inicio) if fat_modalidade == "Por medição" else "",
+                        data_para_banco_br(medicao_fim) if fat_modalidade == "Por medição" else "",
+                        medicao_percentual, medicao_referencia, medicao_historico,
                     ))
                     fat_id_novo = c.lastrowid
                     for arq_fat in fat_anexos or []:
@@ -228,8 +273,14 @@ def renderizar_a_faturar(ctx: dict) -> None:
                                    st.session_state.get("username", ""), agora_br()))
                     conn.commit()
                     st.session_state['fat_salvo'] = True
+                    chaves_navegacao_faturamento = {
+                        "fat_salvo", "fat_aba_ativa", "fat_grade_versao"
+                    }
                     for chave_fat in list(st.session_state.keys()):
-                        if str(chave_fat).startswith("fat_") and chave_fat not in ("fat_salvo",):
+                        if (
+                            str(chave_fat).startswith("fat_")
+                            and chave_fat not in chaves_navegacao_faturamento
+                        ):
                             del st.session_state[chave_fat]
                 except Exception as ex:
                     st.error(f"Erro ao salvar: {ex}")
@@ -281,6 +332,7 @@ def renderizar_a_faturar(ctx: dict) -> None:
                     "Data": data_para_br(r.get("data_lanc")),
                     "Cliente": r.get("cliente") or "",
                     "Tipo": r.get("tipo") or "",
+                    "Modalidade": r.get("modalidade_faturamento") or "Por item",
                     "Itens": resumo_itens_faturamento(r.get("itens")),
                     "Qtd itens": len(itens_reg),
                     "Valor": formatar_moeda_br(r.get("valor_total")),
@@ -296,11 +348,40 @@ def renderizar_a_faturar(ctx: dict) -> None:
                 m1.metric("Lançamentos filtrados", len(resumo_fat))
                 m2.metric("Total filtrado", formatar_moeda_br(total_filtrado))
                 m3.metric("Itens filtrados", sum(int(r.get("Qtd itens") or 0) for r in resumo_fat))
-                id_faturamento_selecionado = tabela_selecionavel_id(st, resumo_fat, "faturamento_grade_consulta", "ID")
-                st.caption("Clique no faturamento para abrir automaticamente a consulta/edição.")
+                id_faturamento_selecionado = tabela_clicavel_id(
+                    st,
+                    resumo_fat,
+                    f"faturamento_grade_consulta_{st.session_state.get('fat_grade_versao', 0)}",
+                    "ID",
+                )
+                st.caption(
+                    "Clique no cliente, no ID ou em qualquer outra informação do lançamento "
+                    "para abrir diretamente a edição."
+                )
+                if id_faturamento_selecionado:
+                    if tem_permissao("faturamento.edit"):
+                        st.session_state["fat_em_edicao_id"] = int(id_faturamento_selecionado)
+                        st.session_state["fat_grade_versao"] = st.session_state.get("fat_grade_versao", 0) + 1
+                        st.session_state["fat_aba_destino"] = "Histórico / Editar"
+                        st.rerun()
+                    else:
+                        st.warning("Seu usuário pode consultar os lançamentos, mas não possui permissão para editá-los.")
                 with st.expander("Ver itens detalhados dos faturamentos filtrados", expanded=False):
                     linhas_detalhe = linhas_faturamento_export(df_fat)
                     st.dataframe(linhas_detalhe, width="stretch", hide_index=True)
+                    faturamentos_por_id_espelho = {int(item["id"]): item for item in df_fat}
+                    id_espelho = st.selectbox(
+                        "Faturamento para gerar o espelho da nota:", list(faturamentos_por_id_espelho),
+                        format_func=lambda valor: f"#{valor} - {faturamentos_por_id_espelho[valor].get('cliente') or ''}",
+                        key="fat_espelho_id",
+                    )
+                    faturamento_espelho = faturamentos_por_id_espelho[id_espelho]
+                    st.download_button(
+                        "Baixar espelho completo da nota",
+                        data=gerar_pdf_espelho_faturamento(faturamento_espelho),
+                        file_name=f"espelho_faturamento_{id_espelho}.pdf",
+                        mime="application/pdf", width="stretch", key=f"fat_espelho_baixar_{id_espelho}",
+                    )
                     st.markdown("#### Mudar status para faturado")
                     st.caption("Ao faturar, o lançamento vai para Contas a Receber. Se houver item do tipo Produto, o estoque é baixado automaticamente.")
                     for fat_status_row in df_fat:
@@ -336,14 +417,25 @@ def renderizar_a_faturar(ctx: dict) -> None:
 
             st.write("---")
             if tem_permissao("faturamento.edit"):
-                id_edit_fat = st.number_input("ID para editar/anexar arquivos:", min_value=1, step=1, value=int(id_faturamento_selecionado or 1), key=f"fat_edit_id_{id_faturamento_selecionado or 'manual'}")
-                fat_edit = next((dict(r) for r in rows_fat if int(r.get("id") or 0) == int(id_edit_fat)), None)
+                id_edit_fat = st.session_state.get("fat_em_edicao_id")
+                fat_edit = next(
+                    (
+                        dict(r) for r in rows_fat
+                        if id_edit_fat and int(r.get("id") or 0) == int(id_edit_fat)
+                    ),
+                    None,
+                )
+                if not fat_edit:
+                    st.info("Clique em um lançamento da tabela acima para abrir a edição.")
             else:
                 id_edit_fat = None
                 fat_edit = None
                 st.caption("Seu usuário não tem permissão para editar faturamentos.")
             if fat_edit:
-                with st.expander(f"Editar faturamento #{id_edit_fat}", expanded=False):
+                with st.expander(f"Editar faturamento #{id_edit_fat}", expanded=True):
+                    if st.button("Fechar edição", key=f"fat_fechar_edicao_{id_edit_fat}"):
+                        st.session_state.pop("fat_em_edicao_id", None)
+                        st.rerun()
                     faturamento_aberto_para_cliente = (fat_edit.get("status") or "Aberto") == "Aberto"
                     if faturamento_aberto_para_cliente:
                         clientes_fat_puxar, opcoes_fat_puxar = opcoes_clientes_para_puxar()
@@ -372,6 +464,53 @@ def renderizar_a_faturar(ctx: dict) -> None:
                     e_emite_nf = ef8.selectbox("Emite NF?", ["Sim", "Não"], index=0 if fat_edit.get("emite_nf") != "Não" else 1, key=f"fat_e_nf_{id_edit_fat}")
                     opcoes_tipo_nota_fat = ["Serviço", "Produto", "Produto e Serviço", "N/A"]
                     e_tipo_nota = ef9.selectbox("Tipo de Nota:", opcoes_tipo_nota_fat, index=opcoes_tipo_nota_fat.index(fat_edit.get("tipo_nota") or "Serviço") if (fat_edit.get("tipo_nota") or "Serviço") in opcoes_tipo_nota_fat else 0, key=f"fat_e_tipo_nota_{id_edit_fat}")
+
+                    modalidades_fat = ["Por item", "Por medição"]
+                    modalidade_salva = fat_edit.get("modalidade_faturamento") or "Por item"
+                    if modalidade_salva not in modalidades_fat:
+                        modalidade_salva = "Por item"
+                    e_modalidade = st.radio(
+                        "Modalidade do faturamento:",
+                        modalidades_fat,
+                        index=modalidades_fat.index(modalidade_salva),
+                        horizontal=True,
+                        key=f"fat_e_modalidade_{id_edit_fat}",
+                    )
+                    e_medicao_numero = e_medicao_referencia = e_medicao_historico = ""
+                    e_medicao_inicio = e_medicao_fim = e_data
+                    e_medicao_percentual = 0.0
+                    if e_modalidade == "Por medição":
+                        em1, em2, em3 = st.columns(3)
+                        e_medicao_numero = em1.text_input(
+                            "Número da medição:", value=fat_edit.get("medicao_numero") or "",
+                            key=f"fat_e_medicao_numero_{id_edit_fat}",
+                        )
+                        e_medicao_inicio = em2.date_input(
+                            "Período medido - início:",
+                            value=parse_data_flex(fat_edit.get("medicao_inicio")) or e_data,
+                            key=f"fat_e_medicao_inicio_{id_edit_fat}",
+                        )
+                        e_medicao_fim = em3.date_input(
+                            "Período medido - fim:",
+                            value=parse_data_flex(fat_edit.get("medicao_fim")) or e_data,
+                            key=f"fat_e_medicao_fim_{id_edit_fat}",
+                        )
+                        em4, em5 = st.columns([1, 2])
+                        e_medicao_percentual = em4.number_input(
+                            "Percentual executado (%):", min_value=0.0, max_value=100.0,
+                            value=float(fat_edit.get("medicao_percentual") or 0), step=0.01,
+                            format="%.2f", key=f"fat_e_medicao_percentual_{id_edit_fat}",
+                        )
+                        e_medicao_referencia = em5.text_input(
+                            "Contrato, O.S. ou referência da medição:",
+                            value=fat_edit.get("medicao_referencia") or "",
+                            key=f"fat_e_medicao_referencia_{id_edit_fat}",
+                        )
+                        e_medicao_historico = st.text_area(
+                            "Histórico completo da medição:",
+                            value=fat_edit.get("medicao_historico") or "", height=100,
+                            key=f"fat_e_medicao_historico_{id_edit_fat}",
+                        )
 
                     st.markdown("#### Itens do faturamento")
                     itens_base_edit = itens_faturamento_lista(fat_edit.get("itens"))
@@ -435,6 +574,29 @@ def renderizar_a_faturar(ctx: dict) -> None:
                             mime=anexo_fat.get("mime_type") or "application/octet-stream",
                             key=f"baixar_fat_anexo_{anexo_fat.get('id')}",
                         )
+                    espelho_previa = dict(fat_edit)
+                    espelho_previa.update({
+                        "data_lanc": data_para_banco_br(e_data), "cliente": e_cliente,
+                        "cnpj": e_cnpj, "tipo": e_tipo, "emite_nf": e_emite_nf,
+                        "tipo_nota": e_tipo_nota, "forma_pag": e_forma,
+                        "itens": json.dumps(itens_editados, ensure_ascii=False),
+                        "vencimento": data_para_banco_br(e_venc), "valor_total": e_valor,
+                        "obs_interna": e_obs_interna, "obs_nota": e_obs,
+                        "modalidade_faturamento": e_modalidade,
+                        "medicao_numero": e_medicao_numero,
+                        "medicao_inicio": data_para_banco_br(e_medicao_inicio) if e_modalidade == "Por medição" else "",
+                        "medicao_fim": data_para_banco_br(e_medicao_fim) if e_modalidade == "Por medição" else "",
+                        "medicao_percentual": e_medicao_percentual,
+                        "medicao_referencia": e_medicao_referencia,
+                        "medicao_historico": e_medicao_historico,
+                    })
+                    st.download_button(
+                        "Baixar espelho completo da nota",
+                        data=gerar_pdf_espelho_faturamento(espelho_previa),
+                        file_name=f"espelho_faturamento_{id_edit_fat}.pdf",
+                        mime="application/pdf", width="stretch",
+                        key=f"fat_e_espelho_{id_edit_fat}",
+                    )
                     st.markdown("#### Gerar PDFs de orçamento a partir deste faturamento")
                     conn_orc_exist = conectar_banco()
                     corc_exist = conn_orc_exist.cursor()
@@ -515,11 +677,17 @@ def renderizar_a_faturar(ctx: dict) -> None:
                         cef = conn_ef.cursor()
                         cef.execute("""UPDATE faturamento SET data_lanc=?, cliente=?, cnpj=?, tipo=?, emite_nf=?,
                                     tipo_nota=?, forma_pag=?, itens=?, vencimento=?, valor_total=?,
-                                    obs_interna=?, obs_nota=?, status=?, alterado_por=?, alterado_em=?
+                                    obs_interna=?, obs_nota=?, status=?, modalidade_faturamento=?,
+                                    medicao_numero=?, medicao_inicio=?, medicao_fim=?, medicao_percentual=?,
+                                    medicao_referencia=?, medicao_historico=?, alterado_por=?, alterado_em=?
                                     WHERE id=?""",
                                     (data_para_banco_br(e_data), e_cliente, e_cnpj, e_tipo, e_emite_nf,
                                      e_tipo_nota, e_forma, json.dumps(itens_editados, ensure_ascii=False),
                                      data_para_banco_br(e_venc), e_valor, e_obs_interna, e_obs, status_para_salvar,
+                                     e_modalidade, e_medicao_numero,
+                                     data_para_banco_br(e_medicao_inicio) if e_modalidade == "Por medição" else "",
+                                     data_para_banco_br(e_medicao_fim) if e_modalidade == "Por medição" else "",
+                                     e_medicao_percentual, e_medicao_referencia, e_medicao_historico,
                                      st.session_state.get("username", ""), agora_br(), id_edit_fat))
                         for arq_fat in novos_anexos_fat or []:
                             if arq_fat and not upload_dentro_limite(arq_fat):
@@ -548,6 +716,13 @@ def renderizar_a_faturar(ctx: dict) -> None:
                                 "valor_total": e_valor,
                                 "obs_interna": e_obs_interna,
                                 "obs_nota": e_obs,
+                                "modalidade_faturamento": e_modalidade,
+                                "medicao_numero": e_medicao_numero,
+                                "medicao_inicio": data_para_banco_br(e_medicao_inicio) if e_modalidade == "Por medição" else "",
+                                "medicao_fim": data_para_banco_br(e_medicao_fim) if e_modalidade == "Por medição" else "",
+                                "medicao_percentual": e_medicao_percentual,
+                                "medicao_referencia": e_medicao_referencia,
+                                "medicao_historico": e_medicao_historico,
                                 "status": status_original_fat,
                             })
                             resultado_fat = faturar_lancamento_com_integracoes(fat_integrar)
@@ -559,23 +734,73 @@ def renderizar_a_faturar(ctx: dict) -> None:
                             st.success("Faturamento atualizado.")
                         st.rerun()
 
-            if st.session_state.get('is_admin', 0) or tem_permissao("faturamento.delete"):
-                del_id = st.number_input("ID para excluir:", min_value=1, step=1, key="fat_del_id")
-                fat_excluir = next((dict(r) for r in rows_fat if int(r.get("id") or 0) == int(del_id)), None)
-                if fat_excluir:
-                    st.warning(
-                        f"Você está prestes a excluir o faturamento #{del_id} de "
-                        f"{fat_excluir.get('cliente') or 'cliente não informado'}, no valor de "
-                        f"{formatar_moeda_br(fat_excluir.get('valor_total'))}."
+            if (
+                st.session_state.get('is_admin', 0)
+                or tem_permissao("faturamento.edit")
+                or tem_permissao("faturamento.delete")
+            ):
+                st.markdown("#### Cancelar lançamento")
+                faturamentos_cancelaveis = [
+                    dict(r) for r in rows_fat
+                    if (r.get("status") or "Aberto") not in ("Cancelado", "Faturado")
+                ]
+                if faturamentos_cancelaveis:
+                    ids_cancelaveis = [int(r.get("id")) for r in faturamentos_cancelaveis]
+                    id_aberto = st.session_state.get("fat_em_edicao_id")
+                    indice_cancelamento = (
+                        ids_cancelaveis.index(int(id_aberto))
+                        if id_aberto and int(id_aberto) in ids_cancelaveis
+                        else 0
                     )
-                confirmar_exclusao_fat = st.checkbox(
-                    "Confirmo que desejo excluir permanentemente este lançamento.",
-                    key=f"fat_confirmar_exclusao_{del_id}",
-                )
-                if st.button("Excluir Lançamento", key="btn_del_fat", disabled=not confirmar_exclusao_fat or not fat_excluir):
-                    deletar_registro('faturamento', 'id', del_id)
-                    st.toast("Lançamento excluído!")
-                    st.rerun()
+                    fat_cancelar_id = st.selectbox(
+                        "Lançamento a cancelar:",
+                        ids_cancelaveis,
+                        index=indice_cancelamento,
+                        format_func=lambda item_id: next(
+                            (
+                                f"#{item_id} — {r.get('cliente') or 'Cliente não informado'} — "
+                                f"{formatar_moeda_br(r.get('valor_total'))}"
+                                for r in faturamentos_cancelaveis
+                                if int(r.get("id") or 0) == int(item_id)
+                            ),
+                            f"#{item_id}",
+                        ),
+                        key="fat_cancelar_id",
+                    )
+                    st.warning(
+                        "O lançamento não será apagado. Ele continuará no histórico com status Cancelado, "
+                        "junto do usuário e da data da alteração."
+                    )
+                    confirmar_cancelamento_fat = st.checkbox(
+                        "Confirmo que desejo cancelar este lançamento.",
+                        key=f"fat_confirmar_cancelamento_{fat_cancelar_id}",
+                    )
+                    if st.button(
+                        "Cancelar lançamento",
+                        key="btn_cancelar_fat",
+                        disabled=not confirmar_cancelamento_fat,
+                    ):
+                        conn_cancelar = conectar_banco()
+                        cursor_cancelar = conn_cancelar.cursor()
+                        cursor_cancelar.execute(
+                            """UPDATE faturamento
+                               SET status=?, alterado_por=?, alterado_em=?
+                               WHERE id=?""",
+                            (
+                                "Cancelado",
+                                st.session_state.get("username", ""),
+                                agora_br(),
+                                fat_cancelar_id,
+                            ),
+                        )
+                        conn_cancelar.commit()
+                        conn_cancelar.close()
+                        if int(st.session_state.get("fat_em_edicao_id") or 0) == int(fat_cancelar_id):
+                            st.session_state.pop("fat_em_edicao_id", None)
+                        st.toast("Lançamento cancelado e preservado no histórico.")
+                        st.rerun()
+                else:
+                    st.caption("Não há lançamentos em aberto disponíveis para cancelamento.")
         else:
             st.info("Nenhum lançamento registrado ainda.")
 
@@ -939,14 +1164,18 @@ def renderizar_a_faturar(ctx: dict) -> None:
         conn_lnf.close()
 
         if notas_nf:
-            st.dataframe([{
+            linhas_notas_nf = [{
                 "ID": n.get("id"), "Faturamento": n.get("faturamento_id"), "Cliente": n.get("cliente"),
                 "CPF/CNPJ": n.get("cpf_cnpj"), "Tipo": n.get("tipo_nota"),
                 "Valor": formatar_moeda_br(n.get("valor_servicos")), "ISS": formatar_moeda_br(n.get("valor_iss")),
                 "Status": n.get("status"), "Número": n.get("numero_nota"), "Emitida em": n.get("emitido_em"),
-            } for n in notas_nf], width="stretch", hide_index=True)
-
-            id_nf = st.number_input("ID da nota para atualizar:", min_value=1, step=1, key="id_nota_atualizar")
+            } for n in notas_nf]
+            id_nf_clicado = tabela_clicavel_id(st, linhas_notas_nf, "notas_fiscais_grade", campo_id="ID")
+            if id_nf_clicado:
+                st.session_state["id_nota_atualizar_ativo"] = int(id_nf_clicado)
+            id_nf = int(st.session_state.get("id_nota_atualizar_ativo") or 0)
+            if not id_nf:
+                st.caption("Clique em qualquer informação da nota para atualizar.")
             nota_nf = next((n for n in notas_nf if n.get("id") == id_nf), None)
             if nota_nf:
                 statuses_nf = ["Pendente", "Pronta para emissão", "Emitida", "Cancelada", "Erro"]
@@ -1064,6 +1293,10 @@ def renderizar_faturado(ctx: dict) -> None:
         nf_competencia_faturado = nf3.date_input("Competência:", value=date.today(), key=f"faturado_nf_competencia_{fat_nf_key}")
         nf_cliente_padrao = (nf_cliente_informado or nf_cliente_padrao or "").strip()
         nf_doc_padrao = (nf_doc_informado or "").strip()
+        from dsystem_erp.services.simples import buscar_situacao_salva, OPCOES_SIMPLES
+        situacao_cliente_salva = buscar_situacao_salva(conectar_banco, nf_doc_padrao)
+        st.caption("Simples Nacional do cliente: " + (OPCOES_SIMPLES[situacao_cliente_salva] if situacao_cliente_salva else "Não informado no cadastro")
+                   + ". Pode ser atualizado em Cadastro de Cliente/Fornecedor → Base Cadastrada → Editar Cadastro.")
         if fat_nf_faturado:
             fat_nf_faturado["cliente"] = nf_cliente_padrao
             fat_nf_faturado["cnpj"] = nf_doc_padrao
@@ -1091,6 +1324,7 @@ def renderizar_faturado(ctx: dict) -> None:
             for s in servicos_nfse_bh
         ]
         escolha_serv_nfse = st.selectbox("Código de serviço salvo:", opcoes_serv_nfse, key=f"faturado_nf_servico_salvo_{fat_nf_key}_{nf_tipo_faturado}")
+        st.caption("Catálogo de referência de TI: escolha conforme o serviço realizado. Peças de PC são produtos; não inclua seu valor na NFS-e de manutenção.")
         servico_nfse_sel = None
         if escolha_serv_nfse != "-- Selecionar código salvo --":
             servico_nfse_id = int(escolha_serv_nfse.split(" - ", 1)[0])
@@ -1112,24 +1346,58 @@ def renderizar_faturado(ctx: dict) -> None:
         nf8.metric("ISS estimado", formatar_moeda_br(nf_valor_iss_faturado))
         nf_observacoes_faturado = st.text_area("Observações para emissão:", value=(fat_nf_faturado.get("obs_nota") or "") if fat_nf_faturado else "", height=70, key=f"faturado_nf_obs_{fat_nf_key}")
 
+        modo_nfse = config_sistema_val("NFSE_MODO_EMISSAO", "nacional")
+        ambiente_nfse = config_sistema_val("NFSE_AMBIENTE", "homologacao")
+        cnpj_sequencia_nfse = somente_digitos(
+            config_sistema_val("NFSE_CNPJ", config_sistema_val("NFSE_PRESTADOR_CNPJ", "23524449000154"))
+        )
+        serie_sequencia_nfse = (
+            config_sistema_val("NFSE_DPS_SERIE", "1")
+            if modo_nfse == "nacional"
+            else config_sistema_val("NFSE_SERIE_RPS", "DS")
+        )
+        numero_automatico_nfse = proximo_numero_nfse(
+            conectar_banco,
+            ambiente=ambiente_nfse,
+            cnpj=cnpj_sequencia_nfse,
+            serie=serie_sequencia_nfse,
+            tipo="dps",
+        )
+        lote_automatico_nfse = proximo_numero_nfse(
+            conectar_banco,
+            ambiente=ambiente_nfse,
+            cnpj=cnpj_sequencia_nfse,
+            serie=serie_sequencia_nfse,
+            tipo="lote",
+        )
+
         with st.expander("XML NFS-e de Serviço", expanded=False):
             st.caption("Este bloco gera NFS-e somente para itens de serviço. Produto usa NF-e/NFC-e e fica em outro modelo fiscal.")
             xml_col1, xml_col2, xml_col3 = st.columns(3)
-            xml_numero_rps = xml_col1.number_input("Número do RPS:", min_value=1, value=int(fat_nf_faturado.get("id") or 1) if fat_nf_faturado else 1, step=1, key="nfse_bh_numero_rps")
-            xml_numero_lote = xml_col2.number_input("Número do lote:", min_value=1, value=int(fat_nf_faturado.get("id") or 1) if fat_nf_faturado else 1, step=1, key="nfse_bh_numero_lote")
-            xml_serie_rps = xml_col3.text_input("Série do RPS:", value="DS", key="nfse_bh_serie_rps")
-            xml_item_lista = st.text_input("Item da lista de serviço:", value=(servico_nfse_sel.get("item_lista_servico") or "") if servico_nfse_sel else config_val("NFSE_ITEM_LISTA_SERVICO_PADRAO", ""), key="nfse_bh_item_lista")
-            codigo_nacional_base = somente_digitos(xml_item_lista)
-            if len(codigo_nacional_base) == 4:
-                codigo_nacional_base += "01"
-            elif len(codigo_nacional_base) == 5:
-                codigo_nacional_base = codigo_nacional_base.zfill(6)
+            xml_numero_rps = xml_col1.number_input(
+                "Número da DPS/RPS:", min_value=1, value=numero_automatico_nfse,
+                step=1, disabled=True, key=f"nfse_numero_auto_{ambiente_nfse}_{serie_sequencia_nfse}_{numero_automatico_nfse}",
+                help="Gerado automaticamente e reservado no momento do envio.",
+            )
+            xml_numero_lote = xml_col2.number_input(
+                "Número do lote:", min_value=1, value=lote_automatico_nfse,
+                step=1, disabled=True, key=f"nfse_lote_auto_{ambiente_nfse}_{serie_sequencia_nfse}_{lote_automatico_nfse}",
+                help="Gerado automaticamente. No fluxo Nacional direto é mantido apenas para controle interno.",
+            )
+            xml_serie_rps = xml_col3.text_input(
+                "Série da DPS/RPS:", value=str(serie_sequencia_nfse), disabled=True,
+                key=f"nfse_serie_auto_{ambiente_nfse}_{serie_sequencia_nfse}",
+            )
+            st.caption("A numeração avança automaticamente a cada tentativa de emissão para impedir duplicidade.")
+            xml_item_lista = st.text_input("Item da lista de serviço:", value=(servico_nfse_sel.get("item_lista_servico") or "") if servico_nfse_sel else config_val("NFSE_ITEM_LISTA_SERVICO_PADRAO", ""), key=f"nfse_bh_item_lista_{fat_nf_key}_{servico_nfse_key}")
+            codigo_nacional_base = codigo_nacional_salvo(servico_nfse_sel)
             xml_codigo_tributacao_nacional = st.text_input(
                 "Código de tributação nacional (6 dígitos):",
                 value=codigo_nacional_base,
                 help="Exemplo: suporte técnico em informática = 010701. Confira o desdobro nacional aplicável.",
-                key=f"nfse_codigo_tributacao_nacional_{fat_nf_key}",
+                key=f"nfse_codigo_tributacao_nacional_{fat_nf_key}_{servico_nfse_key}",
             )
+            st.caption(f"[Consultar lista nacional oficial]({FONTE_CATALOGO_TI}). O cadastro não confirma habilitação municipal nem define alíquota ou regime da empresa.")
             with st.expander("Cadastrar novo código de serviço", expanded=False):
                 novo_serv1, novo_serv2, novo_serv3 = st.columns(3)
                 novo_nome_serv = novo_serv1.text_input("Nome para salvar:", key="nfse_novo_nome")
@@ -1171,36 +1439,106 @@ def renderizar_faturado(ctx: dict) -> None:
                     "numero_lote": xml_numero_lote,
                     "serie_rps": xml_serie_rps,
                 }
-                modo_nfse = config_sistema_val("NFSE_MODO_EMISSAO", "nacional")
-                ambiente_nfse = config_sistema_val("NFSE_AMBIENTE", "homologacao")
+                simples_nfse = str(config_sistema_val("NFSE_OP_SIMPLES_NACIONAL", "") or "")
+                apuracao_nfse = str(config_sistema_val("NFSE_REG_APURACAO_SIMPLES", "") or "")
+                totais_tributos_nfse = None
+                percentual_tributos_simples_nfse = None
+                if modo_nfse == "nacional":
+                    st.markdown("**Dados do prestador para esta emissão**")
+                    opcoes_simples_nfse = {
+                        "": "Selecione a situação da empresa",
+                        "1": "Não optante pelo Simples Nacional",
+                        "2": "Optante — MEI",
+                        "3": "Optante — ME/EPP",
+                    }
+                    from dsystem_erp.pages.simples import campo_simples
+                    documento_prestador = config_sistema_val("NFSE_CNPJ", config_sistema_val("NFSE_PRESTADOR_CNPJ", "23524449000154"))
+                    simples_nfse = buscar_situacao_salva(conectar_banco, documento_prestador) or simples_nfse
+                    st.caption("Situação do prestador carregada pelo CNPJ da empresa emissora. Confira a situação na competência da nota.")
+                    simples_nfse = campo_simples(
+                        st, documento_prestador,
+                        f"emissao_simples_{fat_nf_key}_{somente_digitos(documento_prestador)}_{simples_nfse}", simples_nfse,
+                    )
+                    if simples_nfse == "1":
+                        st.caption("Informe os valores aproximados de tributos desta nota conforme sua fonte fiscal/contabilidade. Não são as retenções nem apenas o ISS. Nenhum valor é presumido pelo sistema.")
+                        col_tributos = st.columns(3)
+                        totais_tributos_nfse = {
+                            esfera: coluna.number_input(
+                                f"Tributos aproximados — {esfera} (R$):", min_value=0.0,
+                                value=None, step=0.01, format="%.2f",
+                                key=f"nfse_total_tributos_{esfera}_{fat_nf_key}_{ambiente_nfse}",
+                            )
+                            for esfera, coluna in zip(("federal", "estadual", "municipal"), col_tributos)
+                        }
+                    if simples_nfse == "3":
+                        opcoes_apuracao_nfse = {
+                            "": "Selecione o regime de apuração",
+                            "1": "Tributos federais e ISS pelo Simples Nacional",
+                            "2": "Tributos federais pelo Simples; ISS fora do Simples",
+                            "3": "Tributos federais e ISS fora do Simples",
+                        }
+                        apuracao_nfse = st.selectbox(
+                            "Regime de apuração (ME/EPP):", list(opcoes_apuracao_nfse),
+                            index=list(opcoes_apuracao_nfse).index(apuracao_nfse) if apuracao_nfse in opcoes_apuracao_nfse else 0,
+                            format_func=lambda valor: opcoes_apuracao_nfse[valor],
+                            key=f"emissao_apuracao_{fat_nf_key}",
+                        )
+                        percentual_tributos_simples_nfse = st.number_input(
+                            "Percentual aproximado total de tributos do Simples Nacional (%):",
+                            min_value=0.0, max_value=100.0, value=0.0, step=0.01, format="%.2f",
+                            key=f"nfse_percentual_tributos_sn_{fat_nf_key}_{ambiente_nfse}",
+                            help="Informe o percentual fornecido pela contabilidade. Para ME/EPP este campo substitui o indicador usado pelo MEI.",
+                        )
+                    st.info("Emissão direta no Emissor Nacional, sem mensalidade de API. É necessário certificado A1 válido e habilitação do prestador.")
+                    st.caption("Ambiente: " + ("Produção — emite nota com validade fiscal" if ambiente_nfse == "producao" else "Homologação — somente testes, sem validade fiscal"))
+                    omitir_im_dps = st.checkbox(
+                        "Não enviar inscrição municipal nesta DPS (rejeição E0120)",
+                        value=False,
+                        key=f"nfse_omitir_im_{fat_nf_key}_{ambiente_nfse}",
+                        help="Marque quando a API solicitar a omissão da IM. Não apaga a inscrição do cadastro da empresa e não altera o município emissor.",
+                    )
+                    codigo_municipal_nacional = st.text_input(
+                        "Desdobramento municipal no padrão nacional (3 dígitos, se exigido):",
+                        value=desdobramento_suporte_bh(
+                            servico_nfse_sel, config_sistema_val("NFSE_CODIGO_MUNICIPIO", "3106200"),
+                            xml_codigo_tributacao_nacional, ambiente_nfse,
+                        ),
+                        key=f"emissao_codigo_municipal_{fat_nf_key}_{servico_nfse_key}_{ambiente_nfse}_{xml_codigo_tributacao_nacional}",
+                        help="É diferente do código de serviço do sistema municipal antigo. Deixe vazio quando não se aplicar.",
+                    )
                 dados_dps_nacional = {
                     "ambiente": ambiente_nfse,
                     "cnpj_prestador": config_sistema_val("NFSE_CNPJ", config_sistema_val("NFSE_PRESTADOR_CNPJ", "23524449000154")),
-                    "inscricao_municipal": config_sistema_val("NFSE_INSCRICAO_MUNICIPAL", config_sistema_val("NFSE_PRESTADOR_INSCRICAO_MUNICIPAL", "")),
+                    "inscricao_municipal": "" if modo_nfse == "nacional" and omitir_im_dps else config_sistema_val("NFSE_INSCRICAO_MUNICIPAL", config_sistema_val("NFSE_PRESTADOR_INSCRICAO_MUNICIPAL", "")),
                     "codigo_municipio": config_sistema_val("NFSE_CODIGO_MUNICIPIO", "3106200"),
                     "codigo_municipio_prestacao": config_sistema_val("NFSE_CODIGO_MUNICIPIO", "3106200"),
                     "serie_dps": config_sistema_val("NFSE_DPS_SERIE", "1"),
                     "numero_dps": xml_numero_rps,
                     "competencia": nf_competencia_faturado,
                     "codigo_tributacao_nacional": xml_codigo_tributacao_nacional,
-                    "codigo_tributacao_municipal": nf_codigo_faturado,
+                    "codigo_tributacao_municipal": codigo_municipal_nacional if modo_nfse == "nacional" else nf_codigo_faturado,
                     "descricao": nf_descricao_faturado,
                     "valor": nf_valor_faturado,
                     "aliquota_iss": nf_aliquota_faturado,
                     "observacoes": nf_observacoes_faturado,
-                    "opcao_simples_nacional": config_sistema_val("NFSE_OP_SIMPLES_NACIONAL", ""),
-                    "regime_apuracao_simples": config_sistema_val("NFSE_REG_APURACAO_SIMPLES", ""),
+                    "opcao_simples_nacional": simples_nfse,
+                    "totais_tributos": totais_tributos_nfse,
+                    "regime_apuracao_simples": apuracao_nfse,
+                    "percentual_tributos_simples": percentual_tributos_simples_nfse,
                     "regime_especial_tributacao": config_sistema_val("NFSE_REGIME_ESPECIAL_NACIONAL", "0"),
                 }
-                xml_nfse_bh = gerar_xml_nfse_bh_rps(fat_nf_faturado, nf_tipo_faturado, dados_xml_nfse)
-                st.download_button(
-                    "Baixar XML GerarNfse PBH",
-                    data=xml_nfse_bh,
-                    file_name=f"nfse_pbh_gerar_nfse_{xml_numero_rps}.xml",
-                    mime="application/xml",
-                    width="stretch",
-                    key="baixar_xml_nfse_bh",
-                )
+                xml_nfse_bh = b""
+                if modo_nfse != "nacional":
+                    xml_nfse_bh = gerar_xml_nfse_bh_rps(fat_nf_faturado, nf_tipo_faturado, dados_xml_nfse)
+                if xml_nfse_bh:
+                    st.download_button(
+                        "Baixar XML GerarNfse PBH",
+                        data=xml_nfse_bh,
+                        file_name=f"nfse_pbh_gerar_nfse_{xml_numero_rps}.xml",
+                        mime="application/xml",
+                        width="stretch",
+                        key="baixar_xml_nfse_bh",
+                    )
                 endpoint_nfse = config_sistema_val("NFSE_ENDPOINT_SOAP", "https://bhisshomologaws.pbh.gov.br/bhiss-ws/nfse")
                 endpoint_nfse_nacional = endpoint_nacional(
                     ambiente_nfse,
@@ -1254,7 +1592,8 @@ def renderizar_faturado(ctx: dict) -> None:
                     timeout_nfse = 30
 
                 col_fluxo_1, col_fluxo_2 = st.columns(2)
-                if col_fluxo_1.button("Assinar e validar XML", width="stretch", key="nfse_assinar_validar"):
+                dados_nfse_incompletos = modo_nfse == "nacional" and not xml_dps_preview
+                if col_fluxo_1.button("Assinar e validar XML", width="stretch", key="nfse_assinar_validar", disabled=dados_nfse_incompletos):
                     try:
                         cert_assinar_path = config_sistema_val("NFSE_CERT_PFX_PATH", "")
                         cert_assinar_password = config_sistema_val("NFSE_CERT_PASSWORD", config_val("NFSE_CERT_PASSWORD", ""))
@@ -1270,6 +1609,7 @@ def renderizar_faturado(ctx: dict) -> None:
                             erros_xml_nfse = validar_nfse(xml_assinado_preview, xsd_nfse or None)
                         st.session_state["nfse_xml_assinado_preview"] = xml_assinado_preview
                         st.session_state["nfse_xml_assinado_modo"] = modo_nfse
+                        st.session_state["nfse_xml_assinado_origem"] = xml_dps_preview if modo_nfse == "nacional" else xml_nfse_bh
                         if erros_xml_nfse:
                             st.warning("XML assinado, mas a validação encontrou pendências: " + "; ".join(erros_xml_nfse))
                         else:
@@ -1278,7 +1618,9 @@ def renderizar_faturado(ctx: dict) -> None:
                         st.error(f"Falha ao assinar/validar XML: {ex}")
 
                 xml_preview_assinado = st.session_state.get("nfse_xml_assinado_preview")
-                if xml_preview_assinado and st.session_state.get("nfse_xml_assinado_modo") == modo_nfse:
+                origem_preview_atual = xml_dps_preview if modo_nfse == "nacional" else xml_nfse_bh
+                if (xml_preview_assinado and st.session_state.get("nfse_xml_assinado_modo") == modo_nfse
+                        and st.session_state.get("nfse_xml_assinado_origem") == origem_preview_atual):
                     st.download_button(
                         "Baixar XML DPS Nacional assinado" if modo_nfse == "nacional" else "Baixar XML GerarNfse PBH assinado",
                         data=xml_preview_assinado,
@@ -1288,7 +1630,7 @@ def renderizar_faturado(ctx: dict) -> None:
                         key="baixar_xml_nfse_bh_assinado",
                     )
 
-                if col_fluxo_2.button("Emitir NFS-e completa", type="primary", width="stretch", key="nfse_emitir_completa"):
+                if col_fluxo_2.button("Emitir NFS-e completa", type="primary", width="stretch", key="nfse_emitir_completa", disabled=dados_nfse_incompletos):
                     cert_nfse_path = config_sistema_val("NFSE_CERT_PFX_PATH", "")
                     cert_nfse_password = config_sistema_val("NFSE_CERT_PASSWORD", config_val("NFSE_CERT_PASSWORD", ""))
                     if not endpoint_em_uso:
@@ -1307,6 +1649,25 @@ def renderizar_faturado(ctx: dict) -> None:
                         nota_id_envio = None
                         try:
                             nota_id_envio, _ = preparar_nota_fiscal_por_tipo(fat_nf_faturado, "Serviço", nf_competencia_faturado)
+                            numero_emitir_nfse = proximo_numero_nfse(
+                                conectar_banco,
+                                ambiente=ambiente_nfse,
+                                cnpj=cnpj_sequencia_nfse,
+                                serie=serie_sequencia_nfse,
+                                tipo="dps",
+                                reservar=True,
+                            )
+                            lote_emitir_nfse = proximo_numero_nfse(
+                                conectar_banco,
+                                ambiente=ambiente_nfse,
+                                cnpj=cnpj_sequencia_nfse,
+                                serie=serie_sequencia_nfse,
+                                tipo="lote",
+                                reservar=True,
+                            )
+                            dados_dps_nacional["numero_dps"] = numero_emitir_nfse
+                            dados_xml_nfse["numero_rps"] = numero_emitir_nfse
+                            dados_xml_nfse["numero_lote"] = lote_emitir_nfse
                             if modo_nfse == "nacional":
                                 resultado_nacional = executar_fluxo_nfse_nacional(
                                     fat_nf_faturado,
@@ -1324,6 +1685,7 @@ def renderizar_faturado(ctx: dict) -> None:
                                     "protocolo": resultado_nacional.id_dps,
                                     "chave_acesso": resultado_nacional.chave_acesso,
                                     "numero_nfse": resultado_nacional.numero_nfse,
+                                    "numero_lote": lote_emitir_nfse,
                                 }
                                 erros_validacao_nfse = []
                             else:
@@ -1341,6 +1703,7 @@ def renderizar_faturado(ctx: dict) -> None:
                                 retorno_nfse = resultado_nfse.xml_retorno or b""
                                 xml_envio_nfse = resultado_nfse.xml_assinado or resultado_nfse.xml_gerado
                                 retorno_info_nfse = resultado_nfse.retorno_info or {"status": resultado_nfse.status, "mensagem": resultado_nfse.mensagem}
+                                retorno_info_nfse["numero_lote"] = lote_emitir_nfse
                                 erros_validacao_nfse = resultado_nfse.erros_validacao or []
                             status_salvo_nfse = salvar_retorno_nota_fiscal(nota_id_envio, xml_envio_nfse, retorno_nfse, retorno_info_nfse)
                             cenvio_nfse.execute(
@@ -1359,7 +1722,14 @@ def renderizar_faturado(ctx: dict) -> None:
                             if erros_validacao_nfse:
                                 st.warning("Validação: " + "; ".join(erros_validacao_nfse))
                             if status_salvo_nfse == "Autorizada":
-                                st.success("NFS-e autorizada. XML e PDF foram salvos na nota.")
+                                if retorno_info_nfse.get("danfse_local_salvo"):
+                                    st.success("NFS-e autorizada. DANFSe gerado no site e salvo na nota e no portal.")
+                                else:
+                                    st.success("NFS-e autorizada. O XML oficial foi salvo na nota.")
+                                    st.warning(
+                                        "Não foi possível gerar o DANFSe: "
+                                        + str(retorno_info_nfse.get("danfse_erro") or "tente buscá-lo em Notas Emitidas > XML e PDF.")
+                                    )
                             elif status_salvo_nfse == "Rejeitada":
                                 st.error(mensagem_retorno_nfse_legivel(retorno_info_nfse))
                             else:
@@ -1411,7 +1781,7 @@ def renderizar_faturado(ctx: dict) -> None:
                 nfe_ncm_manual = ""
                 if nfe_ncm_sel != "-- Selecionar NCM salvo --":
                     nfe_ncm_manual = (nfe_ncm_sel.rsplit("NCM:", 1)[-1] or "").strip()
-                nfe_ncm = nfe_col2.text_input("NCM final:", value=nfe_ncm_manual, key="nfe_produto_ncm")
+                nfe_ncm = nfe_col2.text_input("NCM final:", value=nfe_ncm_manual, key=f"nfe_produto_ncm_{nfe_ncm_sel}")
                 nfe_cfop = nfe_col3.text_input("CFOP:", value=config_sistema_val("NFE_CFOP_PADRAO", "5102"), key="nfe_produto_cfop")
                 nfe_col4, nfe_col5, nfe_col6 = st.columns(3)
                 nfe_unidade = nfe_col4.text_input("Unidade:", value="UN", key="nfe_produto_unidade")
@@ -1424,22 +1794,67 @@ def renderizar_faturado(ctx: dict) -> None:
                 nfe_emit1, nfe_emit2, nfe_emit3 = st.columns(3)
                 nfe_ie_emitente_base = nfe_emit1.text_input(
                     "Inscricao Estadual:",
-                    value=config_sistema_val("NFE_INSCRICAO_ESTADUAL", ""),
+                    value=config_sistema_val("NFE_INSCRICAO_ESTADUAL", "0026483460031"),
                     key="nfe_produto_ie_base",
                 )
                 nfe_regime_base = nfe_emit2.selectbox(
                     "CRT:",
                     ["1 - Simples Nacional", "2 - Simples Nacional excesso sublimite", "3 - Regime Normal"],
-                    index=0,
+                    index=2,
                     key="nfe_produto_crt_base",
                 )
                 nfe_codigo_municipio = nfe_emit3.text_input(
                     "Codigo municipio IBGE:",
-                    value=config_sistema_val("NFE_CODIGO_MUNICIPIO", "3156700"),
+                    value=config_sistema_val("NFE_CODIGO_MUNICIPIO", "3106200"),
                     key="nfe_produto_codigo_municipio",
                 )
 
+                st.caption("Confira o cadastro fiscal do emitente. O CRT deve corresponder ao cadastro atual da empresa.")
+                with st.expander("Endereços da NF-e", expanded=True):
+                    end_emitente = {}
+                    for campo, rotulo, padrao in (
+                        ("logradouro", "Logradouro", "RUA ALTO GUANDU"),
+                        ("numero", "Número", "106"), ("bairro", "Bairro", "SAO PAULO"),
+                        ("municipio", "Município", "BELO HORIZONTE"), ("cep", "CEP", "31910230"),
+                    ):
+                        end_emitente[campo] = st.text_input(f"Emitente — {rotulo}:", value=config_sistema_val(f"NFE_EMITENTE_{campo.upper()}", padrao), key=f"nfe_end_emit_{campo}")
+                    cadastro_dest = cliente_nf_cadastro or {}
+                    end_destinatario = {}
+                    for campo, rotulo, origem in (
+                        ("logradouro", "Logradouro", "endereco"), ("numero", "Número", "numero"),
+                        ("bairro", "Bairro", "bairro"), ("municipio", "Município (sem UF)", "cidade_estado"),
+                        ("uf", "UF", "uf"), ("codigo_municipio", "Código IBGE", "codigo_ibge"),
+                        ("cep", "CEP", "cep"),
+                    ):
+                        end_destinatario[campo] = st.text_input(f"Destinatário — {rotulo}:", value=str(cadastro_dest.get(origem) or ""), key=f"nfe_dest_{fat_nf_faturado.get('id')}_{campo}")
+                    end_destinatario["indicador_ie"] = st.selectbox("Destinatário — indicador de IE:", ["9", "1", "2"], format_func=lambda v: {"9": "Não contribuinte", "1": "Contribuinte ICMS", "2": "Contribuinte isento"}[v], key=f"nfe_dest_ind_{fat_nf_faturado.get('id')}")
+                    end_destinatario["ie"] = st.text_input("Destinatário — Inscrição Estadual:", value=str(cadastro_dest.get("estado_insc_estadual") or ""), key=f"nfe_dest_ie_{fat_nf_faturado.get('id')}")
+
+                itens_nfe_produto = []
+                with st.expander("NCM e tributação de cada produto", expanded=True):
+                    st.warning("Informe bases e alíquotas conforme sua contabilidade. Este fluxo suporta ICMS 00 (ou CSOSN 102), PIS/COFINS 01 e IBS/CBS integral 000/000001. Outras situações tributárias precisam de tratamento específico antes da emissão.")
+                    for idx, item_original in enumerate(itens_tipo_nf):
+                        item_nfe = dict(item_original)
+                        chave_item = f"nfe_item_{fat_nf_faturado.get('id')}_{idx}"
+                        st.write(f"Item {idx + 1}: {item_nfe.get('desc') or 'Produto'}")
+                        item_nfe["origem"] = st.selectbox("Origem da mercadoria (código fiscal):", [str(n) for n in range(9)], key=f"{chave_item}_origem", help="Confira a origem fiscal da mercadoria na nota de entrada; não confunda com o local da compra.")
+                        item_nfe["ncm"] = st.text_input("NCM deste item:", value=str(item_nfe.get("ncm") or nfe_ncm), key=f"{chave_item}_ncm_{nfe_ncm}")
+                        item_nfe["cfop"] = st.text_input("CFOP deste item:", value=str(item_nfe.get("cfop") or nfe_cfop), key=f"{chave_item}_cfop_{nfe_cfop}")
+                        impostos = ("pis", "cofins") if nfe_regime_base.startswith("1") else ("icms", "pis", "cofins")
+                        item_nfe["tributos"] = {}
+                        for imposto in impostos:
+                            col_base, col_aliq = st.columns(2)
+                            item_nfe["tributos"][f"base_{imposto}"] = col_base.number_input(f"Base {imposto.upper()} (R$):", min_value=0.0, value=None, step=0.01, key=f"{chave_item}_base_{imposto}")
+                            item_nfe["tributos"][imposto] = col_aliq.number_input(f"Alíquota {imposto.upper()} (%):", min_value=0.0, max_value=100.0, value=None, step=0.01, key=f"{chave_item}_{imposto}")
+                        if st.checkbox("Aplicar IBS/CBS integral 000/000001 a este item", key=f"{chave_item}_rtc"):
+                            rtc = {"cst": "000", "classificacao": "000001"}
+                            for campo, rotulo in (("base", "Base IBS/CBS (R$)"), ("uf", "IBS estadual (%)"), ("municipal", "IBS municipal (%)"), ("cbs", "CBS (%)")):
+                                rtc[campo] = st.number_input(rotulo, min_value=0.0, value=None, step=0.01, key=f"{chave_item}_rtc_{campo}")
+                            item_nfe["ibscbs"] = rtc
+                        itens_nfe_produto.append(item_nfe)
+
                 dados_nfe_produto = {
+                    "destinatario": end_destinatario,
                     "competencia": nf_competencia_faturado,
                     "ambiente": nfe_ambiente,
                     "natureza_operacao": nfe_natureza,
@@ -1447,14 +1862,10 @@ def renderizar_faturado(ctx: dict) -> None:
                     "cfop": nfe_cfop,
                     "unidade": nfe_unidade,
                     "observacoes": nf_observacoes_faturado,
-                    "emitente_nome": "Dsystem Tecnologia",
+                    "emitente_nome": "D F PEREIRA INFORMATICA",
                     "emitente_cnpj": config_sistema_val("NFSE_CNPJ", "23524449000154"),
                     "emitente_fantasia": "Dsystem Tecnologia",
-                    "emitente_logradouro": config_sistema_val("NFE_EMITENTE_LOGRADOURO", "Rua Gloria"),
-                    "emitente_numero": config_sistema_val("NFE_EMITENTE_NUMERO", "25"),
-                    "emitente_bairro": config_sistema_val("NFE_EMITENTE_BAIRRO", "Centro"),
-                    "emitente_municipio": config_sistema_val("NFE_EMITENTE_MUNICIPIO", "Sabara"),
-                    "emitente_cep": config_sistema_val("NFE_EMITENTE_CEP", "34500000"),
+                    **{f"emitente_{campo}": valor for campo, valor in end_emitente.items()},
                     "emitente_telefone": config_sistema_val("WHATSAPP_OFICIAL", ""),
                     "inscricao_estadual": nfe_ie_emitente_base,
                     "regime_tributario": nfe_regime_base,
@@ -1464,8 +1875,11 @@ def renderizar_faturado(ctx: dict) -> None:
                     "serie": nfe_serie,
                     "codigo_nf": fat_nf_faturado.get("id"),
                 }
-                xml_nfe_produto = gerar_xml_nfe_produto_400(fat_nf_faturado, itens_tipo_nf, dados_nfe_produto)
-                pendencias_xml_nfe = validar_xml_nfe_produto_minimo(xml_nfe_produto, dados_nfe_produto, itens_tipo_nf)
+                xml_nfe_produto = gerar_xml_nfe_produto_400(fat_nf_faturado, itens_nfe_produto, dados_nfe_produto)
+                pendencias_xml_nfe = validar_xml_nfe_produto_minimo(xml_nfe_produto, dados_nfe_produto, itens_nfe_produto)
+                for campo, valor in end_emitente.items():
+                    if not valor.strip():
+                        pendencias_xml_nfe.append(f"Preencha o endereço do emitente: {campo}.")
                 if pendencias_xml_nfe:
                     st.warning("Revise estes pontos antes do envio oficial:")
                     for pendencia in pendencias_xml_nfe:
@@ -1485,8 +1899,8 @@ def renderizar_faturado(ctx: dict) -> None:
                     st.caption("NF-e de produto usa SEFAZ, XML NF-e 4.00 e webservice NFeAutorizacao4. Nao e o mesmo envio da NFS-e municipal.")
                     nfe_endpoint = st.text_input(
                         "Endpoint SEFAZ NFeAutorizacao4:",
-                        value=config_sistema_val("NFE_SEFAZ_ENDPOINT_AUTORIZACAO", ""),
-                        key="nfe_sefaz_endpoint_autorizacao",
+                        value=endpoint_autorizacao_nfe(nfe_uf, nfe_ambiente) or config_sistema_val("NFE_SEFAZ_ENDPOINT_AUTORIZACAO", ""),
+                        key=f"nfe_sefaz_endpoint_autorizacao_{nfe_uf}_{nfe_ambiente}",
                     )
                     sefaz_col3, sefaz_col4 = st.columns(2)
                     nfe_timeout = sefaz_col3.number_input("Timeout envio (segundos):", min_value=10, max_value=120, value=30, step=5, key="nfe_timeout_envio")
@@ -1510,24 +1924,25 @@ def renderizar_faturado(ctx: dict) -> None:
                             cfop=nfe_cfop,
                             inscricao_estadual=nfe_ie_emitente_base,
                             regime_tributario=nfe_regime_base,
-                            itens=itens_tipo_nf,
+                            itens=itens_nfe_produto,
                         )
-                        if prontidao_nfe.pronto:
+                        if prontidao_nfe.pronto and not pendencias_xml_nfe:
                             st.success("Dados minimos preenchidos para assinar e tentar enviar a NF-e.")
                         else:
                             st.warning("Ainda nao esta pronto para envio oficial de NF-e:")
-                            for pendencia in prontidao_nfe.pendencias:
+                            for pendencia in list(prontidao_nfe.pendencias) + pendencias_xml_nfe:
                                 st.write(f"- {pendencia}")
                     nfe_assinado_key = f"nfe_produto_xml_assinado_{fat_nf_faturado.get('id')}"
                     ass_col1, ass_col2 = st.columns(2)
-                    if ass_col1.button("Assinar XML NF-e Produto", width="stretch", key="assinar_xml_nfe_produto"):
+                    if ass_col1.button("Assinar XML NF-e Produto", width="stretch", key="assinar_xml_nfe_produto", disabled=bool(pendencias_xml_nfe)):
                         try:
                             xml_assinado = assinar_xml_nfe_produto(xml_nfe_produto, nfe_cert_path, nfe_cert_password)
                             st.session_state[nfe_assinado_key] = xml_assinado
+                            st.session_state[nfe_assinado_key + "_origem"] = xml_nfe_produto
                             st.success("XML NF-e de produto assinado.")
                         except Exception as ex:
                             st.error(f"Falha ao assinar XML NF-e de produto: {ex}")
-                    xml_assinado_atual = st.session_state.get(nfe_assinado_key)
+                    xml_assinado_atual = st.session_state.get(nfe_assinado_key) if st.session_state.get(nfe_assinado_key + "_origem") == xml_nfe_produto else None
                     if xml_assinado_atual:
                         ass_col2.download_button(
                             "Baixar XML NF-e Produto assinado",
@@ -1538,7 +1953,7 @@ def renderizar_faturado(ctx: dict) -> None:
                             key="baixar_xml_nfe_produto_assinado",
                         )
                     fila_col1, fila_col2 = st.columns(2)
-                    if fila_col1.button("Salvar produto na fila de emissao", width="stretch", key="salvar_nfe_produto_fila"):
+                    if fila_col1.button("Salvar produto na fila de emissao", width="stretch", key="salvar_nfe_produto_fila", disabled=bool(pendencias_xml_nfe)):
                         nota_id_produto, _ = preparar_nota_fiscal_por_tipo(fat_nf_faturado, "Produto", nf_competencia_faturado)
                         salvar_retorno_nota_fiscal(
                             nota_id_produto,
@@ -1548,13 +1963,14 @@ def renderizar_faturado(ctx: dict) -> None:
                             gerar_pdf=False,
                         )
                         st.success(f"NF-e de produto salva na fila. Nota fiscal interna #{nota_id_produto}.")
-                    if fila_col2.button("Enviar NF-e Produto para SEFAZ", type="primary", width="stretch", key="enviar_nfe_produto_sefaz"):
+                    envio_confirmado = st.checkbox("Conferi os dados, a origem e o enquadramento tributário de todos os itens. Autorizo este envio" + (" em PRODUÇÃO, com validade fiscal." if nfe_ambiente == "producao" else " em homologação, sem valor fiscal."), key=f"nfe_confirmar_envio_{fat_nf_faturado.get('id')}_{nfe_ambiente}")
+                    if fila_col2.button("Enviar NF-e Produto para SEFAZ", type="primary", width="stretch", key="enviar_nfe_produto_sefaz", disabled=bool(pendencias_xml_nfe) or not envio_confirmado):
                         try:
                             if pendencias_xml_nfe:
                                 raise ValueError("Corrija as pendencias do XML antes do envio.")
                             if not nfe_endpoint:
                                 raise ValueError("Configure o endpoint NFeAutorizacao4 da SEFAZ.")
-                            xml_para_envio = xml_assinado_atual or assinar_xml_nfe_produto(xml_nfe_produto, nfe_cert_path, nfe_cert_password)
+                            xml_para_envio = assinar_xml_nfe_produto(xml_nfe_produto, nfe_cert_path, nfe_cert_password)
                             nota_id_produto, _ = preparar_nota_fiscal_por_tipo(fat_nf_faturado, "Produto", nf_competencia_faturado)
                             retorno_nfe = enviar_xml_nfe_produto(
                                 nfe_endpoint,
@@ -1665,12 +2081,18 @@ def renderizar_faturado(ctx: dict) -> None:
     fm3.metric("Serviços", formatar_moeda_br(total_servicos))
 
     if linhas_faturado:
-        st.dataframe(linhas_faturado, width="stretch", hide_index=True)
+        id_faturado_clicado = tabela_clicavel_id(
+            st, linhas_faturado, "faturados_grade_emissao", campo_id="ID"
+        )
+        if id_faturado_clicado:
+            st.session_state["faturado_id_emissao_ativo"] = int(id_faturado_clicado)
     else:
         st.info("Nenhum faturamento encontrado com os filtros selecionados.")
 
     st.write("---")
-    id_faturado = st.number_input("ID do faturamento para preparar emissão:", min_value=1, step=1, key="faturado_id_emissao")
+    id_faturado = int(st.session_state.get("faturado_id_emissao_ativo") or 0)
+    if not id_faturado:
+        st.caption("Clique em qualquer informação do faturamento para preparar a emissão.")
     fat_emitir = next((r for r in rows_faturado if int(r.get("id") or 0) == int(id_faturado)), None)
     if fat_emitir:
         itens_emitir = itens_faturamento_lista(fat_emitir.get("itens"))

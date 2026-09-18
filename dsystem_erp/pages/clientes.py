@@ -1,17 +1,167 @@
 ﻿from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
-from dsystem_erp.ui_consulta import tabela_selecionavel_id
+from dsystem_erp.services.dados_publicos import (
+    ConsultaDadosPublicosErro,
+    consultar_cep,
+    consultar_cnpj,
+)
+from dsystem_erp.ui_consulta import tabela_clicavel_id
+from dsystem_erp.utils.formatadores import somente_digitos
+from dsystem_erp.pages.simples import campo_simples, atualizar_cadastros
+from dsystem_erp.services.simples import validar_situacao, optante_legado
+
+
+def validar_redefinicao_senha_portal(senha, confirmacao):
+    if not senha and not confirmacao:
+        return
+    if senha != confirmacao:
+        raise ValueError("As senhas do portal não coincidem.")
+    if len(senha) < 8 or not senha.strip():
+        raise ValueError("A nova senha do portal deve ter pelo menos 8 caracteres.")
+
+
+def filtrar_clientes_cadastrados(clientes, pesquisa):
+    """Filtra por nome, código, CPF ou CNPJ, com ou sem pontuação."""
+    termo = str(pesquisa or "").strip().casefold()
+    if not termo:
+        return list(clientes or [])
+    documento = somente_digitos(termo)
+    pesquisa_documento = bool(documento) and all(
+        caractere.isdigit() or caractere in ".-/ ()"
+        for caractere in termo
+    )
+    resultado = []
+    for cliente in clientes or []:
+        textos = (
+            cliente.get("nome"), cliente.get("codigo_cliente"),
+            cliente.get("cnpj"), cliente.get("documento_chave"),
+            cliente.get("portal_username"),
+        )
+        encontrou_texto = any(termo in str(valor or "").casefold() for valor in textos)
+        encontrou_documento = pesquisa_documento and any(
+            documento in somente_digitos(valor)
+            for valor in (cliente.get("cnpj"), cliente.get("documento_chave"), cliente.get("portal_username"))
+        )
+        if encontrou_texto or encontrou_documento:
+            resultado.append(cliente)
+    return resultado
+
+
+def buscar_cliente_cadastrado_por_cpf(clientes, cpf):
+    """Localiza somente CPF exato nos cadastros internos, sem confundir com CNPJ."""
+    documento = somente_digitos(cpf)
+    if len(documento) != 11:
+        raise ValueError("Informe um CPF com 11 dígitos.")
+    for cliente in clientes or []:
+        documentos_cliente = (
+            cliente.get("cnpj"), cliente.get("documento_chave"), cliente.get("portal_username"),
+        )
+        if any(somente_digitos(valor) == documento for valor in documentos_cliente):
+            return cliente
+    return None
+
+
+def _preencher_campos(estado, dados: dict, campos: dict[str, str]) -> None:
+    for origem, chave_widget in campos.items():
+        valor = dados.get(origem)
+        if valor not in (None, ""):
+            estado[chave_widget] = valor
+
+
+def _campos_novo_cliente() -> dict[str, str]:
+    return {
+        "cnpj": "cad_cli_cpf_cnpj", "nome": "cad_cli_nome", "fantasia": "cad_cli_rg",
+        "telefone": "cad_cli_telefone", "telefone_secundario": "cad_cli_telefone_sec",
+        "email": "cad_cli_email", "endereco": "cad_cli_endereco", "numero": "cad_cli_numero",
+        "complemento": "cad_cli_complemento", "bairro": "cad_cli_bairro",
+        "cidade_estado": "cad_cli_cidade_estado", "cep": "cad_cli_cep",
+        "codigo_ibge": "cad_cli_codigo_ibge", "uf": "cad_cli_uf", "pessoa": "cad_cli_pessoa",
+        "ramo_atividade": "cad_cli_ramo", "optante_simples_nacional": "cad_cli_simples",
+    }
+
+
+def _campos_edicao_cliente(cliente_id: int) -> dict[str, str]:
+    sufixo = str(cliente_id)
+    return {
+        "cnpj": f"edit_cli_cnpj_{sufixo}", "nome": f"edit_cli_nome_{sufixo}",
+        "fantasia": f"edit_cli_rg_{sufixo}", "telefone": f"edit_cli_tel_{sufixo}",
+        "telefone_secundario": f"edit_cli_tel_sec_{sufixo}", "email": f"edit_cli_email_{sufixo}",
+        "endereco": f"edit_cli_end_{sufixo}", "numero": f"edit_cli_num_{sufixo}",
+        "complemento": f"edit_cli_comp_{sufixo}", "bairro": f"edit_cli_bai_{sufixo}",
+        "cidade_estado": f"edit_cli_cid_{sufixo}", "cep": f"edit_cli_cep_{sufixo}",
+        "codigo_ibge": f"edit_cli_ibge_{sufixo}", "uf": f"edit_cli_uf_{sufixo}",
+        "pessoa": f"edit_cli_pessoa_{sufixo}", "ramo_atividade": f"edit_cli_ramo_{sufixo}",
+        "optante_simples_nacional": f"edit_cli_simples_{sufixo}",
+    }
 
 
 def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
     aplicar_contexto_pagina(ctx, globals())
+    for chave in st.session_state.pop("portal_senha_limpar_campos", []):
+        st.session_state.pop(chave, None)
     st.title("Gestão e Cadastro de Cliente/Fornecedor")
     injetar_mascaras()
     aba1, aba2, aba3, aba4 = st.tabs(["Cadastrar Novo", "Base Cadastrada", "Importar Excel", "Contrato de Suporte"])
 
     with aba1:
         st.write("Preencha os dados abaixo. Eles ficarão disponíveis para puxar em Orçamentos, O.S. e Infraestrutura.")
+        st.session_state.setdefault("cad_cli_cidade_estado", "BH / MG")
+
+        st.markdown("**Preenchimento automático**")
+        consulta1, acao1, consulta_cpf, acao_cpf, consulta2, acao2 = st.columns([3, 1, 3, 1, 3, 1])
+        cnpj_consulta = consulta1.text_input(
+            "Consultar CNPJ:", placeholder="00.000.000/0000-00", key="cad_cli_consulta_cnpj"
+        )
+        consulta1.caption("Dados empresariais públicos consultados pela BrasilAPI.")
+        consultar_cnpj_agora = acao1.button("Buscar CNPJ", width="stretch", key="btn_cad_buscar_cnpj")
+        cpf_consulta = consulta_cpf.text_input(
+            "Consultar CPF:", placeholder="000.000.000-00", key="cad_cli_consulta_cpf"
+        )
+        consulta_cpf.caption("Pesquisa segura nos clientes já cadastrados.")
+        consultar_cpf_agora = acao_cpf.button("Buscar CPF", width="stretch", key="btn_cad_buscar_cpf")
+        cep_consulta = consulta2.text_input(
+            "Consultar CEP:", placeholder="00000-000", key="cad_cli_consulta_cep"
+        )
+        consulta2.caption("Endereço consultado no ViaCEP.")
+        consultar_cep_agora = acao2.button("Buscar CEP", width="stretch", key="btn_cad_buscar_cep")
+        if consultar_cnpj_agora:
+            try:
+                dados_cnpj = consultar_cnpj(cnpj_consulta)
+                _preencher_campos(st.session_state, dados_cnpj, _campos_novo_cliente())
+                situacao = dados_cnpj.get("situacao_cadastral") or "não informada"
+                st.session_state["cad_cli_consulta_mensagem"] = f"CNPJ localizado. Situação cadastral: {situacao}."
+                st.rerun()
+            except ConsultaDadosPublicosErro as ex:
+                st.error(str(ex))
+        if consultar_cpf_agora:
+            try:
+                cpf_documento = somente_digitos(cpf_consulta)
+                cliente_cpf = buscar_cliente_cadastrado_por_cpf(buscar_clientes(), cpf_documento)
+                if cliente_cpf:
+                    st.session_state["cliente_edicao_selecionado"] = int(cliente_cpf["id"])
+                    st.session_state["cad_cli_consulta_mensagem"] = (
+                        f"CPF localizado: {cliente_cpf.get('nome') or 'cliente sem nome'}. "
+                        "Abra a aba Base Cadastrada para consultar ou editar."
+                    )
+                else:
+                    st.session_state["cad_cli_cpf_cnpj"] = cpf_documento
+                    st.session_state["cad_cli_consulta_mensagem"] = (
+                        "CPF não encontrado na base. O número foi preenchido no novo cadastro."
+                    )
+                st.rerun()
+            except ValueError as ex:
+                st.error(str(ex))
+        if consultar_cep_agora:
+            try:
+                _preencher_campos(st.session_state, consultar_cep(cep_consulta), _campos_novo_cliente())
+                st.session_state["cad_cli_consulta_mensagem"] = "CEP localizado e endereço preenchido."
+                st.rerun()
+            except ConsultaDadosPublicosErro as ex:
+                st.error(str(ex))
+        mensagem_consulta = st.session_state.pop("cad_cli_consulta_mensagem", None)
+        if mensagem_consulta:
+            st.success(mensagem_consulta)
         
         c_top1, c_top2 = st.columns(2)
         with c_top1: 
@@ -24,10 +174,12 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
         with c1: c_nome = st.text_input("Nome/Empresa (Obrigatório):", key="cad_cli_nome")
         with c2: c_cnpj = st.text_input("CPF/CNPJ (Obrigatório e único):", placeholder="Digite CPF ou CNPJ", key="cad_cli_cpf_cnpj")
         with c3: c_rg = st.text_input("RG/Fantasia:", key="cad_cli_rg")
+        c_emite_nf = st.selectbox("Emite nota fiscal?", ["Não informado", "Sim", "Não"], key="cad_cli_emite_nf")
+        c_situacao = campo_simples(st, c_cnpj, "cad_cli_situacao_sn")
             
         c_ie1, c_ie2 = st.columns(2)
-        with c_ie1: c_ie = st.text_input("Inscrição Estadual (IE):")
-        with c_ie2: c_im = st.text_input("Inscrição Municipal (IM):")
+        with c_ie1: c_ie = st.text_input("Inscrição Estadual (IE):", key="cad_cli_ie")
+        with c_ie2: c_im = st.text_input("Inscrição Municipal (IM):", key="cad_cli_im")
             
         c4, c5, c5b = st.columns(3)
         with c4: c_tel = st.text_input("Telefone Principal:", placeholder="(31) 99999-9999", key="cad_cli_telefone")
@@ -36,13 +188,13 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
         c_emails_cobranca = st.text_area("E-mails de cobrança:", height=70, key="cad_cli_emails_cobranca", help="Separe mais de um e-mail por vírgula, ponto e vírgula ou quebra de linha.")
             
         c6, c7, c8 = st.columns([3,1,2])
-        with c6: c_end = st.text_input("Endereço (Rua):")
-        with c7: c_num = st.text_input("Número:")
-        with c8: c_comp = st.text_input("Complemento:")
+        with c6: c_end = st.text_input("Endereço (Rua):", key="cad_cli_endereco")
+        with c7: c_num = st.text_input("Número:", key="cad_cli_numero")
+        with c8: c_comp = st.text_input("Complemento:", key="cad_cli_complemento")
             
         c9, c10, c11 = st.columns(3)
-        with c9: c_bai = st.text_input("Bairro:")
-        with c10: c_cid = st.text_input("Cidade/UF:", value="BH / MG")
+        with c9: c_bai = st.text_input("Bairro:", key="cad_cli_bairro")
+        with c10: c_cid = st.text_input("Cidade/UF:", key="cad_cli_cidade_estado")
         with c11: c_cep = st.text_input("CEP:", placeholder="00000-000", key="cad_cli_cep")
 
         with st.expander("Dados complementares e faturamento", expanded=False):
@@ -60,7 +212,7 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
             c_contato_cobranca = cc9.selectbox("Contato cobrança:", ["", "SIM", "NÃO"], key="cad_cli_contato_cobranca")
             cc10, cc11, cc12 = st.columns(3)
             c_data_nascimento = cc10.text_input("Data de nascimento:", key="cad_cli_data_nascimento")
-            c_simples = cc11.selectbox("Optante Simples Nacional:", ["", "SIM", "NÃO"], key="cad_cli_simples")
+            c_simples = optante_legado(c_situacao)
             c_ramo = cc12.text_input("Ramo de atividade:", key="cad_cli_ramo")
             cc13, cc14, cc15 = st.columns(3)
             c_dias_antecedencia = cc13.text_input("Dias antecedência faturamento:", key="cad_cli_dias_antecedencia")
@@ -116,12 +268,15 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                 st.error("Informe o e-mail dos funcionários para gerar os logins: " + ", ".join(funcionarios_sem_email))
             elif c_nome.strip() and normalizar_documento_cliente(c_cnpj):
                 try:
+                    validar_situacao(c_cnpj, c_emite_nf, c_situacao)
                     if c_logo and not upload_dentro_limite(c_logo):
                         erro_upload_grande("logo")
                         st.stop()
                     logo_dados, logo_nome, logo_mime = dados_upload(c_logo)
                     sub_str = "Sim" if c_subst else "Não"
                     dados_complementares = {
+                        "emite_nota_fiscal": c_emite_nf,
+                        "situacao_simples_nacional": c_situacao,
                         "pessoa": c_pessoa, "endereco_padrao": c_endereco_padrao, "referencia": c_referencia,
                         "codigo_ibge": c_codigo_ibge, "uf": c_uf, "contato_padrao": c_contato_padrao,
                         "contato_cobranca": c_contato_cobranca, "contato": c_contato,
@@ -140,21 +295,25 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
 
     with aba2:
         st.subheader("Base Cadastrada (Tabela Completa)")
+        if tem_permissao("clientes.edit"):
+            with st.expander("Atualizar Simples Nacional dos cadastros existentes"):
+                st.caption("Consulta os CNPJs acessíveis ao seu usuário. CPF recebe 'Não se aplica'. Falhas ou informação ausente preservam o cadastro. A emissão de nota não é deduzida do CNPJ.")
+                if st.button("Consultar e atualizar cadastros", key="clientes_atualizar_simples"):
+                    st.session_state["clientes_resultado_simples"] = atualizar_cadastros(st, conectar_banco, buscar_clientes())
+                    # Limpa valores anteriores dos formulários antes de renderizá-los.
+                    for chave in list(st.session_state):
+                        if str(chave).startswith("edit_cli_situacao_sn_"):
+                            del st.session_state[chave]
+                if st.session_state.get("clientes_resultado_simples"):
+                    st.dataframe(st.session_state["clientes_resultado_simples"], hide_index=True)
         clientes_cadastrados = buscar_clientes()
         pesquisa_cliente = st.text_input(
-            "Pesquisar por nome, código ou CPF/CNPJ:",
+            "Pesquisar por nome, código, CPF ou CNPJ:",
             key="pesquisa_base_clientes",
-            placeholder="Ex.: Casa Verde, CLI00010 ou 12.345.678/0001-90",
+            placeholder="Ex.: Casa Verde, CLI00010, 123.456.789-00 ou CNPJ",
         )
         termo_cliente = pesquisa_cliente.strip().lower()
-        termo_documento = normalizar_documento_cliente(pesquisa_cliente)
-        if termo_cliente:
-            clientes_cadastrados = [
-                cli for cli in clientes_cadastrados
-                if termo_cliente in str(cli.get("nome") or "").lower()
-                or termo_cliente in str(cli.get("codigo_cliente") or "").lower()
-                or (termo_documento and termo_documento in normalizar_documento_cliente(cli.get("cnpj")))
-            ]
+        clientes_cadastrados = filtrar_clientes_cadastrados(clientes_cadastrados, pesquisa_cliente)
 
         documentos_agrupados = {}
         for cli in buscar_clientes():
@@ -171,8 +330,15 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
         
         if clientes_cadastrados:
             df_view = [{k: v for k, v in cli.items() if k not in ('funcionarios', 'portal_password', 'portal_2fa_secret', 'logo')} for cli in clientes_cadastrados]
-            id_cliente_selecionado = tabela_selecionavel_id(st, df_view, "clientes_grade_consulta", "id")
-            st.caption("Clique em um cadastro para abrir automaticamente a consulta/edição.")
+            id_cliente_clicado = tabela_clicavel_id(st, df_view, "clientes_grade_consulta", "id")
+            if id_cliente_clicado is not None:
+                st.session_state["cliente_edicao_selecionado"] = int(id_cliente_clicado)
+            id_cliente_selecionado = st.session_state.get("cliente_edicao_selecionado")
+            ids_clientes_visiveis = {int(item.get("id") or 0) for item in clientes_cadastrados}
+            if termo_cliente and int(id_cliente_selecionado or 0) not in ids_clientes_visiveis:
+                st.session_state.pop("cliente_edicao_selecionado", None)
+                id_cliente_selecionado = None
+            st.caption("Clique em qualquer informação da linha para abrir automaticamente a edição.")
 
             with st.expander("Histórico de login dos clientes", expanded=False):
                 conn_hist = conectar_banco()
@@ -206,11 +372,51 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                     st.rerun()
                     
             elif act_cli == "Editar Cadastro":
-                id_edit_cli = st.number_input("ID para Editar:", min_value=1, step=1, value=int(id_cliente_selecionado or 1), key=f"cliente_edicao_id_{id_cliente_selecionado or 'manual'}")
+                if not id_cliente_selecionado:
+                    st.info("Clique em um cliente ou fornecedor na tabela para editar.")
+                id_edit_cli = int(id_cliente_selecionado or 0)
                 cliente_edit = next((c for c in clientes_cadastrados if c['id'] == id_edit_cli), None)
                 
                 if cliente_edit:
                     with st.expander(f"Editando: {cliente_edit['nome']}", expanded=True):
+                        ecnpj1, ecnpj2, ecep1, ecep2 = st.columns([3, 1, 3, 1])
+                        cnpj_edicao_consulta = ecnpj1.text_input(
+                            "Atualizar pelo CNPJ:", value=cliente_edit.get("cnpj") or "",
+                            key=f"edit_cli_consulta_cnpj_{id_edit_cli}",
+                        )
+                        buscar_cnpj_edicao = ecnpj2.button(
+                            "Buscar CNPJ", width="stretch", key=f"btn_edit_cnpj_{id_edit_cli}"
+                        )
+                        cep_edicao_consulta = ecep1.text_input(
+                            "Atualizar pelo CEP:", value=cliente_edit.get("cep") or "",
+                            key=f"edit_cli_consulta_cep_{id_edit_cli}",
+                        )
+                        buscar_cep_edicao = ecep2.button(
+                            "Buscar CEP", width="stretch", key=f"btn_edit_cep_{id_edit_cli}"
+                        )
+                        if buscar_cnpj_edicao:
+                            try:
+                                _preencher_campos(
+                                    st.session_state, consultar_cnpj(cnpj_edicao_consulta),
+                                    _campos_edicao_cliente(id_edit_cli),
+                                )
+                                st.session_state[f"edit_cli_consulta_ok_{id_edit_cli}"] = "Dados do CNPJ atualizados na tela."
+                                st.rerun()
+                            except ConsultaDadosPublicosErro as ex:
+                                st.error(str(ex))
+                        if buscar_cep_edicao:
+                            try:
+                                _preencher_campos(
+                                    st.session_state, consultar_cep(cep_edicao_consulta),
+                                    _campos_edicao_cliente(id_edit_cli),
+                                )
+                                st.session_state[f"edit_cli_consulta_ok_{id_edit_cli}"] = "Endereço atualizado na tela."
+                                st.rerun()
+                            except ConsultaDadosPublicosErro as ex:
+                                st.error(str(ex))
+                        mensagem_edicao = st.session_state.pop(f"edit_cli_consulta_ok_{id_edit_cli}", None)
+                        if mensagem_edicao:
+                            st.success(mensagem_edicao)
                         
                         c_tp1, c_tp2 = st.columns(2)
                         def_tipo = cliente_edit.get('tipo', 'Cliente')
@@ -220,6 +426,11 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
 
                         e_nome = st.text_input("Nome/Empresa:", value=cliente_edit['nome'], key=f"edit_cli_nome_{id_edit_cli}")
                         e_cnpj = st.text_input("CPF/CNPJ:", value=cliente_edit['cnpj'] or "", key=f"edit_cli_cnpj_{id_edit_cli}")
+                        opcoes_emite = ["Não informado", "Sim", "Não"]
+                        e_emite_nf = st.selectbox("Emite nota fiscal?", opcoes_emite,
+                            index=opcoes_emite.index(cliente_edit.get("emite_nota_fiscal")) if cliente_edit.get("emite_nota_fiscal") in opcoes_emite else 0,
+                            key=f"edit_cli_emite_nf_{id_edit_cli}")
+                        e_situacao = campo_simples(st, e_cnpj, f"edit_cli_situacao_sn_{id_edit_cli}", cliente_edit.get("situacao_simples_nacional") or "")
                         e_rg = st.text_input("RG/Fantasia:", value=cliente_edit['rg_mei'] or "", key=f"edit_cli_rg_{id_edit_cli}")
                         
                         c_ie1, c_ie2 = st.columns(2)
@@ -253,7 +464,7 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                             e_contato_cobranca = ec9.text_input("Contato cobrança:", value=cliente_edit.get("contato_cobranca") or "", key=f"edit_cli_contatocob_{id_edit_cli}")
                             ec10, ec11, ec12 = st.columns(3)
                             e_data_nascimento = ec10.text_input("Data de nascimento:", value=cliente_edit.get("data_nascimento") or "", key=f"edit_cli_nasc_{id_edit_cli}")
-                            e_simples = ec11.text_input("Optante Simples Nacional:", value=cliente_edit.get("optante_simples_nacional") or "", key=f"edit_cli_simples_{id_edit_cli}")
+                            e_simples = optante_legado(e_situacao)
                             e_ramo = ec12.text_input("Ramo de atividade:", value=cliente_edit.get("ramo_atividade") or "", key=f"edit_cli_ramo_{id_edit_cli}")
                             ec13, ec14, ec15 = st.columns(3)
                             e_dias_antecedencia = ec13.text_input("Dias antecedência faturamento:", value=cliente_edit.get("dias_antecedencia_faturamento") or "", key=f"edit_cli_antecedencia_{id_edit_cli}")
@@ -280,7 +491,12 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                         st.markdown("**Login do Cliente no Portal**")
                         e_portal_user = normalizar_documento_cliente(e_cnpj)
                         st.info(f"Usuário automático da empresa: {e_portal_user or 'informe o CPF/CNPJ'}")
-                        e_portal_senha = ""
+                        senha_versao = st.session_state.get(f"portal_senha_versao_{id_edit_cli}", 0)
+                        chave_senha = f"edit_cli_portal_senha_{id_edit_cli}_{senha_versao}"
+                        chave_confirmacao = f"edit_cli_portal_confirmacao_{id_edit_cli}_{senha_versao}"
+                        e_portal_senha = st.text_input("Nova senha do portal:", type="password", key=chave_senha)
+                        e_portal_confirmacao = st.text_input("Confirmar nova senha do portal:", type="password", key=chave_confirmacao)
+                        st.caption("Deixe os dois campos vazios para manter a senha atual. Para redefinir, use pelo menos 8 caracteres e clique em Guardar Alterações. O cliente deverá trocar essa senha no próximo acesso. Não altera as senhas dos funcionários.")
                         e_reset_2fa = st.checkbox("Resetar 2FA do cliente", help="Use se o cliente perdeu o celular/autenticador. No próximo login ele precisará configurar novamente.", key=f"edit_cli_reset_2fa_{id_edit_cli}")
                         
                         try: func_existentes = json.loads(cliente_edit.get('funcionarios', '[]'))
@@ -313,6 +529,12 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                         funcionarios_json_edit = preparar_funcionarios(lista_funcionarios_edit)
                         
                         if st.button("Guardar Alterações", type="primary", key=f"btn_save_cli_{id_edit_cli}"):
+                            try:
+                                validar_situacao(e_cnpj, e_emite_nf, e_situacao)
+                                validar_redefinicao_senha_portal(e_portal_senha, e_portal_confirmacao)
+                            except ValueError as erro_senha:
+                                st.error(str(erro_senha))
+                                st.stop()
                             if funcionarios_edit_sem_email:
                                 st.error("Informe o e-mail dos funcionários para gerar os logins: " + ", ".join(funcionarios_edit_sem_email))
                                 st.stop()
@@ -334,7 +556,8 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                             sub_str = "Sim" if e_sub else "Não"
                             campos_logo = ", logo_nome=?, logo_mime=?, logo=?" if logo_dados_edit is not None else ""
                             if e_portal_senha:
-                                sql = f'''UPDATE clientes SET nome=?, documento_chave=?, telefone=?, telefone_secundario=?, email=?, emails_cobranca=?, cnpj=?, rg_mei=?, endereco=?, numero=?, complemento=?, bairro=?, cidade_estado=?, cep=?, tipo=?, insc_estadual=?, insc_municipal=?, substituto_tributario=?, redes_sociais=?, funcionarios=?, portal_username=?, portal_password=?, portal_trocar_senha=1, portal_2fa_secret=NULL, portal_2fa_ativo=0{campos_logo} WHERE id=?'''
+                                campos_2fa = ", portal_2fa_secret=NULL, portal_2fa_ativo=0" if e_reset_2fa else ""
+                                sql = f'''UPDATE clientes SET nome=?, documento_chave=?, telefone=?, telefone_secundario=?, email=?, emails_cobranca=?, cnpj=?, rg_mei=?, endereco=?, numero=?, complemento=?, bairro=?, cidade_estado=?, cep=?, tipo=?, insc_estadual=?, insc_municipal=?, substituto_tributario=?, redes_sociais=?, funcionarios=?, portal_username=?, portal_password=?, portal_trocar_senha=1{campos_2fa}{campos_logo} WHERE id=?'''
                                 params = [e_nome, documento_edit_chave, e_tel, e_tel_sec, e_email, e_emails_cobranca, e_cnpj, e_rg, e_end, e_num, e_comp, e_bai, e_cid, e_cep, e_tipo, e_ie, e_im, sub_str, redes_sociais_json_edit, funcionarios_json_edit, e_portal_user, criar_hash_senha(e_portal_senha)]
                             elif e_reset_2fa:
                                 sql = f'''UPDATE clientes SET nome=?, documento_chave=?, telefone=?, telefone_secundario=?, email=?, emails_cobranca=?, cnpj=?, rg_mei=?, endereco=?, numero=?, complemento=?, bairro=?, cidade_estado=?, cep=?, tipo=?, insc_estadual=?, insc_municipal=?, substituto_tributario=?, redes_sociais=?, funcionarios=?, portal_username=?, portal_2fa_secret=NULL, portal_2fa_ativo=0{campos_logo} WHERE id=?'''
@@ -346,6 +569,7 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                                 params.extend([logo_nome_edit, logo_mime_edit, logo_dados_edit])
                             params.append(id_edit_cli)
                             c.execute(sql, tuple(params))
+                            c.execute("UPDATE clientes SET emite_nota_fiscal=?, situacao_simples_nacional=? WHERE id=?", (e_emite_nf, e_situacao, id_edit_cli))
                             c.execute(
                                 """UPDATE clientes SET pessoa=?, endereco_padrao=?, referencia=?, codigo_ibge=?, uf=?,
                                    contato_padrao=?, contato_cobranca=?, contato=?, estado_insc_estadual=?,
@@ -361,6 +585,8 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                             )
                             conn.commit()
                             conn.close()
+                            st.session_state[f"portal_senha_versao_{id_edit_cli}"] = senha_versao + 1
+                            st.session_state["portal_senha_limpar_campos"] = [chave_senha, chave_confirmacao]
                             st.session_state['cli_editado'] = True
                             st.rerun()
 

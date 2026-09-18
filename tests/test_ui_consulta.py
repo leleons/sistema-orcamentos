@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from dsystem_erp.ui_consulta import tabela_clicavel_id
+from dsystem_erp.ui_consulta import tabela_clicavel_id, tabela_clicavel_registro
 
 
 class StreamlitFalso:
@@ -33,3 +33,15 @@ def test_tabela_clicavel_sem_celula_nao_seleciona_registro():
     selecionado = tabela_clicavel_id(st, [{"ID": 14}], "orcamentos")
 
     assert selecionado is None
+
+
+def test_tabela_clicavel_registro_retorna_linha_completa():
+    st = StreamlitFalso([(0, "Cliente")])
+
+    selecionado = tabela_clicavel_registro(
+        st,
+        [{"Origem": "Receber", "ID": 9, "Cliente": "Empresa"}],
+        "lancamentos",
+    )
+
+    assert selecionado == {"Origem": "Receber", "ID": 9, "Cliente": "Empresa"}

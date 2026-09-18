@@ -40,6 +40,91 @@ def texto_cartao_equipamento(item: dict) -> str:
     return f"OS #{os_id:05d} · {numero_item}\n{cliente}\n{equipamento}{complemento}\nEQ-{equipamento_id}"
 
 
+def texto_cartao_registro(item: dict) -> str:
+    """Monta o texto de um cartão originado de O.S., atendimento ou chamado."""
+    origem = str(item.get("_origem") or "O.S.")
+    registro_id = int(item.get("_registro_id") or item.get("id") or 0)
+    cliente = str(item.get("_cliente") or "Cliente não informado").strip()
+    titulo = str(item.get("_titulo") or "Registro sem título").strip()
+    complemento = str(item.get("_complemento") or "").strip()
+    linhas = [f"{origem} #{registro_id:05d}", cliente, titulo]
+    if complemento:
+        linhas.append(complemento)
+    linhas.append(str(item.get("_chave") or f"registro:{registro_id}"))
+    return "\n".join(linhas)
+
+
+def montar_quadro_registros(registros: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """Converte registros das três origens para um único quadro."""
+    por_status = {status: [] for status in STATUS_KANBAN_OS}
+    cartao_para_chave = {}
+    ordenados = sorted(
+        (dict(item) for item in registros),
+        key=lambda item: (int(item.get("kanban_ordem") or 0), -int(item.get("_registro_id") or 0)),
+    )
+    for item in ordenados:
+        status = item.get("kanban_status") or STATUS_KANBAN_OS[0]
+        if status not in por_status:
+            status = STATUS_KANBAN_OS[0]
+        texto = texto_cartao_registro(item)
+        por_status[status].append(texto)
+        cartao_para_chave[texto] = str(item.get("_chave"))
+    return (
+        [{"header": status, "items": por_status[status]} for status in STATUS_KANBAN_OS],
+        cartao_para_chave,
+    )
+
+
+def alteracoes_do_quadro_registros(
+    quadro_resultado: list[dict] | None,
+    registros: list[dict],
+    cartao_para_chave: dict[str, str],
+) -> list[dict]:
+    """Calcula mudanças de etapa e ordem de um quadro com origens diferentes."""
+    if not isinstance(quadro_resultado, list) or len(quadro_resultado) != len(STATUS_KANBAN_OS):
+        return []
+    headers = []
+    cartoes = []
+    for coluna in quadro_resultado:
+        if not isinstance(coluna, dict) or not isinstance(coluna.get("items"), list):
+            return []
+        header = coluna.get("header")
+        if not isinstance(header, str) or header not in STATUS_KANBAN_OS:
+            return []
+        headers.append(header)
+        if not all(isinstance(cartao, str) for cartao in coluna["items"]):
+            return []
+        cartoes.extend(coluna["items"])
+    if len(set(headers)) != len(STATUS_KANBAN_OS):
+        return []
+    if len(cartoes) != len(set(cartoes)) or set(cartoes) != set(cartao_para_chave):
+        return []
+
+    atuais = {str(item.get("_chave")): dict(item) for item in registros}
+    alteracoes = []
+    chaves_processadas = set()
+    for coluna in quadro_resultado:
+        status = coluna["header"]
+        for ordem, cartao in enumerate(coluna["items"]):
+            chave = cartao_para_chave.get(cartao)
+            if not chave or chave in chaves_processadas or chave not in atuais:
+                continue
+            chaves_processadas.add(chave)
+            item = atuais[chave]
+            status_anterior = item.get("kanban_status") or STATUS_KANBAN_OS[0]
+            ordem_anterior = int(item.get("kanban_ordem") or 0)
+            if status != status_anterior or ordem != ordem_anterior:
+                alteracoes.append({
+                    "chave": chave,
+                    "origem": item.get("_origem_codigo"),
+                    "id": int(item.get("_registro_id") or 0),
+                    "status": status,
+                    "ordem": ordem,
+                    "status_anterior": status_anterior,
+                })
+    return alteracoes
+
+
 def montar_quadro_equipamentos(equipamentos: list[dict]) -> tuple[list[dict], dict[str, int]]:
     """Converte os equipamentos do banco para as colunas do componente."""
     por_status = {status: [] for status in STATUS_KANBAN_OS}
@@ -67,6 +152,25 @@ def alteracoes_do_quadro(
     cartao_para_id: dict[str, int],
 ) -> list[dict]:
     """Calcula somente mudanças válidas de coluna ou ordem feitas no quadro."""
+    if not isinstance(quadro_resultado, list) or len(quadro_resultado) != len(STATUS_KANBAN_OS):
+        return []
+    headers = []
+    cartoes = []
+    for coluna in quadro_resultado:
+        if not isinstance(coluna, dict) or not isinstance(coluna.get("items"), list):
+            return []
+        header = coluna.get("header")
+        if not isinstance(header, str) or header not in STATUS_KANBAN_OS:
+            return []
+        headers.append(header)
+        if not all(isinstance(cartao, str) for cartao in coluna["items"]):
+            return []
+        cartoes.extend(coluna["items"])
+    # Um evento parcial/duplicado não pode movimentar só parte dos equipamentos.
+    if len(set(headers)) != len(STATUS_KANBAN_OS):
+        return []
+    if len(cartoes) != len(set(cartoes)) or set(cartoes) != set(cartao_para_id):
+        return []
     atuais = {int(item.get("id") or 0): dict(item) for item in equipamentos}
     alteracoes = []
     ids_processados = set()

@@ -18,6 +18,33 @@ AREAS_POR_CODIGO = {
 }
 
 
+def normalizar_tem_fonte(valor) -> str:
+    """Normaliza valores de planilha e formulário para ``Sim`` ou ``Não``."""
+    texto = str(valor or "").strip().casefold()
+    return "Sim" if texto in {"1", "s", "sim", "true", "yes", "com fonte"} else "Não"
+
+
+def _codigo_da_fileira(valor, prefixo: str) -> str:
+    """Extrai ``01`` de valores como ``1-01 Novo`` ou ``2-01 Informática``."""
+    texto = str(valor or "").strip()
+    correspondencia = re.match(rf"^{re.escape(prefixo)}\s*[-_.|/]?\s*(\d{{2}})(?:\D|$)", texto)
+    if correspondencia:
+        return correspondencia.group(1)
+    if re.fullmatch(r"\d{1,2}", texto):
+        return texto.zfill(2)
+    return ""
+
+
+def montar_codigo_localizacao(fileira1, fileira2, identificacao) -> str:
+    """Monta o código visual ``01.04.10`` a partir das três partes do estoque."""
+    estado = _codigo_da_fileira(fileira1, "1")
+    area = _codigo_da_fileira(fileira2, "2")
+    item = str(identificacao or "").strip().replace("|", ".").strip(". ")
+    if not estado or not area or not item:
+        return ""
+    return ".".join((estado, area, item))
+
+
 def separar_codigo_localizacao(valor) -> tuple[str, str, str]:
     """Separa ``02.04.07`` em fileira 1, fileira 2 e identificação.
 

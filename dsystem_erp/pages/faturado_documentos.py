@@ -53,7 +53,13 @@ def _documentos_disponiveis(faturamento: dict) -> list[DocumentoFaturamento]:
         for nota in cursor.fetchall():
             numero = nota.get("numero_nota") or nota.get("id")
             titulo = f"Nota {nota.get('tipo_nota') or 'fiscal'} #{numero} ({nota.get('status') or 'Pendente'})"
-            if nota.get("pdf_base64"):
+            pdf_oficial_servico = (
+                nota.get("tipo_nota") != "Serviço"
+                or str(nota.get("link_nota") or "").startswith(
+                    ("https://www.nfse.gov.br/ConsultaPublica/", "https://www.producaorestrita.nfse.gov.br/ConsultaPublica/")
+                )
+            )
+            if nota.get("pdf_base64") and pdf_oficial_servico:
                 arquivo = decodificar_pdf_base64(nota.get("pdf_base64"))
             elif nota.get("link_nota"):
                 arquivo = pdf_de_referencia(titulo, "A nota fiscal está disponível no link abaixo:", nota.get("link_nota"))

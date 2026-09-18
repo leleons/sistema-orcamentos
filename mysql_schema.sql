@@ -1,6 +1,19 @@
 CREATE DATABASE IF NOT EXISTS banco_dsystem CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE banco_dsystem;
 
+CREATE TABLE IF NOT EXISTS uber_corridas (
+  id INT PRIMARY KEY AUTO_INCREMENT, data_corrida DATE NOT NULL,
+  finalidade VARCHAR(100) NOT NULL, valor_total DECIMAL(14,2) NOT NULL,
+  colaboradores LONGTEXT, produtos TEXT, origem TEXT, destino TEXT, observacoes LONGTEXT,
+  status VARCHAR(30) DEFAULT 'Registrada', criado_por VARCHAR(255), criado_em VARCHAR(30),
+  alterado_por VARCHAR(255), alterado_em VARCHAR(30), INDEX idx_uber_data (data_corrida)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS uber_corrida_clientes (
+  corrida_id INT NOT NULL, cliente_id INT NOT NULL, cliente_nome VARCHAR(255) NOT NULL,
+  PRIMARY KEY (corrida_id, cliente_id), INDEX idx_uber_cliente (cliente_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS logs_sistema (
   id INT AUTO_INCREMENT PRIMARY KEY,
   criado_em DATETIME,
@@ -173,6 +186,7 @@ CREATE TABLE IF NOT EXISTS orcamento_pdfs (
 
 CREATE TABLE IF NOT EXISTS ordens_servico (
   os_id INT AUTO_INCREMENT PRIMARY KEY,
+  cliente_id INT,
   data_os VARCHAR(30),
   cliente VARCHAR(255),
   cpf_cnpj VARCHAR(60),
@@ -202,6 +216,14 @@ CREATE TABLE IF NOT EXISTS ordens_servico (
   recebido_em VARCHAR(30)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS os_tipos_aparelhos (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  nome VARCHAR(120) NOT NULL UNIQUE,
+  ativo VARCHAR(10) DEFAULT 'Sim',
+  criado_por VARCHAR(120),
+  criado_em VARCHAR(30)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS emails_clientes (
   id INT AUTO_INCREMENT PRIMARY KEY,
   cliente_vinculado VARCHAR(255),
@@ -216,6 +238,20 @@ CREATE TABLE IF NOT EXISTS emails_clientes (
   data_verificacao VARCHAR(30),
   backup_realizado VARCHAR(20),
   data_backup VARCHAR(30)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS base_pesquisa (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  titulo VARCHAR(255) NOT NULL,
+  categoria VARCHAR(120),
+  palavras_chave TEXT,
+  problema LONGTEXT,
+  solucao LONGTEXT,
+  criado_por VARCHAR(120),
+  criado_em VARCHAR(30),
+  alterado_por VARCHAR(120),
+  alterado_em VARCHAR(30),
+  INDEX idx_base_pesquisa_titulo (titulo)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS infra_v4 (
@@ -251,6 +287,11 @@ CREATE TABLE IF NOT EXISTS infra_v4 (
   serv_link LONGTEXT,
   serv_log LONGTEXT,
   serv_sen LONGTEXT,
+  serv_anydesk LONGTEXT,
+  serv_radmin LONGTEXT,
+  serv_google_remote LONGTEXT,
+  serv_info_gerais LONGTEXT,
+  impressoras_acessos LONGTEXT,
   cert_log LONGTEXT,
   cert_sen LONGTEXT,
   fin_b1 LONGTEXT,
@@ -273,11 +314,14 @@ CREATE TABLE IF NOT EXISTS estoque (
   id INT AUTO_INCREMENT PRIMARY KEY,
     codigo VARCHAR(120),
     codigo_entrada VARCHAR(120),
+    codigo_item INT,
     produto VARCHAR(255),
+    modelo VARCHAR(255),
     nome_generico VARCHAR(255),
     categoria VARCHAR(120),
   fileira VARCHAR(120),
   caixa VARCHAR(120),
+  tem_fonte VARCHAR(5) DEFAULT 'Não',
   quantidade INT DEFAULT 0,
   estoque_minimo INT DEFAULT 0,
   valor_custo VARCHAR(60),
@@ -289,7 +333,64 @@ CREATE TABLE IF NOT EXISTS estoque (
   permitir_ajuste_preco INTEGER DEFAULT 0,
   situacao_nota VARCHAR(30) DEFAULT 'Comprado com nota',
   fornecedor VARCHAR(255),
+  data_compra DATE,
+  ultima_nota_entrada_id INT,
   observacoes TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS estoque_notas_entrada (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  fornecedor VARCHAR(255) NOT NULL,
+  fornecedor_documento VARCHAR(60),
+  numero_nota VARCHAR(120) NOT NULL,
+  serie VARCHAR(40),
+  chave_acesso VARCHAR(60) UNIQUE,
+  data_compra DATE NOT NULL,
+  origem VARCHAR(30) DEFAULT 'Manual',
+  observacoes LONGTEXT,
+  criado_por VARCHAR(120),
+  criado_em VARCHAR(30),
+  INDEX idx_estoque_nota_fornecedor (fornecedor),
+  INDEX idx_estoque_nota_data (data_compra)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS estoque_nota_entrada_itens (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  nota_entrada_id INT NOT NULL,
+  produto_id INT NOT NULL,
+  numero_item VARCHAR(30),
+  codigo_fornecedor VARCHAR(120),
+  codigo_barras VARCHAR(120),
+  descricao TEXT,
+  ncm VARCHAR(30),
+  cfop VARCHAR(20),
+  unidade VARCHAR(20),
+  quantidade DECIMAL(14,3) DEFAULT 0,
+  valor_unitario DECIMAL(14,4) DEFAULT 0,
+  valor_total DECIMAL(14,2) DEFAULT 0,
+  INDEX idx_estoque_nota_item_nota (nota_entrada_id),
+  INDEX idx_estoque_nota_item_produto (produto_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS estoque_movimentacoes (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  produto_id INT NOT NULL,
+  tipo VARCHAR(60) NOT NULL,
+  quantidade DECIMAL(14,3) NOT NULL,
+  estoque_anterior DECIMAL(14,3) DEFAULT 0,
+  estoque_atual DECIMAL(14,3) DEFAULT 0,
+  cliente_id INT,
+  cliente_nome VARCHAR(255),
+  fornecedor VARCHAR(255),
+  nota_entrada_id INT,
+  origem VARCHAR(60),
+  origem_id INT,
+  observacoes LONGTEXT,
+  criado_por VARCHAR(120),
+  criado_em VARCHAR(30),
+  INDEX idx_estoque_mov_produto (produto_id),
+  INDEX idx_estoque_mov_cliente (cliente_id),
+  INDEX idx_estoque_mov_nota (nota_entrada_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS pedidos_compra (
@@ -302,6 +403,37 @@ CREATE TABLE IF NOT EXISTS pedidos_compra (
   fornecedor VARCHAR(255),
   status VARCHAR(60),
   observacoes TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS estoque_emprestimos (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  responsavel VARCHAR(255) NOT NULL,
+  cliente_id INT,
+  cliente_nome VARCHAR(255),
+  data_retirada DATE NOT NULL,
+  data_limite DATE NOT NULL,
+  status VARCHAR(40) DEFAULT 'Em aberto',
+  observacoes LONGTEXT,
+  criado_por VARCHAR(255),
+  criado_em VARCHAR(30),
+  encerrado_por VARCHAR(255),
+  encerrado_em VARCHAR(30),
+  INDEX idx_emprestimos_status_limite (status, data_limite)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS estoque_emprestimo_itens (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  emprestimo_id INT NOT NULL,
+  produto_id INT NOT NULL,
+  codigo VARCHAR(255),
+  produto VARCHAR(255),
+  quantidade INT NOT NULL,
+  status VARCHAR(40) DEFAULT 'Emprestado',
+  resolvido_por VARCHAR(255),
+  resolvido_em VARCHAR(30),
+  observacao_resolucao LONGTEXT,
+  INDEX idx_emprestimo_itens_emprestimo (emprestimo_id),
+  INDEX idx_emprestimo_itens_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS cotacoes_compra (
@@ -317,6 +449,30 @@ CREATE TABLE IF NOT EXISTS cotacoes_compra (
   criado_em VARCHAR(30),
   INDEX idx_cotacoes_pedido (pedido_compra_id),
   CONSTRAINT fk_cotacoes_pedido FOREIGN KEY (pedido_compra_id) REFERENCES pedidos_compra(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS garantias_clientes (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  numero VARCHAR(40) NOT NULL UNIQUE,
+  cliente_id INT NOT NULL,
+  cliente VARCHAR(255) NOT NULL,
+  cliente_documento VARCHAR(60),
+  faturamento_id INT,
+  data_emissao VARCHAR(30) NOT NULL,
+  origem VARCHAR(255),
+  itens LONGTEXT,
+  condicoes LONGTEXT,
+  historico LONGTEXT,
+  status VARCHAR(30) DEFAULT 'Emitida',
+  pdf_nome TEXT,
+  pdf_mime TEXT,
+  pdf LONGBLOB,
+  criado_por VARCHAR(120),
+  criado_em VARCHAR(30),
+  alterado_por VARCHAR(120),
+  alterado_em VARCHAR(30),
+  INDEX idx_garantia_cliente (cliente_id),
+  INDEX idx_garantia_faturamento (faturamento_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS faturamento (
@@ -335,6 +491,13 @@ CREATE TABLE IF NOT EXISTS faturamento (
   orc_ref VARCHAR(60),
   obs_interna TEXT,
   obs_nota TEXT,
+  modalidade_faturamento VARCHAR(30) DEFAULT 'Por item',
+  medicao_numero VARCHAR(80),
+  medicao_inicio VARCHAR(30),
+  medicao_fim VARCHAR(30),
+  medicao_percentual DECIMAL(10,4) DEFAULT 0,
+  medicao_referencia TEXT,
+  medicao_historico LONGTEXT,
   nota_fiscal TEXT,
   boleto TEXT,
   status VARCHAR(60) DEFAULT 'Aberto',
@@ -406,8 +569,11 @@ CREATE TABLE IF NOT EXISTS cobrancas_recorrentes (
   periodicidade VARCHAR(40),
   informacoes LONGTEXT,
   status VARCHAR(40) DEFAULT 'Ativa',
+  contrato_id INT,
+  origem VARCHAR(40) DEFAULT 'Manual',
   criado_por VARCHAR(120),
-  criado_em VARCHAR(30)
+  criado_em VARCHAR(30),
+  UNIQUE KEY uq_cobranca_contrato (contrato_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS cobrancas_renovacoes (
@@ -438,7 +604,11 @@ CREATE TABLE IF NOT EXISTS contas_pagar (
   conta_baixa TEXT, forma_baixa TEXT, observacao_baixa LONGTEXT, taxas_baixa DECIMAL(14,2) DEFAULT 0,
   juros_baixa DECIMAL(14,2) DEFAULT 0, multa_baixa DECIMAL(14,2) DEFAULT 0, desconto_baixa DECIMAL(14,2) DEFAULT 0,
   cancelado_por TEXT, motivo_cancelamento LONGTEXT, solicitante TEXT, aprovador TEXT,
-  status_aprovacao VARCHAR(60) DEFAULT 'Pendente', motivo_reprovacao LONGTEXT, data_aprovacao TEXT
+  status_aprovacao VARCHAR(60) DEFAULT 'Pendente', motivo_reprovacao LONGTEXT, data_aprovacao TEXT,
+  conciliado VARCHAR(10) DEFAULT 'Não', data_conciliacao VARCHAR(30), conciliado_por VARCHAR(120),
+  fatura_cartao VARCHAR(10) DEFAULT 'Não', cartao_credito VARCHAR(255), itens_fatura_cartao LONGTEXT,
+  conta_receber_origem_id INT,
+  UNIQUE KEY uq_pagar_origem_receber (conta_receber_origem_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS contas_receber (
@@ -464,7 +634,17 @@ CREATE TABLE IF NOT EXISTS contas_receber (
   custo_total DECIMAL(14,2) DEFAULT 0, lucro_estimado DECIMAL(14,2) DEFAULT 0,
   margem_lucro_percentual DECIMAL(10,4) DEFAULT 0,
   cobranca_recorrente_id INT, cobranca_competencia VARCHAR(30),
+  conciliado VARCHAR(10) DEFAULT 'Não', data_conciliacao VARCHAR(30), conciliado_por VARCHAR(120),
+  tem_terceiro VARCHAR(10) DEFAULT 'Não', terceiro_prestador VARCHAR(255), terceiro_documento VARCHAR(60),
+  terceiro_valor DECIMAL(14,2) DEFAULT 0, terceiro_historico LONGTEXT, terceiro_vencimento VARCHAR(30),
+  terceiro_conta_pagar_id INT,
   UNIQUE KEY uq_conta_receber_recorrencia (cobranca_recorrente_id, cobranca_competencia)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS financeiro_fatura_cartao_itens (
+  id INT AUTO_INCREMENT PRIMARY KEY, conta_pagar_id INT NOT NULL, descricao TEXT,
+  data_compra VARCHAR(30), categoria VARCHAR(120), valor DECIMAL(14,2) DEFAULT 0,
+  criado_por VARCHAR(120), criado_em VARCHAR(30), INDEX idx_fatura_cartao_conta (conta_pagar_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS financeiro_impostos_taxas (
@@ -477,7 +657,13 @@ CREATE TABLE IF NOT EXISTS contratos (
   parte_nome VARCHAR(255), nome_arquivo TEXT, mime_type VARCHAR(120), arquivo LONGBLOB,
   status VARCHAR(40) DEFAULT 'Ativo', valor VARCHAR(80), data_inicio VARCHAR(30),
   data_vencimento VARCHAR(30), observacoes LONGTEXT, criado_por VARCHAR(120), criado_em VARCHAR(30),
-  alterado_por VARCHAR(120), alterado_em VARCHAR(30), INDEX idx_contratos_parte (parte_tipo, parte_id)
+  alterado_por VARCHAR(120), alterado_em VARCHAR(30),
+  assinado VARCHAR(10) DEFAULT 'Não', data_assinatura VARCHAR(30),
+  gerar_recorrencia VARCHAR(10) DEFAULT 'Não', recorrencia_tipo VARCHAR(255),
+  recorrencia_periodicidade VARCHAR(40), recorrencia_primeiro_vencimento VARCHAR(30),
+  recorrencia_fim VARCHAR(30), recorrencia_valor DECIMAL(14,2) DEFAULT 0,
+  recorrencia_pagamento VARCHAR(120), cobranca_recorrente_id INT,
+  INDEX idx_contratos_parte (parte_tipo, parte_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS financeiro_recorrencias_v2 (
@@ -533,7 +719,12 @@ CREATE TABLE IF NOT EXISTS atendimentos_checklist (
   obs_desempenho TEXT,
   detalhes_realizado TEXT,
   senhas_alteradas TEXT,
-  historico LONGTEXT
+  historico LONGTEXT,
+  kanban_status VARCHAR(60) DEFAULT 'Recebido',
+  kanban_ordem INT DEFAULT 0,
+  kanban_alterado_por VARCHAR(255),
+  kanban_alterado_em VARCHAR(30),
+  kanban_arquivado TINYINT DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS atendimentos_intervencoes (
@@ -568,7 +759,30 @@ CREATE TABLE IF NOT EXISTS agenda_visitas (
   tipo_visita VARCHAR(120),
   descricao TEXT,
   status VARCHAR(60) DEFAULT 'Agendado',
-  criado_em VARCHAR(30)
+  criado_em VARCHAR(30),
+  recorrencia_id INT,
+  recorrencia_indice INT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS agenda_tipos_atendimento (
+  id INT AUTO_INCREMENT PRIMARY KEY, nome VARCHAR(120) NOT NULL UNIQUE,
+  ativo VARCHAR(10) DEFAULT 'Sim', criado_por VARCHAR(120), criado_em VARCHAR(30)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS agenda_recorrencias (
+  id INT AUTO_INCREMENT PRIMARY KEY, tecnico VARCHAR(255), cliente_id INT,
+  cliente_nome VARCHAR(255), data_inicio VARCHAR(30), hora_inicio VARCHAR(20),
+  hora_fim VARCHAR(20), tipo_atendimento VARCHAR(120), descricao LONGTEXT,
+  periodicidade VARCHAR(40), dia_semana INT, dia_mes INT, mes_anual INT,
+  dia_anual INT, modo_termino VARCHAR(40), quantidade INT, data_fim VARCHAR(30),
+  ativa VARCHAR(10) DEFAULT 'Sim', criado_por VARCHAR(120), criado_em VARCHAR(30)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS agenda_atividades (
+  id INT AUTO_INCREMENT PRIMARY KEY, atividade LONGTEXT NOT NULL, cliente_id INT,
+  cliente_nome VARCHAR(255), data_execucao VARCHAR(30), hora_execucao VARCHAR(20),
+  executor VARCHAR(255), status VARCHAR(40) DEFAULT 'Pendente', criado_por VARCHAR(120),
+  criado_em VARCHAR(30), alterado_por VARCHAR(120), alterado_em VARCHAR(30)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS infra_equipamentos (
@@ -640,7 +854,12 @@ CREATE TABLE IF NOT EXISTS chamados_cliente (
   resposta_cliente TEXT,
   criado_por VARCHAR(120),
   criado_em VARCHAR(30),
-  atualizado_em VARCHAR(30)
+  atualizado_em VARCHAR(30),
+  kanban_status VARCHAR(60) DEFAULT 'Recebido',
+  kanban_ordem INT DEFAULT 0,
+  kanban_alterado_por VARCHAR(255),
+  kanban_alterado_em VARCHAR(30),
+  kanban_arquivado TINYINT DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS chamados_mensagens (
@@ -741,7 +960,8 @@ CREATE TABLE IF NOT EXISTS equipamentos_os (
   etiqueta_codigo VARCHAR(80),
   kanban_alterado_por VARCHAR(255),
   kanban_alterado_em VARCHAR(30),
-  kanban_ordem INT DEFAULT 0
+  kanban_ordem INT DEFAULT 0,
+  kanban_arquivado TINYINT DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS funcionarios (

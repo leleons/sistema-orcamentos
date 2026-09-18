@@ -19,6 +19,10 @@ PERMISSOES_PORTAL_CLIENTE = frozenset(
     }
 )
 
+# Administradores comuns também precisam destas permissões nominais.
+# A conta principal Daniel.fabio, quando administradora, mantém acesso às senhas.
+PERMISSOES_EXPLICITAS = frozenset({"infra.senhas.view"})
+
 
 def carregar_submodulos(valor: Any) -> set[str]:
     if not valor:
@@ -45,6 +49,16 @@ def valor_usuario(usuario: Any, chave: str, padrao: Any = 0) -> Any:
         return padrao
 
 
+def usuario_eh_gerencial(usuario: Any) -> bool:
+    """Indica se o login pode consultar dados internos da própria Dsystem."""
+    if valor_usuario(usuario, "tipo_login", "") == "cliente":
+        return False
+    def ativo(chave: str) -> bool:
+        return str(valor_usuario(usuario, chave, 0)).strip().casefold() in {"1", "true", "sim"}
+
+    return ativo("is_admin") or ativo("modulo_gerencial")
+
+
 def permissoes_do_usuario(usuario: Any) -> set[str]:
     permissoes = carregar_submodulos(valor_usuario(usuario, "submodulos", "[]"))
     for acao, coluna in LEGACY_PERMISSOES.items():
@@ -56,6 +70,12 @@ def permissoes_do_usuario(usuario: Any) -> set[str]:
 def usuario_tem_permissao(acao: str, usuario: Any) -> bool:
     if valor_usuario(usuario, "tipo_login", "") == "cliente":
         return acao in PERMISSOES_PORTAL_CLIENTE
+    if acao in PERMISSOES_EXPLICITAS:
+        principal = str(valor_usuario(usuario, "username", "") or "").strip().casefold() == "daniel.fabio"
+        administrador = str(valor_usuario(usuario, "is_admin", 0)).strip().casefold() in {"1", "true"}
+        if acao == "infra.senhas.view" and principal and administrador:
+            return True
+        return acao in permissoes_do_usuario(usuario)
     if valor_usuario(usuario, "is_admin", 0):
         return True
     return acao in permissoes_do_usuario(usuario)

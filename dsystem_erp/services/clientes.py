@@ -2,7 +2,24 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+from dsystem_erp.services.permissions import usuario_eh_gerencial
+
+
+def filtrar_cadastros_dsystem(clientes, cnpj_dsystem: object, usuario: object):
+    """Oculta o cadastro interno da Dsystem de logins não gerenciais."""
+    registros = list(clientes or [])
+    if usuario_eh_gerencial(usuario):
+        return registros
+    documento_dsystem = re.sub(r"\D", "", str(cnpj_dsystem or ""))
+    if not documento_dsystem:
+        return registros
+    return [
+        cliente for cliente in registros
+        if re.sub(r"\D", "", str(cliente.get("cnpj") or "")) != documento_dsystem
+    ]
 
 
 def montar_endereco_cliente(cliente: dict[str, Any] | None) -> str:

@@ -11,9 +11,37 @@ from dsystem_erp.services.orcamentos import preparar_edicao_orcamento
 from dsystem_erp.ui_consulta import tabela_clicavel_id
 
 
+def deve_carregar_orcamento_da_grade(estado_sessao, orcamento_id):
+    """Permite trocar de orçamento quando o usuário está no histórico."""
+    if not orcamento_id:
+        return False
+    if not estado_sessao.get("orc_em_edicao"):
+        return True
+    return estado_sessao.get("orc_aba_ativa") == "Histórico de Orçamentos"
+
+
+def manter_orcamento_salvo_em_edicao(estado_sessao, orcamento):
+    """Atualiza a sessão após salvar sem deixar uma falsa tela de edição."""
+    carregado = dict(orcamento or {})
+    estado_sessao["orc_em_edicao"] = carregado
+    return carregado
+
+
+def abandonar_edicao_orcamento(estado_sessao):
+    """Descarta a edição local e impede a grade de reabrir a mesma linha."""
+    estado_sessao["orc_em_edicao"] = None
+    estado_sessao["orc_form_reset"] = estado_sessao.get("orc_form_reset", 0) + 1
+    estado_sessao["orc_grade_versao"] = estado_sessao.get("orc_grade_versao", 0) + 1
+    estado_sessao["orc_ignorar_grade_uma_vez"] = True
+    estado_sessao["orc_aba_destino"] = "Gerar/Editar Orçamento"
+
+
 def renderizar_gerador_orcamentos(ctx: dict) -> None:
     aplicar_contexto_pagina(ctx, globals())
     st.title("Gerador de Orçamentos")
+    mensagem_sucesso = st.session_state.pop("orc_mensagem_sucesso", None)
+    if mensagem_sucesso:
+        st.success(mensagem_sucesso)
 
     if 'orc_em_edicao' not in st.session_state:
         st.session_state['orc_em_edicao'] = None
@@ -33,6 +61,12 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
 
     def resetar_formulario_orcamento():
         st.session_state["orc_form_reset"] = st.session_state.get("orc_form_reset", 0) + 1
+
+    def manter_edicao_orcamento_ativa():
+        """Evita que alterações dos itens devolvam o usuário ao histórico."""
+        if st.session_state.get("orc_em_edicao"):
+            st.session_state["orc_aba_ativa"] = "Gerar/Editar Orçamento"
+            st.session_state["orc_aba_destino"] = "Gerar/Editar Orçamento"
 
     def carregar_orcamento_na_edicao(orcamento):
         carregado = preparar_edicao_orcamento(dict(orcamento))
@@ -54,8 +88,7 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                     "a validade será prorrogada por 10 dias e o status ficará Aberto."
                 )
             if st.button("Cancelar Edição e Limpar Tela", key="btn_canc_ed"):
-                st.session_state['orc_em_edicao'] = None
-                resetar_formulario_orcamento()
+                abandonar_edicao_orcamento(st.session_state)
                 st.rerun()
 
         try:
@@ -148,17 +181,23 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
         else:
             itens_carregados = []
 
-        ns = st.number_input("Quantidade de Itens Diferentes:", min_value=1, max_value=20, value=max(1, len(itens_carregados)), key=f"{prefixo_orc}_qtd_itens")
+        ns = st.number_input(
+            "Quantidade de Itens Diferentes:", min_value=1, max_value=20,
+            value=max(1, len(itens_carregados)), key=f"{prefixo_orc}_qtd_itens",
+            on_change=manter_edicao_orcamento_ativa,
+        )
         produtos_estoque_orc = repo_listar_estoque(conectar_banco)
         opcoes_produto_orc = ["-- Selecionar produto do estoque --"] + [
-            f"{p['id']} - {p.get('produto') or p.get('codigo_entrada')} — {normalizar_situacao_compra(p.get('situacao_nota'))} (Estoque: {p.get('quantidade') or 0})"
+            f"{p['id']} - {p.get('nome_generico') or p.get('modelo') or p.get('produto') or p.get('codigo_entrada')} — {normalizar_situacao_compra(p.get('situacao_nota'))} (Estoque: {p.get('quantidade') or 0})"
             for p in produtos_estoque_orc
         ]
         srvs = []
         vt = 0.0
         
         for i in range(ns):
-            cc1, cc2, cc3, cc4, cc5 = st.columns([4, 1.5, 2, 1, 1.8])
+            # A coluna de quantidade precisa comportar o campo e os botões
+            # de menos/mais mesmo com a fonte ampliada do sistema.
+            cc1, cc2, cc3, cc4, cc5 = st.columns([3.2, 1.4, 1.8, 1.8, 2.1])
             item_carregado = itens_carregados[i] if i < len(itens_carregados) and isinstance(itens_carregados[i], dict) else {}
             def_d = item_carregado.get('d') or item_carregado.get('desc') or ""
             def_tipo_item = item_carregado.get("tipo_item") or item_carregado.get("tipo") or item_carregado.get("tipo_nota") or "Serviço"
@@ -175,8 +214,17 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
             except Exception:
                 def_q = 1
 
-            d = cc1.text_input(f"Descrição do Item {i+1}:", value=def_d, key=f"{prefixo_orc}_oi_{i}")
-            tipo_item_orc = cc2.selectbox(f"Tipo {i+1}:", ["Serviço", "Produto"], index=["Serviço", "Produto"].index(def_tipo_item), key=f"{prefixo_orc}_tipo_item_{i}")
+            d = cc1.text_input(
+                f"Descrição do Item {i+1}:", value=def_d,
+                key=f"{prefixo_orc}_oi_{i}",
+                on_change=manter_edicao_orcamento_ativa,
+            )
+            tipo_item_orc = cc2.selectbox(
+                f"Tipo {i+1}:", ["Serviço", "Produto"],
+                index=["Serviço", "Produto"].index(def_tipo_item),
+                key=f"{prefixo_orc}_tipo_item_{i}",
+                on_change=manter_edicao_orcamento_ativa,
+            )
             produto_orc = None
             tipo_item_fiscal_orc = tipo_item_orc
             situacao_nota_orc = ""
@@ -184,23 +232,44 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
             if tipo_item_orc == "Produto":
                 produto_salvo_id = item_carregado.get("estoque_id")
                 indice_produto = next((idx for idx, opcao in enumerate(opcoes_produto_orc) if produto_salvo_id and opcao.startswith(f"{produto_salvo_id} - ")), 0)
-                produto_escolhido = st.selectbox(f"Produto do estoque {i+1}:", opcoes_produto_orc, index=indice_produto, key=f"{prefixo_orc}_produto_estoque_{i}")
+                produto_escolhido = st.selectbox(
+                    f"Produto do estoque {i+1}:", opcoes_produto_orc,
+                    index=indice_produto,
+                    key=f"{prefixo_orc}_produto_estoque_{i}",
+                    on_change=manter_edicao_orcamento_ativa,
+                )
                 if produto_escolhido != opcoes_produto_orc[0]:
                     produto_id = int(produto_escolhido.split(" - ", 1)[0])
                     produto_orc = next((p for p in produtos_estoque_orc if int(p["id"]) == produto_id), None)
                     if produto_orc:
                         situacao_nota_orc = normalizar_situacao_compra(produto_orc.get("situacao_nota"))
                         tipo_item_fiscal_orc = tipo_fiscal_produto_estoque(produto_orc)
-                        d = produto_orc.get("produto") or produto_orc.get("codigo_entrada") or d
+                        d = produto_orc.get("nome_generico") or produto_orc.get("modelo") or produto_orc.get("produto") or produto_orc.get("codigo_entrada") or d
                         if produto_orc.get("permitir_ajuste_preco"):
-                            ajuste_orc = st.number_input(f"Ajuste comercial do produto {i+1} (%):", min_value=-100.0, value=float(item_carregado.get("ajuste_preco_percentual") or 0), step=0.1, key=f"{prefixo_orc}_ajuste_produto_{i}")
+                            ajuste_orc = st.number_input(
+                                f"Ajuste comercial do produto {i+1} (%):",
+                                min_value=-100.0,
+                                value=float(item_carregado.get("ajuste_preco_percentual") or 0),
+                                step=0.1,
+                                key=f"{prefixo_orc}_ajuste_produto_{i}",
+                                on_change=manter_edicao_orcamento_ativa,
+                            )
                         def_v = float(preco_revenda_produto(produto_orc, ajuste_orc))
                         st.caption(f"Preço do estoque aplicado ao item {i+1}: {formatar_moeda_br(def_v)} — {situacao_nota_orc}")
                         if situacao_nota_orc == COMPRADO_SEM_NOTA:
                             st.warning(f"Item {i+1}: será lançado fiscalmente como Serviço e continuará vinculado à baixa do estoque.")
             chave_preco_orc = f"{prefixo_orc}_ov_{i}_{produto_orc.get('id') if produto_orc else 'manual'}_{ajuste_orc:.2f}"
-            v = cc3.number_input(f"Valor Unit. R$ {i+1}:", value=def_v, min_value=0.0, format="%.2f", key=chave_preco_orc, disabled=bool(produto_orc))
-            q = cc4.number_input(f"Qtd {i+1}:", value=def_q, min_value=1, step=1, key=f"{prefixo_orc}_oq_{i}")
+            v = cc3.number_input(
+                f"Valor Unit. R$ {i+1}:", value=def_v, min_value=0.0,
+                format="%.2f", key=chave_preco_orc,
+                disabled=bool(produto_orc),
+                on_change=manter_edicao_orcamento_ativa,
+            )
+            q = cc4.number_input(
+                f"Qtd {i+1}:", value=def_q, min_value=1, step=1,
+                key=f"{prefixo_orc}_oq_{i}",
+                on_change=manter_edicao_orcamento_ativa,
+            )
             total_item = total_item_orcamento(v, q)
             cc5.metric(f"Total item {i+1}", formatar_moeda_br(total_item))
             
@@ -214,31 +283,47 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
 
         st.metric("Total geral do orçamento", formatar_moeda_br(vt))
 
-        empesc = st.radio("Selecione a unidade para Preview:", ["Dsystem Tecnologia", "LC Printer", "GT Solutions"], horizontal=True, key=f"{prefixo_orc}_empresa_preview")
+        empesc = st.radio("Selecione a unidade do orçamento:", ["Dsystem Tecnologia", "LC Printer", "GT Solutions"], horizontal=True, key=f"{prefixo_orc}_empresa_preview")
         
-        cb1, cb2, cb3, cb4 = st.columns(4)
-        bp = cb1.button("Visualizar na Tela", width="stretch")
-        
-        label_btn_salvar = "Atualizar e Gerar PDF" if edicao else "Salvar e Gerar PDF Múltiplo"
-        bpa = cb2.button(label_btn_salvar, type="primary", width="stretch")
-        bimp = cb3.button("Imprimir Orçamento", width="stretch", disabled=not bool(edicao))
-        limpar_tela = cb4.button("Limpar tela", width="stretch", key=f"limpar_{prefixo_orc}")
-        if limpar_tela:
-            st.session_state['orc_em_edicao'] = None
-            resetar_formulario_orcamento()
-            st.rerun()
+        cb1, cb2, cb3 = st.columns(3)
+        salvar_limpar = cb1.button(
+            "Salvar e limpar tela",
+            type="primary",
+            width="stretch",
+            key=f"salvar_limpar_{prefixo_orc}",
+        )
+        bpa = cb2.button(
+            "Atualizar e Gerar PDF",
+            width="stretch",
+            on_click=manter_edicao_orcamento_ativa if edicao else None,
+        )
+        bimp = cb3.button(
+            "Imprimir Orçamento",
+            width="stretch",
+            disabled=not bool(edicao),
+            on_click=manter_edicao_orcamento_ativa if edicao else None,
+        )
 
         if vt > 0 and nm:
             st.markdown("#### Imprimir / salvar PDF individual")
             st.caption("Abre a impressão com o mesmo layout antigo. Na janela de impressão, escolha 'Salvar como PDF'.")
             pds1, pds2, pds3 = st.columns(3)
-            bpdf_ds = pds1.button("PDF Dsystem", width="stretch", key=f"print_pdf_ds_{prefixo_orc}")
-            bpdf_nc = pds2.button("PDF LC Printer", width="stretch", key=f"print_pdf_lc_{prefixo_orc}")
-            bpdf_gt = pds3.button("PDF GT Solutions", width="stretch", key=f"print_pdf_gt_{prefixo_orc}")
+            bpdf_ds = pds1.button(
+                "PDF Dsystem", width="stretch", key=f"print_pdf_ds_{prefixo_orc}",
+                on_click=manter_edicao_orcamento_ativa if edicao else None,
+            )
+            bpdf_nc = pds2.button(
+                "PDF LC Printer", width="stretch", key=f"print_pdf_lc_{prefixo_orc}",
+                on_click=manter_edicao_orcamento_ativa if edicao else None,
+            )
+            bpdf_gt = pds3.button(
+                "PDF GT Solutions", width="stretch", key=f"print_pdf_gt_{prefixo_orc}",
+                on_click=manter_edicao_orcamento_ativa if edicao else None,
+            )
         else:
             bpdf_ds = bpdf_nc = bpdf_gt = False
 
-        if bp or bpa or bimp or bpdf_ds or bpdf_nc or bpdf_gt:
+        if salvar_limpar or bpa or bimp or bpdf_ds or bpdf_nc or bpdf_gt:
             if vt > 0 and nm:
                 dtc = (
                     data_para_br(edicao.get("data_orc"))
@@ -248,7 +333,7 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                 cfmt = f" - {comp}" if comp else ""
                 cepfmt = f" - CEP: {cep}" if cep else ""
                 
-                if bpa:
+                if salvar_limpar or bpa:
                     salvar_cliente_simples(nm, cnj, end, t, cep)
                     import json as _json
                     json_itens = _json.dumps(srvs, ensure_ascii=False)
@@ -276,9 +361,17 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                     )
                     salvar_pdfs_orcamento(c, orc_id_salvo, dados_pdf_salvar)
                     conn.commit()
+                    c.execute("SELECT * FROM orcamentos WHERE orc_id=?", (orc_id_salvo,))
+                    orcamento_atualizado = c.fetchone()
                     conn.close()
-                    st.session_state['orc_em_edicao'] = None
-                    resetar_formulario_orcamento()
+                    if salvar_limpar:
+                        st.session_state["orc_mensagem_sucesso"] = (
+                            "Orçamento atualizado e tela limpa com sucesso!"
+                            if edicao else "Orçamento salvo e tela limpa com sucesso!"
+                        )
+                        abandonar_edicao_orcamento(st.session_state)
+                        st.rerun()
+                    manter_orcamento_salvo_em_edicao(st.session_state, orcamento_atualizado)
 
                 lds = "".join([f"<tr><td style='padding:6px; border-bottom:1px solid #ddd;'>{s['d']}</td><td align='center' style='padding:6px; border-bottom:1px solid #ddd;'>{s['q']}</td><td align='right' style='padding:6px; border-bottom:1px solid #ddd;'>{formata_moeda(s['v']).replace('R$ ','')}</td><td align='right' style='padding:6px; border-bottom:1px solid #ddd;'>0,00</td><td align='right' style='padding:6px; border-bottom:1px solid #ddd;'>{formata_moeda(s['t']).replace('R$ ','')}</td></tr>" for s in srvs])
                 
@@ -475,14 +568,10 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                 hnc = limpar_html_impressao(hnc)
                 hgt = limpar_html_impressao(hgt)
 
-                if bp:
-                    if "Dsystem" in empesc: st.markdown(f'<div id="doc-impressao">{hds}</div>', unsafe_allow_html=True)
-                    elif "LC" in empesc: st.markdown(f'<div id="doc-impressao">{hnc}</div>', unsafe_allow_html=True)
-                    else: st.markdown(f'<div id="doc-impressao">{hgt}</div>', unsafe_allow_html=True)
-                
                 if bpa:
-                    st.markdown(f'<div id="doc-impressao">{hds}<div class="quebra-pagina"></div>{hnc}<div class="quebra-pagina"></div>{hgt}</div>', unsafe_allow_html=True)
-                    imprimir_html(f'{hds}<div class="quebra-pagina"></div>{hnc}<div class="quebra-pagina"></div>{hgt}', "Impressao Orcamento")
+                    html_completo = f'{hds}<div class="quebra-pagina"></div>{hnc}<div class="quebra-pagina"></div>{hgt}'
+                    st.markdown(f'<div id="doc-impressao">{html_completo}</div>', unsafe_allow_html=True)
+                    imprimir_html(html_completo, "Impressao Orcamento")
 
                 if bimp:
                     html_imp = hds if "Dsystem" in empesc else hnc if "LC" in empesc else hgt
@@ -592,7 +681,11 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                     "Clique no número, no cliente ou em qualquer outra informação do orçamento "
                     "para abrir diretamente na edição."
                 )
-                if id_orcamento_selecionado:
+                ignorar_grade_orcamento = st.session_state.pop("orc_ignorar_grade_uma_vez", False)
+                if (
+                    not ignorar_grade_orcamento
+                    and deve_carregar_orcamento_da_grade(st.session_state, id_orcamento_selecionado)
+                ):
                     if tem_permissao("orcamentos.edit"):
                         orc_selecionado = next(
                             (dict(o) for o in df_orc if int(o.get("orc_id") or 0) == int(id_orcamento_selecionado)),
@@ -633,16 +726,79 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                 "Enviar por e-mail ou WhatsApp",
                 "Lançar orçamento aprovado no faturamento",
             ]
-            if tem_permissao("orcamentos.delete"):
-                opcoes_acao_orc.append("Excluir Orçamento")
+            if (
+                st.session_state.get("is_admin", 0)
+                or tem_permissao("orcamentos.edit")
+                or tem_permissao("orcamentos.delete")
+            ):
+                opcoes_acao_orc.append("Cancelar orçamento")
             act_orc = st.radio("Ação (Orçamentos):", opcoes_acao_orc, horizontal=True)
             
-            if act_orc == "Excluir Orçamento":
-                idd = st.number_input("ID do Orçamento para excluir", min_value=1, step=1, key="del_orc_id")
-                if st.button("Excluir Orçamento", key="btn_del_orc"): 
-                    deletar_registro('orcamentos', 'orc_id', idd)
-                    st.success("Excluído com sucesso.")
-                    st.rerun()
+            if act_orc == "Cancelar orçamento":
+                orcamentos_cancelaveis = [
+                    dict(o) for o in df_orc
+                    if (o.get("status") or "Aberto") != "Cancelado"
+                ]
+                if orcamentos_cancelaveis:
+                    ids_cancelaveis_orc = [int(o.get("orc_id")) for o in orcamentos_cancelaveis]
+                    id_cancelar_orc = st.selectbox(
+                        "Orçamento a cancelar:",
+                        ids_cancelaveis_orc,
+                        format_func=lambda item_id: next(
+                            (
+                                f"#{o.get('numero') or item_id} — {o.get('cliente') or 'Cliente não informado'}"
+                                for o in orcamentos_cancelaveis
+                                if int(o.get("orc_id") or 0) == int(item_id)
+                            ),
+                            f"#{item_id}",
+                        ),
+                        key="cancelar_orc_id",
+                    )
+                    orc_cancelar = next(
+                        o for o in orcamentos_cancelaveis
+                        if int(o.get("orc_id") or 0) == int(id_cancelar_orc)
+                    )
+                    st.warning(
+                        "O orçamento não será apagado. Ele continuará no histórico com status Cancelado, "
+                        "junto do usuário e da data da alteração."
+                    )
+                    if orc_cancelar.get("faturamento_id"):
+                        st.info(
+                            f"Este orçamento está ligado ao faturamento #{orc_cancelar.get('faturamento_id')}. "
+                            "O faturamento não será cancelado automaticamente."
+                        )
+                    confirmar_cancelamento_orc = st.checkbox(
+                        "Confirmo que desejo cancelar este orçamento.",
+                        key=f"confirmar_cancelamento_orc_{id_cancelar_orc}",
+                    )
+                    if st.button(
+                        "Cancelar orçamento",
+                        key="btn_cancelar_orc",
+                        disabled=not confirmar_cancelamento_orc,
+                    ):
+                        conn_cancelar_orc = conectar_banco()
+                        cursor_cancelar_orc = conn_cancelar_orc.cursor()
+                        cursor_cancelar_orc.execute(
+                            """UPDATE orcamentos
+                               SET status=?, alterado_em=?, alterado_por=?
+                               WHERE orc_id=?""",
+                            (
+                                "Cancelado",
+                                agora_br(),
+                                st.session_state.get("username", ""),
+                                id_cancelar_orc,
+                            ),
+                        )
+                        conn_cancelar_orc.commit()
+                        conn_cancelar_orc.close()
+                        edicao_atual = st.session_state.get("orc_em_edicao") or {}
+                        if int(edicao_atual.get("orc_id") or 0) == int(id_cancelar_orc):
+                            st.session_state["orc_em_edicao"] = None
+                            resetar_formulario_orcamento()
+                        st.toast("Orçamento cancelado e preservado no histórico.")
+                        st.rerun()
+                else:
+                    st.caption("Não há orçamentos disponíveis para cancelamento.")
             elif act_orc == "Renegociar orçamento vencido":
                 id_reneg = st.number_input("ID do orçamento para renegociar:", min_value=1, step=1, key="reneg_orc_id")
                 orc_reneg = next((dict(o) for o in df_orc if int(o['orc_id']) == int(id_reneg)), None)

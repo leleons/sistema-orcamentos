@@ -2,9 +2,11 @@ import unittest
 
 from dsystem_erp.services.recepcao_kanban import (
     alteracoes_do_quadro,
+    alteracoes_do_quadro_registros,
     dados_qr_equipamento,
     gerar_etiqueta_equipamento,
     montar_quadro_equipamentos,
+    montar_quadro_registros,
     proximo_status,
 )
 
@@ -48,3 +50,29 @@ class RecepcaoKanbanTests(unittest.TestCase):
         alteracoes = alteracoes_do_quadro(quadro, equipamentos, mapa)
 
         self.assertFalse(any(item["id"] == 0 for item in alteracoes))
+
+    def test_quadro_unifica_os_atendimento_e_chamado(self):
+        registros = [
+            {"_chave": "os:10", "_origem": "O.S.", "_origem_codigo": "os", "_registro_id": 10,
+             "_cliente": "ACME", "_titulo": "Notebook", "kanban_status": "Recebido", "kanban_ordem": 0},
+            {"_chave": "atendimento:20", "_origem": "Atendimento", "_origem_codigo": "atendimento",
+             "_registro_id": 20, "_cliente": "Beta", "_titulo": "Preventiva",
+             "kanban_status": "Triagem / Diagnóstico", "kanban_ordem": 0},
+            {"_chave": "chamado:30", "_origem": "Chamado", "_origem_codigo": "chamado",
+             "_registro_id": 30, "_cliente": "Gama", "_titulo": "Sem internet",
+             "kanban_status": "Aguardando peça", "kanban_ordem": 0},
+        ]
+        quadro, mapa = montar_quadro_registros(registros)
+        self.assertEqual(len(mapa), 3)
+        textos = "\n".join(texto for coluna in quadro for texto in coluna["items"])
+        self.assertIn("O.S. #00010", textos)
+        self.assertIn("Atendimento #00020", textos)
+        self.assertIn("Chamado #00030", textos)
+
+        origem = next(coluna for coluna in quadro if coluna["header"] == "Recebido")
+        destino = next(coluna for coluna in quadro if coluna["header"] == "Em execução")
+        destino["items"].append(origem["items"].pop())
+        alteracoes = alteracoes_do_quadro_registros(quadro, registros, mapa)
+        movimento = next(item for item in alteracoes if item["chave"] == "os:10")
+        self.assertEqual(movimento["origem"], "os")
+        self.assertEqual(movimento["status"], "Em execução")

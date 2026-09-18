@@ -21,10 +21,25 @@ from dsystem_erp.services.nfse_nacional import (
     endpoint_nacional,
     gerar_xml_dps_nacional,
     montar_id_dps,
+    normalizar_emissao_dps,
 )
 
 
 class NfseNacionalTest(unittest.TestCase):
+    def test_emissao_utc_convertida_sem_alterar_instante(self):
+        instante = datetime(2026, 9, 14, 21, 5, 56, tzinfo=timezone.utc)
+        local = normalizar_emissao_dps(instante)
+        self.assertEqual(local.isoformat(), "2026-09-14T18:05:56-03:00")
+        self.assertEqual(local, instante)
+        self.assertEqual(normalizar_emissao_dps(instante.isoformat()), local)
+
+    def test_emissao_sem_fuso_rejeitada(self):
+        with self.assertRaises(ValueError):
+            normalizar_emissao_dps("2026-09-14T21:05:56")
+
+    def test_emissao_padrao_fuso_brasil(self):
+        self.assertEqual(normalizar_emissao_dps().utcoffset(), timedelta(hours=-3))
+
     def setUp(self):
         self.faturamento = {
             "id": 123,
@@ -46,6 +61,7 @@ class NfseNacionalTest(unittest.TestCase):
             "descricao": "Suporte tecnico em informatica",
             "valor": 150.5,
             "opcao_simples_nacional": "1",
+            "totais_tributos": {"federal": 10.0, "estadual": 0, "municipal": 3.0},
             "regime_especial_tributacao": "0",
         }
 
@@ -53,6 +69,14 @@ class NfseNacionalTest(unittest.TestCase):
         identificador = montar_id_dps("3106200", "23524449000154", 1, 123)
         self.assertEqual(identificador, "DPS310620022352444900015400001000000000000123")
         self.assertEqual(len(identificador), 45)
+
+    def test_omitir_im_nao_altera_emitente(self):
+        self.dados["inscricao_municipal"] = ""
+        root = etree.fromstring(gerar_xml_dps_nacional(self.faturamento, self.dados))
+        ns = {"n": NS_NFSE}
+        self.assertIsNone(root.find("n:infDPS/n:prest/n:IM", ns))
+        self.assertEqual(root.findtext("n:infDPS/n:prest/n:CNPJ", namespaces=ns), "23524449000154")
+        self.assertEqual(root.findtext("n:infDPS/n:cLocEmi", namespaces=ns), "3106200")
 
     def test_gera_dps_101_sem_prefixo_de_namespace(self):
         xml = gerar_xml_dps_nacional(self.faturamento, self.dados)
@@ -69,11 +93,63 @@ class NfseNacionalTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Simples Nacional"):
             gerar_xml_dps_nacional(self.faturamento, self.dados)
 
+    def test_nao_optante_envia_valores_sem_indicador_simples(self):
+        xml = gerar_xml_dps_nacional(self.faturamento, self.dados)
+        self.assertNotIn(b"indTotTrib", xml)
+        self.assertNotIn(b"pTotTribSN", xml)
+        self.assertIn(b"<vTotTrib><vTotTribFed>10.00</vTotTribFed><vTotTribEst>0.00</vTotTribEst><vTotTribMun>3.00</vTotTribMun></vTotTrib>", xml)
+
+    def test_nao_optante_nao_presume_totais(self):
+        self.dados.pop("totais_tributos")
+        with self.assertRaisesRegex(ValueError, "valores aproximados"):
+            gerar_xml_dps_nacional(self.faturamento, self.dados)
+
+    def test_totais_invalidos_bloqueados(self):
+        for valor in (None, "", -1, float("nan"), float("inf")):
+            with self.subTest(valor=valor):
+                self.dados["totais_tributos"]["federal"] = valor
+                with self.assertRaisesRegex(ValueError, "tributo federal"):
+                    gerar_xml_dps_nacional(self.faturamento, self.dados)
+
+    def test_mei_preserva_indicador_sem_valores(self):
+        self.dados["opcao_simples_nacional"] = "2"
+        self.dados.pop("totais_tributos")
+        xml = gerar_xml_dps_nacional(self.faturamento, self.dados)
+        self.assertIn(b"<indTotTrib>0</indTotTrib>", xml)
+        self.assertNotIn(b"vTotTribFed", xml)
+
     def test_gzip_base64_faz_roundtrip(self):
         xml = gerar_xml_dps_nacional(self.faturamento, self.dados)
         compactado = compactar_xml_base64(xml)
         self.assertEqual(descompactar_xml_base64(compactado), xml)
         self.assertEqual(gzip.decompress(base64.b64decode(compactado)), xml)
+
+    def test_me_epp_exige_apuracao_e_inclui_escolha(self):
+        self.dados["opcao_simples_nacional"] = "3"
+        with self.assertRaisesRegex(ValueError, "apuracao"):
+            gerar_xml_dps_nacional(self.faturamento, self.dados)
+        self.dados["regime_apuracao_simples"] = "2"
+        self.dados["percentual_tributos_simples"] = "6.25"
+        xml = gerar_xml_dps_nacional(self.faturamento, self.dados)
+        self.assertIn(b"<regApTribSN>2</regApTribSN>", xml)
+        self.assertIn(b"<pTotTribSN>6.25</pTotTribSN>", xml)
+        self.assertNotIn(b"indTotTrib", xml)
+
+    def test_me_epp_exige_percentual_do_simples_valido(self):
+        self.dados["opcao_simples_nacional"] = "3"
+        self.dados["regime_apuracao_simples"] = "1"
+        for valor in (None, "", -1, 101, float("nan")):
+            with self.subTest(valor=valor):
+                self.dados["percentual_tributos_simples"] = valor
+                with self.assertRaisesRegex(ValueError, "percentual aproximado"):
+                    gerar_xml_dps_nacional(self.faturamento, self.dados)
+
+    def test_codigo_municipal_nao_e_truncado(self):
+        self.dados["codigo_tributacao_municipal"] = "010701"
+        with self.assertRaisesRegex(ValueError, "3 digitos"):
+            gerar_xml_dps_nacional(self.faturamento, self.dados)
+        self.dados["codigo_tributacao_municipal"] = "001"
+        self.assertIn(b"<cTribMun>001</cTribMun>", gerar_xml_dps_nacional(self.faturamento, self.dados))
 
     def test_endpoints_oficiais_por_ambiente(self):
         self.assertIn("producaorestrita", endpoint_nacional("homologacao"))

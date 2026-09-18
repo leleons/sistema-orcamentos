@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.services.audit_log import resumir_detalhes_log
+from dsystem_erp.ui_consulta import tabela_clicavel_id
 
 
 def renderizar_log_sistema(ctx) -> None:
@@ -113,7 +114,11 @@ def renderizar_log_sistema(ctx) -> None:
     met3.metric("Exclusões", contagem_acoes.get("Excluir", 0))
     modulo_top = max(contagem_tabelas.items(), key=lambda item: item[1])[0]
     met4.metric("Módulo mais ativo", modulo_top)
-    st.dataframe(tabela_logs, width="stretch", hide_index=True)
+    id_log_clicado = tabela_clicavel_id(
+        st, tabela_logs, "logs_sistema_grade", campo_id="ID"
+    ) if tabela_logs else None
+    if id_log_clicado:
+        st.session_state["log_id_detalhe_ativo"] = int(id_log_clicado)
 
     exp1, exp2, exp3 = st.columns([1, 1, 1.2])
     exp1.download_button(
@@ -150,8 +155,8 @@ def renderizar_log_sistema(ctx) -> None:
             st.success("Log filtrado limpo.")
             st.rerun()
 
-    with st.expander("Ver detalhes técnicos do log", expanded=False):
-        id_log = st.number_input("ID do log:", min_value=1, step=1, key="log_id_detalhe")
+    id_log = int(st.session_state.get("log_id_detalhe_ativo") or 0)
+    with st.expander("Ver detalhes técnicos do log", expanded=bool(id_log)):
         log_sel = next(
             (dict(item) for item in logs if int(item.get("id") or 0) == int(id_log)), None
         )
@@ -166,7 +171,7 @@ def renderizar_log_sistema(ctx) -> None:
             }
             st.json(log_sel)
         else:
-            st.caption("Informe um ID visível no resultado carregado.")
+            st.caption("Clique em qualquer informação do log para abrir os detalhes.")
 
     renderizar_logs_tecnicos(ctx, contexto_aplicado=True)
 

@@ -20,16 +20,17 @@ ARVORE_PERMISSOES = [
             {"titulo": "Incluir Contas a Receber", "acoes": [("financeiro.receber", "Acessar"), ("financeiro.receber.edit", "Editar/baixar"), ("financeiro.receber.delete", "Excluir")]},
             {"titulo": "Lançamentos Financeiros", "acoes": [("financeiro.lancamentos", "Acessar"), ("financeiro.lancamentos.edit", "Editar/baixar"), ("financeiro.lancamentos.delete", "Excluir")]},
             {"titulo": "Cadastros Financeiros", "acoes": [("financeiro.cadastros", "Acessar"), ("financeiro.cadastros.edit", "Editar"), ("financeiro.cadastros.delete", "Excluir")]},
+            {"titulo": "Dashboard", "acoes": [("dashboard.view", "Acessar indicadores permitidos")]},
         ],
     },
     {
         "titulo": "Faturamento",
         "modulo": "faturamento",
         "submodulos": [
-            {"titulo": "A faturar", "acoes": [("faturamento.view", "Acessar"), ("faturamento.edit", "Editar"), ("faturamento.delete", "Excluir")], "legacy": {"faturamento.view": "perm_faturamento"}},
+            {"titulo": "A faturar", "acoes": [("faturamento.view", "Acessar"), ("faturamento.edit", "Editar/cancelar")], "legacy": {"faturamento.view": "perm_faturamento"}},
             {"titulo": "Faturado", "acoes": [("faturamento.faturado", "Acessar"), ("faturamento.faturado.edit", "Emitir/atualizar nota")]},
             {"titulo": "Cobranças Recorrentes", "acoes": [("faturamento.cobrancas", "Acessar"), ("faturamento.cobrancas.edit", "Editar"), ("faturamento.cobrancas.delete", "Excluir")]},
-            {"titulo": "Gerador de Orçamentos", "acoes": [("orcamentos.view", "Acessar"), ("orcamentos.edit", "Editar/aprovar"), ("orcamentos.delete", "Excluir")], "legacy": {"orcamentos.view": "perm_orcamentos", "orcamentos.edit": "perm_orcamentos", "orcamentos.delete": "perm_del_orc"}},
+            {"titulo": "Gerador de Orçamentos", "acoes": [("orcamentos.view", "Acessar"), ("orcamentos.edit", "Editar/aprovar/cancelar")], "legacy": {"orcamentos.view": "perm_orcamentos", "orcamentos.edit": "perm_orcamentos", "orcamentos.delete": "perm_del_orc"}},
         ],
     },
     {
@@ -52,7 +53,9 @@ ARVORE_PERMISSOES = [
     {
         "titulo": "ServiceDesk",
         "modulo": "servicedesk",
-        "submodulos": [],
+        "submodulos": [
+            {"titulo": "Utilização de Uber", "acoes": [("uber.view", "Consultar corridas"), ("uber.edit", "Cadastrar/editar corridas")]},
+        ],
     },
     {
         "titulo": "Infraestrutura TI",
@@ -60,6 +63,7 @@ ARVORE_PERMISSOES = [
         "submodulos": [
             {"titulo": "Acesso ao módulo", "acoes": [("infra.view", "Acessar"), ("infra.edit", "Editar fichas"), ("infra.delete", "Excluir fichas")], "legacy": {"infra.view": "perm_infra", "infra.edit": "perm_edit_infra", "infra.delete": "perm_del_infra"}},
             {"titulo": "Sistemas", "acoes": [("infra.sistemas", "Acessar aba")]},
+            {"titulo": "Segurança das senhas", "acoes": [("infra.senhas.view", "Visualizar senhas salvas")]},
             {"titulo": "Rede", "acoes": [("infra.rede", "Acessar aba")]},
             {"titulo": "DVR", "acoes": [("infra.dvr", "Acessar aba")]},
             {"titulo": "Câmeras", "acoes": [("infra.cameras", "Acessar aba")]},
@@ -81,6 +85,7 @@ ARVORE_PERMISSOES = [
         "modulo": "softwares",
         "submodulos": [
             {"titulo": "Pasta Dsystem", "acoes": [("softwares.dsystem", "Acessar arquivos padrão")]},
+            {"titulo": "Base de Pesquisa", "acoes": [("softwares.pesquisa", "Consultar e editar conhecimento")]},
         ],
     },
     {
@@ -140,6 +145,7 @@ MODULOS_NAVEGACAO = [
             {"titulo": "Incluir Contas a Receber", "pagina": "Contas a Receber", "acoes": ["financeiro.receber"], "botao": "Incluir Contas a Receber"},
             {"titulo": "Lançamentos Financeiros", "pagina": "Lançamentos Financeiros", "acoes": ["financeiro.lancamentos"], "botao": "Acessar Lançamentos"},
             {"titulo": "Cadastros Financeiros", "pagina": "Cadastros Financeiros", "acoes": ["financeiro.cadastros"], "botao": "Acessar Cadastros"},
+            {"titulo": "Dashboard", "pagina": "Dashboard", "acoes": ["dashboard.view"], "botao": "Abrir Dashboard"},
         ],
     },
     {
@@ -167,6 +173,7 @@ MODULOS_NAVEGACAO = [
         "submodulos": [
             {"titulo": "Ordem de Serviços", "pagina": "Ordem de Serviço (OS)", "acoes": ["os.view"], "botao": "Acessar O.S."},
             {"titulo": "Recepção e Kanban", "pagina": "Recepção e Kanban", "acoes": ["recepcao.view"], "botao": "Abrir Kanban"},
+            {"titulo": "Utilização de Uber", "pagina": "Utilização de Uber", "acoes": ["uber.view"], "botao": "Consultar corridas"},
             {"titulo": "Atendimentos e Checklists", "pagina": "Atendimentos e Checklists", "acoes": ["atendimentos.view"], "botao": "Acessar Atendimentos"},
             {"titulo": "Infraestrutura TI", "pagina": "Infraestrutura TI", "acoes": ["infra.view"], "prefixo": "infra", "botao": "Acessar Infra/TI"},
             {"titulo": "Gestão de Chamados", "pagina": "Portal do Cliente", "acoes": ["cliente.portal"], "permite_chamados_atribuidos": True, "botao": "Acessar Chamados"},
@@ -185,6 +192,7 @@ MODULOS_NAVEGACAO = [
         "titulo": "Acesso Softwares",
         "submodulos": [
             {"titulo": "Pasta Dsystem", "pagina": "Acesso Softwares", "acoes": ["softwares.dsystem"], "botao": "Acessar Softwares"},
+            {"titulo": "Base de Pesquisa", "pagina": "Base de Pesquisa", "acoes": ["softwares.pesquisa"], "botao": "Abrir Base de Pesquisa"},
         ],
     },
 ]

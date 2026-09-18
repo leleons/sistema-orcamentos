@@ -78,6 +78,7 @@ from dsystem_erp.services.security import (
     verificar_totp,
 )
 from dsystem_erp.services.permissions import (
+    PERMISSOES_EXPLICITAS,
     carregar_submodulos,
     flags_legadas,
     permissoes_do_usuario,
@@ -99,9 +100,10 @@ from dsystem_erp.services.orcamentos import aplicar_encargos_renegociacao, data_
 from dsystem_erp.services.contas_receber import IMPOSTOS_PADRAO, calcular_impostos, calcular_margem_lucro, gerar_parcelas
 from dsystem_erp.services.faturamento_parcelas import gerar_parcelas_faturamento
 from dsystem_erp.services.precificacao_estoque import decimal_valor
+from dsystem_erp.services.estoque_notas import registrar_movimentacao
 from dsystem_erp.services.cobrancas_recorrentes import sincronizar_lancamentos_recorrentes
 from dsystem_erp.ui import injetar_css_base
-from dsystem_erp.ui_consulta import tabela_selecionavel_id
+from dsystem_erp.ui_consulta import tabela_clicavel_id, tabela_selecionavel_id
 try:
     from dsystem_erp.ui import configurar_campos_data_br
 except ImportError:
@@ -128,13 +130,15 @@ except ImportError:
         except Exception:
             pass
         st_module._dsystem_data_br_configurada = True
-from dsystem_erp.services.clientes import dados_cliente_padrao, montar_endereco_cliente
+from dsystem_erp.services.clientes import dados_cliente_padrao, filtrar_cadastros_dsystem, montar_endereco_cliente
 from dsystem_erp.services.faturamento import itens_faturamento_lista, resumo_itens_faturamento
 from dsystem_erp.pages.system_tools import renderizar_backups_sistema as page_renderizar_backups_sistema
 from dsystem_erp.pages.system_tools import renderizar_diagnostico_sistema as page_renderizar_diagnostico_sistema
 from dsystem_erp.pages.gerador_orcamentos import renderizar_gerador_orcamentos as page_renderizar_gerador_orcamentos
 from dsystem_erp.pages.clientes import renderizar_cadastro_cliente_fornecedor as page_renderizar_cadastro_cliente_fornecedor
 from dsystem_erp.pages.infraestrutura import renderizar_infraestrutura_ti as page_renderizar_infraestrutura_ti
+from dsystem_erp.pages.dashboard import renderizar_dashboard as page_renderizar_dashboard
+from dsystem_erp.pages.uber import renderizar_uber as page_renderizar_uber
 from dsystem_erp.pages.faturamento import renderizar_a_faturar as page_renderizar_a_faturar
 from dsystem_erp.pages.faturamento import renderizar_faturado as page_renderizar_faturado
 from dsystem_erp.pages.atendimentos import renderizar_atendimentos_checklists as page_renderizar_atendimentos_checklists
@@ -192,9 +196,30 @@ from dsystem_erp.repositories.faturamento import (
     listar_faturamentos_para_nf as repo_listar_faturamentos_para_nf,
 )
 from dsystem_erp.repositories.estoque import (
+    listar_alertas_emprestimos_atrasados as repo_listar_alertas_emprestimos_atrasados,
     listar_alertas_estoque_minimo as repo_listar_alertas_estoque_minimo,
     listar_estoque as repo_listar_estoque,
 )
+try:
+    from dsystem_erp.services.estoque_importacao import montar_codigo_localizacao
+except ImportError:
+    # Durante o hot reload, o Streamlit pode manter em memória uma versão
+    # anterior do módulo auxiliar. Este fallback mantém a aplicação disponível
+    # até o próximo reinício completo do processo.
+    def montar_codigo_localizacao(fileira1, fileira2, identificacao):
+        def codigo_fileira(valor, prefixo):
+            texto = str(valor or "").strip()
+            encontrado = re.match(rf"^{re.escape(prefixo)}\s*[-_.|/]?\s*(\d{{2}})(?:\D|$)", texto)
+            if encontrado:
+                return encontrado.group(1)
+            if re.fullmatch(r"\d{1,2}", texto):
+                return texto.zfill(2)
+            return ""
+
+        estado = codigo_fileira(fileira1, "1")
+        area = codigo_fileira(fileira2, "2")
+        item = str(identificacao or "").strip().replace("|", ".").strip(". ")
+        return ".".join((estado, area, item)) if estado and area and item else ""
 from dsystem_erp.repositories.financeiro import listar_recorrencias as repo_listar_recorrencias
 from modules.registry import PAGINA_ESTOQUE, PAGINA_FATURAMENTO, PAGINA_INFRAESTRUTURA
 
@@ -278,7 +303,10 @@ def editor_permissoes(prefixo, usuario=None):
     permissoes_atuais = permissoes_do_usuario(usuario or {})
     selecionadas = set()
     for modulo in ARVORE_PERMISSOES:
-        acoes_modulo = [acao for sub in modulo["submodulos"] for acao, _ in sub["acoes"]]
+        acoes_modulo = [
+            acao for sub in modulo["submodulos"] for acao, _ in sub["acoes"]
+            if acao not in PERMISSOES_EXPLICITAS
+        ]
         modulo_completo = all(acao in permissoes_atuais for acao in acoes_modulo)
         liberar_modulo = st.checkbox(
             f"{modulo['titulo']}",
@@ -293,14 +321,15 @@ def editor_permissoes(prefixo, usuario=None):
                 st.markdown(f"**{submodulo['titulo']}**")
                 cols = st.columns(min(len(submodulo["acoes"]), 4) or 1)
                 for idx, (acao, rotulo) in enumerate(submodulo["acoes"]):
-                    valor = liberar_modulo or acao in permissoes_atuais
+                    herdada_do_modulo = liberar_modulo and acao not in PERMISSOES_EXPLICITAS
+                    valor = herdada_do_modulo or acao in permissoes_atuais
                     marcado = cols[idx % len(cols)].checkbox(
                         rotulo,
                         value=valor,
-                        disabled=liberar_modulo,
+                        disabled=herdada_do_modulo,
                         key=f"{prefixo}_{acao}",
                     )
-                    if liberar_modulo or marcado:
+                    if herdada_do_modulo or marcado:
                         selecionadas.add(acao)
     return selecionadas
 
@@ -373,41 +402,46 @@ def conectar_banco(usar_database=True):
         registrar_erro=registrar_erro,
     )
 
-def imprimir_html(html, titulo="Impressao"):
-    html_limpo = limpar_html_impressao(html).replace("`", "\\`")
-    components.html(f"""
+def imprimir_html(conteudo_html, titulo="Impressao"):
+    """Imprime o documento oculto renderizado pela própria página Streamlit."""
+    _ = conteudo_html
+    titulo_json = json.dumps(str(titulo), ensure_ascii=False)
+    script_impressao = f"""
     <script>
-        var iframe = window.parent.document.createElement('iframe');
-        iframe.style.position = 'absolute';
-        iframe.style.width = '0px';
-        iframe.style.height = '0px';
-        iframe.style.border = 'none';
-        window.parent.document.body.appendChild(iframe);
-        var doc = iframe.contentWindow.document;
-        doc.open();
-        doc.write(`
-            <html>
-            <head>
-                <title>{titulo}</title>
-                <style>
-                    body {{ margin: 0; padding: 0; background: white; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-                    @page {{ size: A4 portrait; margin: 8mm; }}
-                    .quebra-pagina {{ page-break-before: always; }}
-                </style>
-            </head>
-            <body>{html_limpo}</body>
-            </html>
-        `);
-        doc.close();
-        setTimeout(function() {{
-            iframe.contentWindow.focus();
-            iframe.contentWindow.print();
-        }}, 500);
+    (() => {{
+        const pagina = window.parent;
+        const tituloAnterior = pagina.document.title;
+        let finalizado = false;
+        const restaurarPagina = () => {{
+            if (finalizado) return;
+            finalizado = true;
+            try {{ pagina.document.title = tituloAnterior; }} catch (_) {{}}
+            try {{ pagina.focus(); }} catch (_) {{}}
+        }};
+        try {{
+            pagina.document.title = {titulo_json};
+            pagina.addEventListener('afterprint', restaurarPagina, {{ once: true }});
+            setTimeout(() => {{
+                try {{
+                    pagina.focus();
+                    pagina.print();
+                }} finally {{
+                    setTimeout(restaurarPagina, 1200);
+                }}
+            }}, 150);
+        }} catch (_) {{
+            restaurarPagina();
+        }}
+    }})();
     </script>
-    """, height=0)
+    """
+    components.html(script_impressao, height=0)
 
 st.markdown("""
 <style>
+    html, body {
+        font-size: 18px;
+    }
   
     #MainMenu {visibility: hidden;} 
     footer {visibility: hidden;}
@@ -436,6 +470,10 @@ st.markdown("""
         color: #004488 !important; 
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
     }
+
+    #doc-impressao {
+        display: none;
+    }
     
   
     @media print {
@@ -458,6 +496,7 @@ st.markdown("""
             color: black !important;
         }
         #doc-impressao {
+            display: block !important;
             background-color: white !important;
         }
         
@@ -566,6 +605,11 @@ def filtrar_registros_por_empresa(registros, *campos):
 
 def buscar_clientes(aplicar_permissao=True):
     dados = repo_listar_clientes(conectar_banco)
+    dados = filtrar_cadastros_dsystem(
+        dados,
+        config_sistema_val("NFSE_CNPJ", "23524449000154"),
+        st.session_state,
+    )
     if aplicar_permissao:
         dados = filtrar_registros_por_empresa(dados, "nome")
     return dados
@@ -1033,8 +1077,8 @@ def renderizar_chat_chamado(chamado, cliente_portal):
 def renderizar_abertura_chamado(cliente_portal, cliente_id=None):
     return page_renderizar_abertura_chamado(cliente_portal, cliente_id, ctx=criar_app_context(globals()))
 
-def renderizar_chamados_cliente(cliente_portal):
-    return page_renderizar_chamados_cliente(cliente_portal, ctx=criar_app_context(globals()))
+def renderizar_chamados_cliente(cliente_portal, cliente_id=None):
+    return page_renderizar_chamados_cliente(cliente_portal, cliente_id, ctx=criar_app_context(globals()))
 
 def renderizar_propostas_contratos(cliente_portal, cliente_id=None):
     return page_renderizar_propostas_contratos(cliente_portal, cliente_id, ctx=criar_app_context(globals()))
@@ -1563,20 +1607,38 @@ def salvar_retorno_nota_fiscal(nota_id, xml_envio, xml_retorno, retorno_info, ge
     xml_retorno_txt = xml_retorno.decode("utf-8", errors="ignore") if isinstance(xml_retorno, bytes) else str(xml_retorno or "")
     xml_envio_txt = xml_envio.decode("utf-8", errors="ignore") if isinstance(xml_envio, bytes) else str(xml_envio or "")
     pdf_base64 = nota.get("pdf_base64") or ""
+    link_nota = nota.get("link_nota") or ""
     emitido_em = nota.get("emitido_em")
     if status == "Autorizada":
         emitido_em = emitido_em or agora_br()
-        if gerar_pdf:
-            nota_pdf = {**nota, "numero_nota": numero, "chave_acesso": chave, "protocolo": protocolo, "mensagem_retorno": mensagem}
+        xml_nacional = (
+            nota.get("tipo_nota") == "Serviço"
+            and "http://www.sped.fazenda.gov.br/nfse" in xml_retorno_txt
+            and "<NFSe" in xml_retorno_txt
+        )
+        if xml_nacional:
+            from dsystem_erp.services.danfse_local import gerar_danfse_local
+            from dsystem_erp.services.danfse import conferir_xml_nacional, url_consulta_publica
+            try:
+                dados_danfse = conferir_xml_nacional(xml_retorno_txt, chave)
+                pdf_base64 = base64.b64encode(gerar_danfse_local({
+                    "xml_autorizado": xml_retorno_txt, "chave_acesso": chave,
+                })).decode("ascii")
+                link_nota = url_consulta_publica(dados_danfse["chave"], dados_danfse["ambiente"])
+                retorno_info["danfse_local_salvo"] = True
+            except Exception as erro_danfse:
+                retorno_info["danfse_erro"] = str(erro_danfse)
+        elif gerar_pdf:
+            nota_pdf = {**nota, "numero_nota": numero, "chave_acesso": chave, "protocolo": protocolo, "mensagem_retorno": mensagem, "xml_autorizado": xml_retorno_txt, "xml_envio": xml_envio_txt}
             pdf_base64 = base64.b64encode(gerar_pdf_nota_autorizada_simples(nota_pdf, retorno_info)).decode("ascii")
     cur.execute(
         """UPDATE notas_fiscais SET status=%s, numero_nota=%s, chave_acesso=%s, protocolo=%s,
            numero_lote=%s, mensagem_retorno=%s, xml_envio=%s, xml_retorno=%s, xml_autorizado=%s,
-           pdf_base64=%s, emitido_em=%s, atualizado_em=%s WHERE id=%s""",
+           pdf_base64=%s, link_nota=%s, emitido_em=%s, atualizado_em=%s WHERE id=%s""",
         (
             status, numero, chave, protocolo, lote, mensagem, xml_envio_txt, xml_retorno_txt,
             xml_retorno_txt if status == "Autorizada" else nota.get("xml_autorizado"),
-            pdf_base64, emitido_em, agora_br(), nota_id,
+            pdf_base64, link_nota, emitido_em, agora_br(), nota_id,
         ),
     )
     conn.commit()
@@ -1708,14 +1770,60 @@ def renderizar_notas_emitidas_tab():
                     st.error(f"Falha ao consultar protocolo: {ex}")
 
     with st.expander("3. XML e PDF", expanded=False):
+        if nota.get("tipo_nota") == "Serviço" and nota.get("xml_autorizado"):
+            from dsystem_erp.services.danfse import (
+                conferir_xml_nacional,
+                link_eh_danfse_oficial,
+                url_consulta_publica,
+                validar_pdf_danfse_anexado,
+            )
+            try:
+                dados_xml_pdf = conferir_xml_nacional(nota["xml_autorizado"], nota.get("chave_acesso") or "")
+            except ValueError as erro_xml:
+                st.warning(str(erro_xml))
+            else:
+                ambiente_pdf = dados_xml_pdf["ambiente"]
+                st.info("HOMOLOGAÇÃO - SEM VALIDADE FISCAL" if ambiente_pdf == "2" else "Esta nota pertence ao ambiente de PRODUÇÃO.")
+                st.write({"Número no XML": dados_xml_pdf["numero"], "Competência": dados_xml_pdf["competencia"],
+                          "Valor dos serviços no XML": dados_xml_pdf["valor"], "Código nacional": dados_xml_pdf["codigo_nacional"],
+                          "Desdobramento municipal": dados_xml_pdf["codigo_municipal"], "Emissão": dados_xml_pdf["emissao"]})
+                st.caption("Conferência estrutural do XML salvo. Não valida assinatura digital nem consulta cancelamentos posteriores.")
+                link_oficial_pdf = url_consulta_publica(dados_xml_pdf["chave"], ambiente_pdf)
+                pdf_oficial_salvo = bool(
+                    nota.get("pdf_base64")
+                    and link_eh_danfse_oficial(
+                        nota.get("link_nota"), dados_xml_pdf["chave"], ambiente_pdf
+                    )
+                )
+                from dsystem_erp.services.danfse_local import gerar_danfse_local
+                if st.button("Gerar DANFSe no site e salvar no portal", key=f"gerar_danfse_local_{id_sel}"):
+                    try:
+                        pdf_local = gerar_danfse_local(nota)
+                        conn_danfse = conectar_banco()
+                        try:
+                            conn_danfse.cursor().execute(
+                                "UPDATE notas_fiscais SET pdf_base64=%s, link_nota=%s, atualizado_em=%s WHERE id=%s",
+                                (base64.b64encode(pdf_local).decode("ascii"), link_oficial_pdf, agora_br(), id_sel),
+                            )
+                            conn_danfse.commit()
+                        finally:
+                            conn_danfse.close()
+                        st.rerun()
+                    except Exception as erro_pdf:
+                        st.error(f"Não foi possível gerar o DANFSe: {erro_pdf}")
+                if pdf_oficial_salvo:
+                    st.download_button("Baixar DANFSe", data=base64.b64decode(nota["pdf_base64"]),
+                        file_name=f"danfse_{'homologacao_' if ambiente_pdf == '2' else ''}{dados_xml_pdf['numero'] or id_sel}.pdf",
+                        mime="application/pdf", key=f"download_danfse_{id_sel}", on_click="ignore")
+                st.caption("DANFSe gerado pelo Dsystem com os dados do XML autorizado. A geração do PDF não emite outra nota.")
         if nota.get("xml_envio"):
             st.download_button("Baixar XML enviado", data=nota.get("xml_envio"), file_name=f"nota_{id_sel}_envio.xml", mime="application/xml", width="stretch", key=f"nota_xml_envio_{id_sel}")
         if nota.get("xml_retorno"):
             st.download_button("Baixar XML retorno", data=nota.get("xml_retorno"), file_name=f"nota_{id_sel}_retorno.xml", mime="application/xml", width="stretch", key=f"nota_xml_retorno_{id_sel}")
         if nota.get("xml_autorizado"):
             st.download_button("Baixar XML autorizado", data=nota.get("xml_autorizado"), file_name=f"nota_{id_sel}_autorizada.xml", mime="application/xml", width="stretch", key=f"nota_xml_autorizado_{id_sel}")
-        if nota.get("pdf_base64"):
-            st.download_button("Baixar PDF da nota", data=base64.b64decode(nota.get("pdf_base64")), file_name=f"nota_{id_sel}.pdf", mime="application/pdf", width="stretch", key=f"nota_pdf_{id_sel}")
+        if nota.get("pdf_base64") and nota.get("tipo_nota") != "Serviço":
+            st.download_button("Baixar PDF salvo da nota", data=base64.b64decode(nota.get("pdf_base64")), file_name=f"nota_{id_sel}.pdf", mime="application/pdf", width="stretch", key=f"nota_pdf_{id_sel}")
         if not any([nota.get("xml_envio"), nota.get("xml_retorno"), nota.get("xml_autorizado"), nota.get("pdf_base64")]):
             st.info("Ainda não há XML/PDF salvo para esta nota.")
 
@@ -1743,8 +1851,11 @@ def portal_href(secao):
 def renderizar_portal_cliente_home(cliente_portal, cliente_portal_id=None):
     return page_renderizar_portal_cliente_home(cliente_portal, cliente_portal_id, ctx=criar_app_context(globals()))
 
-def renderizar_portal_ordens_servico(cliente_portal, cursor, conn):
-    return page_renderizar_portal_ordens_servico(cliente_portal, cursor, conn, ctx=criar_app_context(globals()))
+def renderizar_portal_ordens_servico(cliente_portal, cursor, conn, cliente_portal_id=None):
+    return page_renderizar_portal_ordens_servico(
+        cliente_portal, cursor, conn, ctx=criar_app_context(globals()),
+        cliente_portal_id=cliente_portal_id,
+    )
 
 def renderizar_portal_notas_cliente(cliente_portal):
     return page_renderizar_portal_notas_cliente(cliente_portal, ctx=criar_app_context(globals()))
@@ -1752,8 +1863,8 @@ def renderizar_portal_notas_cliente(cliente_portal):
 def renderizar_portal_documentos_cliente(cliente_portal, cliente_portal_id=None):
     return page_renderizar_portal_documentos_cliente(cliente_portal, cliente_portal_id, ctx=criar_app_context(globals()))
 
-def renderizar_portal_financeiro_cliente(cliente_portal):
-    return page_renderizar_portal_financeiro_cliente(cliente_portal, ctx=criar_app_context(globals()))
+def renderizar_portal_financeiro_cliente(cliente_portal, cliente_portal_id=None):
+    return page_renderizar_portal_financeiro_cliente(cliente_portal, cliente_portal_id, ctx=criar_app_context(globals()))
 
 def renderizar_portal_contato_cliente(cliente_portal):
     return page_renderizar_portal_contato_cliente(cliente_portal, ctx=criar_app_context(globals()))
@@ -1808,6 +1919,16 @@ def faturar_lancamento_com_integracoes(faturamento):
         return {"ok": False, "mensagem": "Este lançamento já está marcado como faturado."}
 
     itens = itens_faturamento_lista(faturamento.get("itens"))
+    cliente_baixa_estoque = str(faturamento.get("cliente") or "").strip()
+    possui_produto = any(
+        item.get("estoque_id") or (item.get("tipo_item") or "Serviço") == "Produto"
+        for item in itens
+    )
+    if possui_produto and not cliente_baixa_estoque:
+        return {
+            "ok": False,
+            "mensagem": "Informe o cliente do faturamento. Nenhum produto pode sair do estoque sem cliente vinculado.",
+        }
     usuario = st.session_state.get("username", "")
     agora = agora_br()
     parcelas_financeiras = gerar_parcelas_faturamento(faturamento)
@@ -1817,6 +1938,15 @@ def faturar_lancamento_com_integracoes(faturamento):
     conn_fat = conectar_banco()
     cfat = conn_fat.cursor()
     try:
+        cliente_baixa_id = None
+        if cliente_baixa_estoque:
+            cfat.execute(
+                """SELECT id FROM clientes
+                   WHERE nome=? ORDER BY id DESC LIMIT 1""",
+                (cliente_baixa_estoque,),
+            )
+            cliente_baixa_registro = cfat.fetchone()
+            cliente_baixa_id = (cliente_baixa_registro or {}).get("id")
         for parcela in parcelas_financeiras:
             documento = parcela["documento"]
             cfat.execute("SELECT id FROM contas_receber WHERE numero_documento=? LIMIT 1", (documento,))
@@ -1853,8 +1983,24 @@ def faturar_lancamento_com_integracoes(faturamento):
                 continue
             qtd_saida = int(item.get("qtd") or 0)
             qtd_atual = int(produto.get("quantidade") or 0)
-            nova_qtd = max(0, qtd_atual - qtd_saida)
+            if qtd_saida <= 0:
+                continue
+            if qtd_saida > qtd_atual:
+                raise ValueError(
+                    f"Estoque insuficiente para {produto.get('produto') or produto.get('codigo_entrada')}. "
+                    f"Disponível: {qtd_atual}."
+                )
+            nova_qtd = qtd_atual - qtd_saida
             cfat.execute("UPDATE estoque SET quantidade=? WHERE id=?", (nova_qtd, produto.get("id")))
+            registrar_movimentacao(
+                cfat, produto_id=int(produto.get("id") or 0),
+                tipo="Saída por faturamento", quantidade=qtd_saida,
+                estoque_anterior=qtd_atual, estoque_atual=nova_qtd,
+                cliente_id=cliente_baixa_id, cliente_nome=cliente_baixa_estoque,
+                origem="Faturamento", origem_id=fat_id,
+                observacoes=f"Baixa automática do faturamento #{fat_id}.",
+                criado_por=usuario, criado_em=agora,
+            )
             baixas_estoque.append({
                 "produto": produto.get("produto") or produto.get("codigo_entrada"),
                 "quantidade": qtd_saida,
@@ -1954,31 +2100,59 @@ def mascarar_segredo(valor):
     return service_mascarar_segredo(valor)
 
 def montar_codigo_entrada(fileira1, fileira2, identificacao):
-    partes = [str(x or "").strip() for x in [fileira1, fileira2, identificacao]]
-    return " | ".join([p for p in partes if p])
+    return montar_codigo_localizacao(fileira1, fileira2, identificacao)
 
-def preparar_tabela_estoque(rows):
+def preparar_tabela_estoque(rows, incluir_id_interno=True):
     colunas = [
-        ("id", "ID"), ("codigo", "Fileira 1"), ("categoria", "Fileira 2"),
-        ("produto", "Fileira 3 / Identificação"), ("nome_generico", "Nome genérico"),
-        ("codigo_entrada", "Código Interno"),
-        ("caixa", "Caixa"), ("quantidade", "Qtd"), ("estoque_minimo", "Mínimo"),
+        ("id_visual", "ID"), ("codigo_entrada", "Código completo"),
+        ("codigo", "Fileira 1"), ("categoria", "Fileira 2"),
+        ("modelo", "Modelo"), ("nome_generico", "Nome genérico"),
+        ("caixa", "Caixa"), ("tem_fonte", "Tem fonte?"),
+        ("quantidade", "Qtd"), ("estoque_minimo", "Mínimo"),
         ("valor_custo", "Compra"), ("custo_deslocamento", "Deslocamento"),
         ("imposto_percentual", "Imposto %"), ("lucro_percentual", "Lucro %"),
         ("valor_venda", "Revenda"), ("preco_revenda_automatico", "Preço automático"),
         ("permitir_ajuste_preco", "Permite ajuste"), ("situacao_nota", "Documento da compra"),
-        ("fornecedor", "Fornecedor"),
+        ("fornecedor", "Fornecedor"), ("data_compra", "Data da compra"),
         ("observacoes", "Observações"),
     ]
-    return [{titulo: dict(row).get(campo, "") for campo, titulo in colunas} for row in rows]
+    if incluir_id_interno:
+        colunas.insert(0, ("id", "ID interno"))
+    tabela = []
+    for row in rows:
+        produto = dict(row)
+        codigo_item = produto.get("codigo_item")
+        if not str(codigo_item or "").strip().isdigit():
+            ultima_parte_codigo = str(produto.get("codigo_entrada") or "").rsplit(".", 1)[-1].strip()
+            codigo_item = ultima_parte_codigo if ultima_parte_codigo.isdigit() else None
+        if not codigo_item and str(produto.get("produto") or "").strip().isdigit():
+            codigo_item = str(produto.get("produto")).strip()
+        if not codigo_item:
+            codigo_item = produto.get("id")
+        codigo_completo = montar_codigo_entrada(
+            produto.get("codigo"),
+            produto.get("categoria"),
+            codigo_item,
+        )
+        produto["id_visual"] = codigo_item
+        if not produto.get("modelo") and not str(produto.get("produto") or "").strip().isdigit():
+            produto["modelo"] = produto.get("produto")
+        if codigo_completo:
+            produto["codigo_entrada"] = codigo_completo
+        if produto.get("data_compra"):
+            produto["data_compra"] = data_para_br(produto.get("data_compra"))
+        tabela.append({titulo: produto.get(campo, "") for campo, titulo in colunas})
+    return tabela
 
 COLUNAS_ESTOQUE_IMPORTACAO = {
     "codigo": "Fileira 1",
     "categoria": "Fileira 2",
-    "produto": "Produto / Identificação",
+    "codigo_item": "ID do produto / 3ª parte do código",
+    "modelo": "Modelo",
     "nome_generico": "Nome genérico",
-    "codigo_entrada": "Código interno",
+    "codigo_entrada": "Código completo",
     "caixa": "Caixa / Gaveta",
+    "tem_fonte": "Tem fonte?",
     "quantidade": "Quantidade",
     "estoque_minimo": "Estoque mínimo",
     "valor_custo": "Valor de custo",
@@ -2062,7 +2236,8 @@ SINONIMOS_CLIENTES_IMPORTACAO = {
 SINONIMOS_ESTOQUE_IMPORTACAO = {
     "codigo": ["fileira 1", "localizacao", "localização"],
     "categoria": ["fileira 2", "categoria", "grupo"],
-    "produto": ["fileira 3", "produto", "modelo", "item", "nome"],
+    "codigo_item": ["id produto", "id do produto", "sequencia", "sequência", "terceira parte"],
+    "modelo": ["modelo", "model", "referencia do modelo", "referência do modelo"],
     "nome_generico": ["nome generico", "nome genérico", "descricao", "descrição", "discriminacao", "discriminação"],
     "codigo_entrada": ["codigo", "código", "codigo interno", "código interno", "codigo entrada", "sku", "referencia", "referência"],
     "caixa": ["caixa", "gaveta", "local"],
@@ -2071,7 +2246,8 @@ SINONIMOS_ESTOQUE_IMPORTACAO = {
     "valor_custo": ["valor custo", "valor de custo", "custo", "preco custo", "preço custo"],
     "valor_venda": ["valor venda", "valor de venda", "venda", "preco venda", "preço venda"],
     "fornecedor": ["fornecedor", "fabricante", "marca"],
-    "observacoes": ["observacoes", "observações", "obs", "observacao", "observação", "tem fonte"],
+    "tem_fonte": ["tem fonte", "fonte", "possui fonte", "com fonte"],
+    "observacoes": ["observacoes", "observações", "obs", "observacao", "observação"],
 }
 
 def normalizar_cabecalho_importacao(valor):
@@ -2599,6 +2775,28 @@ def renderizar_alertas_home():
                 hide_index=True,
             )
 
+        try:
+            emprestimos_alerta = repo_listar_alertas_emprestimos_atrasados(
+                conectar_banco, hoje.isoformat()
+            )
+        except Exception:
+            emprestimos_alerta = []
+        if emprestimos_alerta:
+            st.error(
+                "Há empréstimos de estoque com dois dias ou mais aguardando confirmação. "
+                "Acesse Estoque > Empréstimos para informar se os itens retornaram ou ficaram com o cliente."
+            )
+            st.dataframe(
+                [{
+                    "Empréstimo": item.get("id"),
+                    "Responsável": item.get("responsavel"),
+                    "Cliente": item.get("cliente_nome") or "Não informado",
+                    "Retirada": data_para_br(item.get("data_retirada")),
+                    "Prazo": data_para_br(item.get("data_limite")),
+                } for item in emprestimos_alerta],
+                width="stretch", hide_index=True,
+            )
+
     if tem_permissao("faturamento.view"):
         conn_sinc_rec = conectar_banco()
         try:
@@ -2921,7 +3119,11 @@ def renderizar_configuracoes_sistema():
         cserv.execute("SELECT * FROM nfse_bh_servicos ORDER BY ativo DESC, nome, id")
         servicos = cserv.fetchall()
         conn_serv.close()
-        st.dataframe(servicos, width="stretch", hide_index=True)
+        servico_cfg_clicado = tabela_clicavel_id(
+            st, servicos, "cfg_servicos_nfse_grade", campo_id="id"
+        ) if servicos else None
+        if servico_cfg_clicado:
+            st.session_state["cfg_servico_nfse_id_ativo"] = int(servico_cfg_clicado)
         with st.form("cfg_form_servico_nfse", clear_on_submit=True):
             fs1, fs2, fs3, fs4 = st.columns(4)
             nome_serv = fs1.text_input("Nome:")
@@ -2946,23 +3148,22 @@ def renderizar_configuracoes_sistema():
         if servicos:
             st.markdown("---")
             st.subheader("Editar ou excluir servico")
-            opcoes_servicos = {
-                f"#{serv.get('id')} - {serv.get('nome') or serv.get('codigo_servico') or 'Sem nome'}": serv
-                for serv in servicos
-            }
-            serv_label = st.selectbox("Servico cadastrado:", list(opcoes_servicos.keys()), key="cfg_servico_editar_sel")
-            serv_sel = opcoes_servicos[serv_label]
+            servico_cfg_id = int(st.session_state.get("cfg_servico_nfse_id_ativo") or 0)
+            serv_sel = next((serv for serv in servicos if int(serv.get("id") or 0) == servico_cfg_id), None)
+            if not serv_sel:
+                st.caption("Clique em qualquer informação do serviço para editar.")
+                st.stop()
             ed1, ed2, ed3, ed4 = st.columns(4)
-            ed_nome = ed1.text_input("Nome:", value=serv_sel.get("nome") or "", key="cfg_servico_ed_nome")
-            ed_codigo = ed2.text_input("Codigo servico:", value=serv_sel.get("codigo_servico") or "", key="cfg_servico_ed_codigo")
-            ed_item = ed3.text_input("Item lista:", value=serv_sel.get("item_lista_servico") or "", key="cfg_servico_ed_item")
+            ed_nome = ed1.text_input("Nome:", value=serv_sel.get("nome") or "", key=f"cfg_servico_ed_nome_{servico_cfg_id}")
+            ed_codigo = ed2.text_input("Codigo servico:", value=serv_sel.get("codigo_servico") or "", key=f"cfg_servico_ed_codigo_{servico_cfg_id}")
+            ed_item = ed3.text_input("Item lista:", value=serv_sel.get("item_lista_servico") or "", key=f"cfg_servico_ed_item_{servico_cfg_id}")
             try:
                 aliquota_atual = float(serv_sel.get("aliquota_iss") or 0)
             except Exception:
                 aliquota_atual = 0.0
-            ed_aliquota = ed4.number_input("ISS %:", min_value=0.0, value=aliquota_atual, step=0.01, format="%.4f", key="cfg_servico_ed_aliquota")
-            ed_obs = st.text_input("Observacao:", value=serv_sel.get("observacoes") or "", key="cfg_servico_ed_obs")
-            ed_ativo = st.selectbox("Ativo:", ["Sim", "Nao"], index=0 if (serv_sel.get("ativo") or "Sim") == "Sim" else 1, key="cfg_servico_ed_ativo")
+            ed_aliquota = ed4.number_input("ISS %:", min_value=0.0, value=aliquota_atual, step=0.01, format="%.4f", key=f"cfg_servico_ed_aliquota_{servico_cfg_id}")
+            ed_obs = st.text_input("Observacao:", value=serv_sel.get("observacoes") or "", key=f"cfg_servico_ed_obs_{servico_cfg_id}")
+            ed_ativo = st.selectbox("Ativo:", ["Sim", "Nao"], index=0 if (serv_sel.get("ativo") or "Sim") == "Sim" else 1, key=f"cfg_servico_ed_ativo_{servico_cfg_id}")
             ac1, ac2 = st.columns(2)
             if ac1.button("Salvar alteracoes do servico", type="primary", width="stretch", key="cfg_servico_salvar_edicao"):
                 conn_ed = conectar_banco()
@@ -3249,7 +3450,16 @@ elif menu == "Recepção e Kanban":
     page_renderizar_recepcao_kanban(criar_app_context(globals()))
 
 elif menu == "Acesso Softwares":
-    page_renderizar_acesso_softwares(criar_app_context(globals()))
+    page_renderizar_acesso_softwares(criar_app_context(globals()), secao="pasta")
+
+elif menu == "Base de Pesquisa":
+    page_renderizar_acesso_softwares(criar_app_context(globals()), secao="pesquisa")
+
+elif menu == "Dashboard":
+    page_renderizar_dashboard(criar_app_context(globals()))
+
+elif menu == "Utilização de Uber":
+    page_renderizar_uber(criar_app_context(globals()))
 
 elif menu == "Portal do Cliente":
     page_renderizar_portal_cliente(criar_app_context(globals()))

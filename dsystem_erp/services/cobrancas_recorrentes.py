@@ -8,6 +8,89 @@ from datetime import date, timedelta
 from dsystem_erp.utils.datas import parse_data_flex
 
 
+def _valor_decimal(valor) -> float:
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    texto = str(valor or "").strip().replace("R$", "").replace(" ", "")
+    if "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    try:
+        return float(texto)
+    except ValueError:
+        return 0.0
+
+
+def criar_ou_atualizar_cobranca_contrato(conn, contrato: dict, usuario: str = "", criado_em: str = "") -> tuple[int, bool]:
+    """Ativa a cobrança do contrato assinado sem permitir recorrência duplicada."""
+    contrato_id = int(contrato.get("id") or 0)
+    if not contrato_id:
+        raise ValueError("Contrato inválido.")
+    if str(contrato.get("assinado") or "Não").casefold() != "sim":
+        raise ValueError("Marque o contrato como assinado antes de gerar a recorrência.")
+    if str(contrato.get("gerar_recorrencia") or "Não").casefold() != "sim":
+        raise ValueError("Habilite a geração de cobrança recorrente neste contrato.")
+    valor = _valor_decimal(contrato.get("recorrencia_valor") or contrato.get("valor"))
+    if valor <= 0:
+        raise ValueError("Informe o valor da recorrência do contrato.")
+    primeiro_vencimento = parse_data_flex(contrato.get("recorrencia_primeiro_vencimento"))
+    fim = parse_data_flex(contrato.get("recorrencia_fim") or contrato.get("data_vencimento"))
+    if not primeiro_vencimento:
+        raise ValueError("Informe o primeiro vencimento da recorrência.")
+    if fim and primeiro_vencimento > fim:
+        raise ValueError("O primeiro vencimento não pode ser posterior ao fim da recorrência.")
+
+    cursor = conn.cursor()
+    cliente = None
+    if contrato.get("parte_id"):
+        cursor.execute("SELECT id, nome FROM clientes WHERE id=? LIMIT 1", (contrato.get("parte_id"),))
+        cliente = cursor.fetchone()
+    if not cliente:
+        cursor.execute("SELECT id, nome FROM clientes WHERE nome=? ORDER BY id DESC LIMIT 1", (contrato.get("parte_nome") or "",))
+        cliente = cursor.fetchone()
+    if not cliente:
+        raise ValueError("O cliente do contrato não foi encontrado no cadastro de clientes.")
+
+    cursor.execute("SELECT id FROM cobrancas_recorrentes WHERE contrato_id=? LIMIT 1", (contrato_id,))
+    existente = cursor.fetchone()
+    dados = (
+        cliente.get("id"), cliente.get("nome") or contrato.get("parte_nome") or "",
+        contrato.get("recorrencia_tipo") or contrato.get("tipo") or "Contrato",
+        valor, primeiro_vencimento.strftime("%Y-%m-%d"),
+        valor, primeiro_vencimento.strftime("%Y-%m-%d"),
+        (fim or primeiro_vencimento).strftime("%Y-%m-%d"),
+        contrato.get("recorrencia_pagamento") or "Faturamento via D-System",
+        contrato.get("recorrencia_periodicidade") or "Mensal",
+        f"Cobrança gerada automaticamente pelo contrato #{contrato_id}.",
+        "Ativa", "Contrato", usuario, criado_em,
+    )
+    if existente:
+        cobranca_id = int(existente.get("id") or 0)
+        cursor.execute(
+            """UPDATE cobrancas_recorrentes SET cliente_id=?, cliente_nome=?, tipo_cobranca=?,
+               valor_financeiro=?, data_cobranca=?, valor_cobranca=?, vigencia_inicio=?,
+               vigencia_fim=?, pagamento=?, periodicidade=?, informacoes=?, status=?, origem=?,
+               criado_por=?, criado_em=? WHERE id=?""",
+            dados + (cobranca_id,),
+        )
+        criada = False
+    else:
+        cursor.execute(
+            """INSERT INTO cobrancas_recorrentes
+               (cliente_id, cliente_nome, tipo_cobranca, valor_financeiro, data_cobranca,
+                valor_cobranca, vigencia_inicio, vigencia_fim, pagamento, periodicidade,
+                informacoes, status, origem, criado_por, criado_em, contrato_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            dados + (contrato_id,),
+        )
+        cobranca_id = int(cursor.lastrowid)
+        criada = True
+    cursor.execute(
+        "UPDATE contratos SET cobranca_recorrente_id=? WHERE id=?",
+        (cobranca_id, contrato_id),
+    )
+    return cobranca_id, criada
+
+
 def adicionar_meses(data_base: date, meses: int) -> date:
     indice = data_base.month - 1 + meses
     ano = data_base.year + indice // 12

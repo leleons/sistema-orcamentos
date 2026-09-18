@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kanban de equipamentos</title>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; color: #edf2fa; font: 15px/1.5 Arial, sans-serif; }
+#quadro { display: flex; align-items: stretch; gap: 14px; overflow-x: auto; height: 550px; padding: 8px 4px 18px; }
+.coluna { flex: 0 0 275px; min-width: 0; display: flex; flex-direction: column; background: #111827; border: 1px solid #334155; border-top: 4px solid var(--cor); border-radius: 12px; }
+.cabecalho { padding: 14px; display: flex; gap: 8px; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+.cabecalho h2 { font-size: 15px; margin: 0; }
+.contador { background: #263449; padding: 1px 8px; border-radius: 15px; }
+.itens { flex: 1; overflow-y: auto; padding: 10px; min-height: 160px; }
+.cartao { background: #1b293e; border: 1px solid #3c4f69; border-left: 4px solid var(--cor); border-radius: 9px; padding: 13px; margin-bottom: 10px; white-space: pre-line; overflow-wrap: anywhere; cursor: grab; touch-action: none; user-select: none; }
+.cartao:focus-visible { outline: 3px solid #60a5fa; }
+.cartao[aria-disabled=true] { cursor: default; }
+.arrastando { opacity: .3; }
+.fantasma { position: fixed; pointer-events: none; z-index: 999; opacity: .95; box-shadow: 0 12px 32px #0008; margin: 0; cursor: grabbing; }
+.destino { outline: 2px solid #60a5fa; outline-offset: -3px; }
+.antes { box-shadow: 0 -4px #60a5fa; }
+.depois { box-shadow: 0 4px #60a5fa; }
+.vazio { color: #a9b7cc; font-size: 13px; padding: 10px 4px; }
+#aviso { color: #b9c9de; margin: 0 4px; font-size: 13px; height: 25px; }
+</style>
+</head>
+<body>
+<main id="quadro" aria-label="Kanban de equipamentos"></main>
+<p id="aviso" role="status" aria-live="polite"></p>
+<script>
+(() => {
+  const quadro = document.getElementById('quadro');
+  const aviso = document.getElementById('aviso');
+  let dados = null, assinatura = '', gesto = null;
+  const enviar = (type, dados) => window.parent.postMessage({isStreamlitMessage: true, type, ...dados}, '*');
+  const limparAlvo = () => quadro.querySelectorAll('.destino,.antes,.depois').forEach(el => el.classList.remove('destino','antes','depois'));
+
+  function cancelar() {
+    if (gesto) {
+      gesto.cartao.classList.remove('arrastando');
+      gesto.fantasma?.remove();
+      if (gesto.cartao.hasPointerCapture(gesto.id)) gesto.cartao.releasePointerCapture(gesto.id);
+    }
+    gesto = null;
+    limparAlvo();
+  }
+
+  function renderizar(args) {
+    cancelar();
+    dados = args;
+    quadro.replaceChildren();
+    for (const [indice, coluna] of args.colunas.entries()) {
+      const secao = document.createElement('section');
+      secao.className = 'coluna';
+      secao.dataset.indice = indice;
+      secao.style.setProperty('--cor', args.cores[coluna.header] || '#3b82f6');
+      const cabecalho = document.createElement('header');
+      cabecalho.className = 'cabecalho';
+      const titulo = document.createElement('h2');
+      titulo.textContent = coluna.header;
+      const contador = document.createElement('span');
+      contador.className = 'contador';
+      contador.textContent = coluna.items.length;
+      cabecalho.append(titulo, contador);
+      const itens = document.createElement('div');
+      itens.className = 'itens';
+      for (const texto of coluna.items) {
+        const cartao = document.createElement('div');
+        cartao.className = 'cartao';
+        cartao.tabIndex = 0;
+        cartao.setAttribute('role', 'button');
+        cartao.setAttribute('aria-disabled', 'false');
+        cartao.setAttribute('aria-label', texto);
+        cartao.title = args.pode_editar
+          ? 'Clique para ver os detalhes ou arraste para outra etapa.'
+          : 'Clique para ver os detalhes.';
+        cartao.textContent = texto;
+        itens.append(cartao);
+      }
+      if (!coluna.items.length) {
+        const vazio = document.createElement('p');
+        vazio.className = 'vazio';
+        vazio.textContent = 'Nenhum equipamento nesta etapa';
+        itens.append(vazio);
+      }
+      secao.append(cabecalho, itens);
+      quadro.append(secao);
+    }
+    aviso.textContent = '';
+    // Altura fixa: não realimenta o layout do iframe a cada movimento.
+    enviar('streamlit:setFrameHeight', {height: 580});
+  }
+
+  function salvar(cartao, destino, referencia = null) {
+    const antes = JSON.stringify(dados.colunas);
+    destino.querySelector('.vazio')?.remove();
+    destino.insertBefore(cartao, referencia);
+    const colunas = [...quadro.children].map((secao, i) => ({
+      header: dados.colunas[i].header,
+      items: [...secao.querySelectorAll('.cartao')].map(el => el.textContent)
+    }));
+    if (JSON.stringify(colunas) === antes) return;
+    aviso.textContent = 'Salvando movimentação…';
+    dados.pode_editar = false;
+    enviar('streamlit:setComponentValue', {
+      dataType: 'json', value: {
+        revisao: dados.revisao, acao: 'mover', colunas,
+        evento_id: Date.now() + ':' + Math.random()
+      }
+    });
+  }
+
+  function abrir(cartao) {
+    enviar('streamlit:setComponentValue', {
+      dataType: 'json', value: {
+        revisao: dados.revisao, acao: 'abrir', cartao: cartao.textContent,
+        evento_id: Date.now() + ':' + Math.random()
+      }
+    });
+  }
+
+  function alvo(x, y) {
+    const el = document.elementFromPoint(x, y);
+    const coluna = el?.closest('.coluna');
+    if (!coluna || !quadro.contains(coluna)) return null;
+    const cartao = el.closest('.cartao');
+    const depois = cartao && y > cartao.getBoundingClientRect().top + cartao.offsetHeight / 2;
+    return {coluna, cartao, depois};
+  }
+
+  quadro.addEventListener('pointerdown', e => {
+    const cartao = e.target.closest('.cartao');
+    if (!cartao || e.button !== 0) return;
+    gesto = {cartao, id: e.pointerId, x: e.clientX, y: e.clientY};
+    if (dados?.pode_editar) cartao.setPointerCapture(e.pointerId);
+  });
+  quadro.addEventListener('pointermove', e => {
+    if (!gesto || gesto.id !== e.pointerId || !dados?.pode_editar) return;
+    if (!gesto.fantasma && Math.hypot(e.clientX - gesto.x, e.clientY - gesto.y) < 8) return;
+    e.preventDefault();
+    if (!gesto.fantasma) {
+      gesto.fantasma = gesto.cartao.cloneNode(true);
+      gesto.fantasma.classList.add('fantasma');
+      gesto.fantasma.style.width = gesto.cartao.offsetWidth + 'px';
+      gesto.fantasma.style.setProperty('--cor', getComputedStyle(gesto.cartao).getPropertyValue('--cor'));
+      document.body.append(gesto.fantasma);
+      gesto.cartao.classList.add('arrastando');
+    }
+    gesto.fantasma.style.left = (e.clientX + 12) + 'px';
+    gesto.fantasma.style.top = (e.clientY + 12) + 'px';
+    limparAlvo();
+    const local = alvo(e.clientX, e.clientY);
+    if (local) {
+      local.coluna.classList.add('destino');
+      if (local.cartao && local.cartao !== gesto.cartao) local.cartao.classList.add(local.depois ? 'depois' : 'antes');
+    }
+    const limites = quadro.getBoundingClientRect();
+    if (e.clientX > limites.right - 45) quadro.scrollLeft += 20;
+    if (e.clientX < limites.left + 45) quadro.scrollLeft -= 20;
+  });
+  quadro.addEventListener('pointerup', e => {
+    if (!gesto || gesto.id !== e.pointerId) return;
+    const cartao = gesto.cartao;
+    const arrastou = Boolean(gesto.fantasma);
+    const local = arrastou ? alvo(e.clientX, e.clientY) : null;
+    cancelar();
+    if (!arrastou) {
+      abrir(cartao);
+      return;
+    }
+    if (!local || local.cartao === cartao) return;
+    const referencia = local.cartao ? (local.depois ? local.cartao.nextElementSibling : local.cartao) : null;
+    salvar(cartao, local.coluna.querySelector('.itens'), referencia);
+  });
+  quadro.addEventListener('pointercancel', cancelar);
+  window.addEventListener('blur', cancelar);
+  quadro.addEventListener('keydown', e => {
+    if (e.key === 'Escape') cancelar();
+    const cartao = e.target.closest('.cartao');
+    if (!cartao || !dados?.pode_editar || !e.altKey || !['ArrowLeft','ArrowRight'].includes(e.key)) return;
+    e.preventDefault();
+    const atual = Number(cartao.closest('.coluna').dataset.indice);
+    const destino = quadro.children[atual + (e.key === 'ArrowLeft' ? -1 : 1)];
+    if (destino) salvar(cartao, destino.querySelector('.itens'));
+  });
+  window.addEventListener('message', e => {
+    if (e.source !== window.parent || e.data?.type !== 'streamlit:render') return;
+    const args = e.data.args;
+    const novaAssinatura = args.revisao + String(args.pode_editar);
+    if (novaAssinatura === assinatura) return;
+    assinatura = novaAssinatura;
+    renderizar(args);
+  });
+  enviar('streamlit:componentReady', {apiVersion: 1});
+})();
+</script>
+</body>
+</html>
