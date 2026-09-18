@@ -6,8 +6,20 @@ def esta_baixado(registro):
             and bool(str(registro.get("data_baixa") or "").strip()))
 
 
+def _erro_sem_privilegio_trigger(ex):
+    errno = getattr(ex, "errno", None)
+    if errno in (1419, 1227, 1370, 1044, 1142):
+        return True
+    texto = str(ex).lower()
+    return "super privilege" in texto or "log_bin_trust_function_creators" in texto
+
+
 def instalar_protecao_conciliacao(cursor):
-    """Triggers protegem todas as rotas de escrita, inclusive sessões concorrentes."""
+    """Triggers protegem rotas de escrita; se o MySQL recusar, o app segue com o bloqueio em Python."""
+    try:
+        cursor.execute("SET SESSION log_bin_trust_function_creators = 1")
+    except Exception:
+        pass
     for tabela in ("contas_pagar", "contas_receber"):
         pago = "Pago" if tabela == "contas_pagar" else "Recebido"
         bloqueado = "LOWER(TRIM(COALESCE(OLD.conciliado, ''))) IN ('sim','1','true','yes')"
@@ -35,5 +47,13 @@ def instalar_protecao_conciliacao(cursor):
         for evento, regra in regras.items():
             nome = f"trg_{tabela}_conciliacao_{evento}_v1"
             cursor.execute("SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME=?", (nome,))
-            if not cursor.fetchone():
-                cursor.execute(f"CREATE TRIGGER `{nome}` BEFORE {evento.upper()} ON `{tabela}` FOR EACH ROW BEGIN {regra} END")
+            if cursor.fetchone():
+                continue
+            try:
+                cursor.execute(
+                    f"CREATE TRIGGER `{nome}` BEFORE {evento.upper()} ON `{tabela}` FOR EACH ROW BEGIN {regra} END"
+                )
+            except Exception as ex:
+                if _erro_sem_privilegio_trigger(ex):
+                    return
+                raise

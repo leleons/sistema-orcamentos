@@ -31,5 +31,21 @@ class ConciliacaoTests(unittest.TestCase):
         cursor = MagicMock()
         cursor.fetchone.return_value = {"TRIGGER_NAME": "existente"}
         instalar_protecao_conciliacao(cursor)
-        self.assertEqual(cursor.execute.call_count, 6)
-        self.assertTrue(all(c.args[0].startswith("SELECT") for c in cursor.execute.call_args_list))
+        sqls = [chamada.args[0] for chamada in cursor.execute.call_args_list]
+        self.assertTrue(any("log_bin_trust_function_creators" in sql for sql in sqls))
+        selects = [sql for sql in sqls if sql.startswith("SELECT")]
+        self.assertEqual(len(selects), 6)
+        self.assertFalse(any(sql.startswith("CREATE TRIGGER") for sql in sqls))
+
+    def test_sem_super_nao_derruba_inicializacao(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None
+
+        def executar(sql, *args, **kwargs):
+            if str(sql).startswith("CREATE TRIGGER"):
+                erro = RuntimeError("1419 (HY000): You do not have the SUPER privilege")
+                erro.errno = 1419
+                raise erro
+
+        cursor.execute.side_effect = executar
+        instalar_protecao_conciliacao(cursor)
