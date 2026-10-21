@@ -44,7 +44,19 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
         st.stop()
 
     st.title("Gestão de Atendimentos e Checklists")
-    aba1, aba2, aba_intervencoes, aba_agenda = st.tabs(["Lançar Novo Atendimento", "Histórico e Gestão", "Histórico de Intervenções", "Agenda de Visitas"])
+    visita_home = st.session_state.pop('agenda_abrir_home', None)
+    if visita_home:
+        visita_id = int(visita_home['id'])
+        _limpar_estado_editor_agenda(visita_id)
+        st.session_state['ag_id_edicao'] = visita_id
+        st.session_state['agenda_edit_expanded_id'] = visita_id
+        data_home = parse_data_flex(visita_home['data_visita'])
+        st.session_state['agenda_mes_referencia'] = data_home.replace(day=1)
+        st.session_state['ag_fil_data'] = data_home
+        st.session_state['ag_fil_tec'] = 'Todos'
+        st.session_state['ag_fil_status_v2'] = 'Todos'
+        st.session_state['agenda_grade_versao'] = st.session_state.get('agenda_grade_versao', 0) + 1
+    aba1, aba2, aba_intervencoes, aba_agenda = st.tabs(["Lançar Novo Atendimento", "Histórico e Gestão", "Histórico de Intervenções", "Agenda de Visitas"], default='Agenda de Visitas' if st.session_state.get('ag_id_edicao') else None)
 
     with aba1:
         st.write("A data de criação será registrada automaticamente.")
@@ -532,7 +544,7 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
 
         sub_ag1, sub_ag2, sub_ag3, sub_ag4 = st.tabs([
             "Novo Agendamento", "Agenda / Gerenciar", "Tipos de atendimento", "Atividades rápidas"
-        ])
+        ], default='Agenda / Gerenciar' if st.session_state.get('ag_id_edicao') else None)
 
         with sub_ag1:
             st.subheader("Novo Agendamento de Visita")
@@ -726,6 +738,7 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
             conn_cal = conectar_banco(); ccal = conn_cal.cursor()
             ccal.execute(
                 """SELECT * FROM agenda_visitas WHERE data_visita>=? AND data_visita<=?
+                   AND COALESCE(status,'') <> 'Cancelado'
                    ORDER BY data_visita, hora_inicio""",
                 (mes_referencia_agenda.strftime("%Y-%m-%d"),
                  mes_referencia_agenda.replace(day=ultimo_dia_mes).strftime("%Y-%m-%d")),
@@ -751,14 +764,24 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                             continue
                         compromissos_dia = visitas_por_dia.get(numero_dia, [])
                         st.markdown(f"**{numero_dia}**")
-                        for compromisso in compromissos_dia[:3]:
-                            st.caption(
+                        for compromisso in compromissos_dia:
+                            if st.button(
                                 f"{compromisso.get('hora_inicio') or '--:--'} "
-                                f"{compromisso.get('cliente_nome') or 'Sem cliente'}"
-                            )
-                        if len(compromissos_dia) > 3:
-                            st.caption(f"+{len(compromissos_dia) - 3} compromisso(s)")
+                                f"{compromisso.get('cliente_nome') or 'Sem cliente'}",
+                                key=f"cal_visita_{compromisso['id']}", width="stretch",
+                                type='primary' if st.session_state.get('ag_id_edicao') == int(compromisso['id']) else 'secondary',
+                            ):
+                                visita_id = int(compromisso['id'])
+                                _limpar_estado_editor_agenda(visita_id)
+                                st.session_state['ag_id_edicao'] = visita_id
+                                st.session_state['agenda_edit_expanded_id'] = visita_id
+                                st.session_state['ag_fil_data'] = parse_data_flex(compromisso['data_visita'])
+                                st.session_state['ag_fil_tec'] = 'Todos'
+                                st.session_state['ag_fil_status_v2'] = 'Todos'
+                                st.session_state['agenda_grade_versao'] = st.session_state.get('agenda_grade_versao', 0) + 1
 
+            if st.session_state.get('ag_id_edicao'):
+                st.info(f"Visita #{st.session_state['ag_id_edicao']} selecionada. Os detalhes e a edição estão abaixo da lista.")
             ag_f1, ag_f2, ag_f3 = st.columns(3)
             with ag_f1:
                 filtro_tec = st.selectbox("Filtrar por Técnico:", ["Todos"] + usuarios_dsystem, key="ag_fil_tec")
@@ -808,7 +831,7 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                     "Tipo": vis.get("tipo_visita"), "Status": vis.get("status"),
                 } for vis in visitas]
                 visita_clicada_id = tabela_clicavel_id(
-                    st, linhas_visitas, "agenda_visitas_grade", campo_id="ID"
+                    st, linhas_visitas, f"agenda_visitas_grade_{st.session_state.get('agenda_grade_versao', 0)}", campo_id="ID"
                 )
                 if visita_clicada_id:
                     visita_id = int(visita_clicada_id)
@@ -844,26 +867,9 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
 
                     for vis in por_data[data_str]:
                         cor = STATUS_CORES.get(vis['status'], '#888')
-                        horario = f"{vis['hora_inicio']} – {vis['hora_fim']}" if vis['hora_inicio'] else "Horário não definido"
                         with st.container():
-                            st.markdown(f"""
-    <div style="border-left: 5px solid {cor}; background:#f8f9fa; border-radius:6px;
-            padding:12px 16px; margin-bottom:8px;">
-      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
-    <div>
-      <span style="font-size:15px; font-weight:bold; color:#004488;">{vis['cliente_nome']}</span>
-      &nbsp;&nbsp;
-      <span style="background:{cor}; color:white; border-radius:4px; padding:2px 8px; font-size:12px;">{vis['status']}</span>
-    </div>
-    <div style="color:#555; font-size:13px;">{horario} &nbsp;|&nbsp; {vis['tecnico']}</div>
-      </div>
-      <div style="color:#333; font-size:13px; margin-top:4px;">
-    <b>Tipo:</b> {vis['tipo_visita']}
-    {"&nbsp;&nbsp;|&nbsp;&nbsp;<b>Obs:</b> " + vis['descricao'] if vis['descricao'] else ""}
-      </div>
-      <div style="color:#aaa; font-size:11px; margin-top:3px;">ID #{vis['id']:04d} — criado em {vis.get('criado_em','—')}</div>
-    </div>
-                            """, unsafe_allow_html=True)
+                            from dsystem_erp.pages.agenda_visual import cartao_visita
+                            st.markdown(cartao_visita(vis, cor), unsafe_allow_html=True)
                             if st.button(f"Selecionar visita #{vis['id']:04d}", key=f"agenda_select_{vis['id']}"):
                                 visita_id = int(vis["id"])
                                 _limpar_estado_editor_agenda(visita_id)
@@ -878,7 +884,6 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                 ag_id_sel = int(st.session_state.get("ag_id_edicao") or 0)
                 if not ag_id_sel:
                     st.info("Selecione uma visita na tabela acima.")
-                    return
 
                 conn_ed2 = conectar_banco()
                 conn_ed2.row_factory = None
@@ -980,9 +985,14 @@ def renderizar_atendimentos_checklists(ctx: dict) -> None:
                             st.toast("Visita atualizada!")
                             st.rerun()
 
-                        if btn_col2.button("Excluir Visita", key=f"btn_del_ag_{edit_key}", width="stretch"):
-                            deletar_registro('agenda_visitas', 'id', ag_id_sel)
-                            st.toast("Visita excluída.")
+                        if btn_col2.button("Cancelar agendamento", key=f"btn_cancel_ag_{edit_key}", width="stretch"):
+                            conn_cancel = conectar_banco()
+                            try:
+                                conn_cancel.cursor().execute("UPDATE agenda_visitas SET status=? WHERE id=?", ("Cancelado", ag_id_sel))
+                                conn_cancel.commit()
+                            finally:
+                                conn_cancel.close()
+                            st.toast("Agendamento cancelado e retirado do calendário.")
                             st.rerun()
 
         with sub_ag3:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from time import sleep
 from dsystem_erp.services.simples import situacao_da_consulta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -11,6 +12,14 @@ from urllib.request import Request, urlopen
 
 class ConsultaDadosPublicosErro(RuntimeError):
     """Erro legível para falhas de validação ou indisponibilidade das consultas."""
+
+
+class ConsultaDadosPublicosIndisponivel(ConsultaDadosPublicosErro):
+    """Falha transitória; repetir apenas consultas GET, nunca emissões fiscais."""
+
+    def __init__(self, mensagem, *, repetir=True):
+        super().__init__(mensagem)
+        self.repetir = repetir
 
 
 def somente_digitos(valor: object) -> str:
@@ -47,9 +56,19 @@ def _consultar_json(url: str, *, timeout: int = 10, opener=urlopen) -> dict:
             ) from ex
         if ex.code == 404:
             raise ConsultaDadosPublicosErro("Cadastro não encontrado.") from ex
+        if ex.code == 429:
+            raise ConsultaDadosPublicosIndisponivel(
+                "O serviço atingiu o limite de consultas. Aguarde alguns minutos antes de tentar novamente. Seus dados foram preservados.",
+                repetir=False,
+            ) from ex
+        if ex.code in (408, 500, 502, 503, 504):
+            raise ConsultaDadosPublicosIndisponivel(
+                "Serviço de consulta temporariamente indisponível.",
+                repetir=not bool(ex.headers and ex.headers.get('Retry-After')),
+            ) from ex
         raise ConsultaDadosPublicosErro(f"O serviço respondeu com erro HTTP {ex.code}.") from ex
     except (URLError, TimeoutError, OSError) as ex:
-        raise ConsultaDadosPublicosErro("Serviço de consulta indisponível no momento.") from ex
+        raise ConsultaDadosPublicosIndisponivel("Serviço de consulta indisponível no momento.") from ex
 
     try:
         dados = json.loads(conteudo)
@@ -60,8 +79,43 @@ def _consultar_json(url: str, *, timeout: int = 10, opener=urlopen) -> dict:
     return dados
 
 
+def _consultar_cnpj_ws(documento, *, timeout, opener):
+    """Adapta a API pública alternativa ao formato da BrasilAPI, sem inferir regime."""
+    try:
+        resposta = _consultar_json(f"https://publica.cnpj.ws/cnpj/{documento}", timeout=timeout, opener=opener)
+        estabelecimento = resposta.get('estabelecimento')
+        if (not isinstance(estabelecimento, dict)
+                or somente_digitos(estabelecimento.get('cnpj')) != documento
+                or not resposta.get('razao_social')):
+            raise ConsultaDadosPublicosErro('Resposta cadastral inválida da alternativa.')
+        def objeto(valor):
+            return valor if isinstance(valor, dict) else {}
+        def opcao(valor):
+            return {'Sim': True, 'Não': False}.get(valor)
+        simples = objeto(resposta.get('simples'))
+        dados = dict(estabelecimento)
+        dados.update({
+            'razao_social': resposta['razao_social'],
+            'municipio': objeto(estabelecimento.get('cidade')).get('nome'),
+            'uf': objeto(estabelecimento.get('estado')).get('sigla'),
+            'logradouro': ' '.join(str(estabelecimento.get(k) or '') for k in ('tipo_logradouro', 'logradouro')).strip(),
+            'ddd_telefone_1': ''.join(str(estabelecimento.get(k) or '') for k in ('ddd1', 'telefone1')) if estabelecimento.get('telefone1') else '',
+            'ddd_telefone_2': ''.join(str(estabelecimento.get(k) or '') for k in ('ddd2', 'telefone2')) if estabelecimento.get('telefone2') else '',
+            'cnae_fiscal_descricao': objeto(estabelecimento.get('atividade_principal')).get('descricao'),
+            'descricao_situacao_cadastral': estabelecimento.get('situacao_cadastral'),
+            'opcao_pelo_simples': opcao(simples.get('simples')),
+            'opcao_pelo_mei': opcao(simples.get('mei')),
+        })
+        return dados
+    except ConsultaDadosPublicosErro as ex:
+        raise ConsultaDadosPublicosIndisponivel(
+            'BrasilAPI e CNPJ.ws não conseguiram concluir a consulta. Os dados preenchidos foram preservados. '
+            'Aguarde alguns minutos ou complete o cadastro manualmente.', repetir=False,
+        ) from ex
+
+
 def consultar_cnpj(cnpj: object, *, timeout: int = 10, opener=urlopen) -> dict:
-    """Consulta uma empresa na BrasilAPI e devolve os campos usados pelo ERP."""
+    """Consulta BrasilAPI; em indisponibilidade tenta uma vez a CNPJ.ws."""
     documento = somente_digitos(cnpj)
     if len(documento) != 14:
         raise ConsultaDadosPublicosErro("Informe um CNPJ com 14 dígitos.")
@@ -70,11 +124,24 @@ def consultar_cnpj(cnpj: object, *, timeout: int = 10, opener=urlopen) -> dict:
             "CNPJ inválido. Confira os números, inclusive os dois últimos dígitos verificadores."
         )
 
-    dados = _consultar_json(
-        f"https://brasilapi.com.br/api/cnpj/v1/{documento}",
-        timeout=timeout,
-        opener=opener,
-    )
+    # Até dois GETs na BrasilAPI e um na alternativa. Nunca repete 429
+    # no mesmo provedor nem envia documentos inválidos à alternativa.
+    for tentativa in range(2):
+        try:
+            dados = _consultar_json(
+                f"https://brasilapi.com.br/api/cnpj/v1/{documento}",
+                timeout=timeout,
+                opener=opener,
+            )
+            break
+        except ConsultaDadosPublicosIndisponivel as ex:
+            if not ex.repetir:
+                dados = _consultar_cnpj_ws(documento, timeout=timeout, opener=opener)
+                break
+            if tentativa == 1:
+                dados = _consultar_cnpj_ws(documento, timeout=timeout, opener=opener)
+                break
+            sleep(0.5)
     cidade = dados.get("municipio") or ""
     uf = dados.get("uf") or ""
     return {

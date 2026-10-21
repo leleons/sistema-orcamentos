@@ -30,6 +30,26 @@ class NavigationTests(unittest.TestCase):
         self.assertIn("compras.view", TODAS_PERMISSOES)
         self.assertIn("compras.edit", TODAS_PERMISSOES)
 
+    def test_impostos_ficam_somente_em_cadastros_sem_mudar_rotas_ou_permissoes(self):
+        esperados = {
+            "Cadastrar impostos": "Cadastrar impostos",
+            "Impostos": "Impostos do Simples",
+        }
+        for pagina, titulo in esperados.items():
+            encontrados = [
+                (modulo["titulo"], item)
+                for modulo in MODULOS_NAVEGACAO
+                for item in modulo.get("submodulos", [])
+                if item.get("pagina") == pagina
+            ]
+            self.assertEqual(len(encontrados), 1)
+            modulo, item = encontrados[0]
+            self.assertEqual(modulo, "Cadastros")
+            self.assertEqual(item["titulo"], titulo)
+            self.assertEqual(item["botao"], titulo)
+            self.assertEqual(item["acoes"], ["impostos.view"])
+        self.assertNotIn("Impostos", [m["titulo"] for m in MODULOS_NAVEGACAO])
+
     def test_arvore_tem_modulos(self):
         modulos = {modulo.get("modulo") for modulo in ARVORE_PERMISSOES}
         self.assertIn("cadastros", modulos)

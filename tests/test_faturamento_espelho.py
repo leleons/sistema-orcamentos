@@ -1,5 +1,7 @@
 import json
 import unittest
+import io
+from pypdf import PdfReader
 
 from dsystem_erp.services.faturamento_espelho import gerar_pdf_espelho_faturamento
 
@@ -22,6 +24,11 @@ class FaturamentoEspelhoTests(unittest.TestCase):
         })
         self.assertTrue(pdf.startswith(b"%PDF"))
         self.assertGreater(len(pdf), 1000)
+        documento = PdfReader(io.BytesIO(pdf))
+        self.assertEqual(len(documento.pages), 1)
+        texto = documento.pages[0].extract_text()
+        self.assertIn("Total Geral", texto)
+        self.assertIn("Primeira etapa.", texto)
 
 
 if __name__ == "__main__":

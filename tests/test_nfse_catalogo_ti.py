@@ -3,10 +3,23 @@ from unittest.mock import Mock
 
 from dsystem_erp.services.nfse_catalogo_ti import (
     cadastrar_catalogo_ti, codigo_nacional_salvo, desdobramento_suporte_bh, SERVICOS_TI_ADICIONAIS,
+    chave_desdobramento_salvo,
 )
 
 
 class CatalogoTiTest(unittest.TestCase):
+    def test_chave_desdobro_separa_contextos(self):
+        base = chave_desdobramento_salvo({'id': 1}, '3106200', '010701', 'homologacao')
+        self.assertTrue(base)
+        for servico, municipio, codigo, ambiente in [
+            ({'id': 2}, '3106200', '010701', 'homologacao'),
+            ({'id': 1}, '3550308', '010701', 'homologacao'),
+            ({'id': 1}, '3106200', '140601', 'homologacao'),
+            ({'id': 1}, '3106200', '010701', 'producao')]:
+            self.assertNotEqual(base, chave_desdobramento_salvo(servico, municipio, codigo, ambiente))
+        self.assertEqual(chave_desdobramento_salvo(None, '3106200', '010701', 'homologacao'), '')
+        self.assertEqual(chave_desdobramento_salvo({'id': 1}, '3106200', '', 'homologacao'), '')
+
     def test_desdobramento_limitado_ao_caso_confirmado(self):
         servico = {"nome": "Suporte tecnico em informatica"}
         self.assertEqual(desdobramento_suporte_bh(servico, "3106200", "010701", "homologacao"), "001")

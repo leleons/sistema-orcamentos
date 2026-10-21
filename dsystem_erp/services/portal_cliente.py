@@ -9,6 +9,54 @@ from __future__ import annotations
 from html import escape
 
 
+def portal_funcionario(estado):
+    return estado.get('tipo_login') == 'cliente' and estado.get('portal_tipo_usuario') != 'Empresa'
+
+
+def filtro_chamados_portal(estado, cliente_id=None, cliente_nome=None):
+    """Escopo do portal vem da sessão, nunca do nome informado no formulário."""
+    if estado.get('tipo_login') == 'cliente':
+        empresa = estado.get('cliente_id')
+        usuario = estado.get('username')
+        if not empresa or not usuario:
+            return '1=0', ()
+        if estado.get('portal_tipo_usuario') == 'Empresa':
+            # O login principal vê todos os autores, mas somente desta empresa.
+            return 'cliente_id=%s', (empresa,)
+        filtro = 'cliente_id=%s AND criado_por=%s'
+        params = (empresa, usuario)
+        if portal_funcionario(estado):
+            filtro += (' AND EXISTS (SELECT 1 FROM clientes_portal_usuarios p '
+                       'WHERE p.cliente_id=%s AND p.username=%s AND p.ativo=1)')
+            params += (empresa, usuario)
+        return filtro, params
+    if cliente_id:
+        return '(cliente_id=%s OR (cliente_id IS NULL AND cliente_nome=%s))', (cliente_id, cliente_nome)
+    return 'cliente_nome=%s', (cliente_nome,)
+
+
+def exigir_acesso_chamado(cursor, estado, chamado_id):
+    """Revalida leituras e mutações conforme login principal ou individual."""
+    if estado.get('tipo_login') != 'cliente':
+        return
+    filtro, params = filtro_chamados_portal(estado)
+    cursor.execute(f'SELECT id FROM chamados_cliente WHERE id=%s AND ({filtro})', (chamado_id, *params))
+    if not cursor.fetchone():
+        raise PermissionError('Este chamado não pertence ao seu acesso ou seu login foi desativado.')
+
+
+def exigir_conta_portal_ativa(cursor, estado):
+    if estado.get('tipo_login') != 'cliente':
+        return
+    if not estado.get('cliente_id') or not estado.get('username'):
+        raise PermissionError('Entre novamente no portal.')
+    if portal_funcionario(estado):
+        cursor.execute('SELECT id FROM clientes_portal_usuarios WHERE cliente_id=%s AND username=%s AND ativo=1',
+                       (estado['cliente_id'], estado['username']))
+        if not cursor.fetchone():
+            raise PermissionError('Seu login foi desativado. Entre em contato com a D-System.')
+
+
 MAPA_SECOES_PORTAL = {
     "inicio": "inicio",
     "chamados": "meus_chamados",

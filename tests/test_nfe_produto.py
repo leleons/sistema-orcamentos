@@ -16,6 +16,10 @@ from dsystem_erp.services.nfe_produto import (
     enviar_xml_nfe_produto,
     endpoint_autorizacao_nfe,
     assinar_xml_nfe_produto,
+    validar_assinatura_nfe_produto,
+    extrair_nfe_assinada_bytes,
+    sha256_nfe_assinada,
+    registrar_integridade_nfe,
 )
 
 
@@ -100,7 +104,7 @@ class NFeProdutoTests(unittest.TestCase):
         dados = dict(ambiente="homologacao", ncm="84716053", cfop="5102", emitente_cnpj="23524449000154",
                      inscricao_estadual="0026483460031", regime_tributario="3", uf="MG", codigo_municipio="3106200",
                      numero=20, serie=1, destinatario=dict(logradouro="Rua Teste", numero="1", bairro="Centro",
-                     municipio="Belo Horizonte", uf="MG", codigo_municipio="3106200"))
+                     municipio="Belo Horizonte", uf="MG", codigo_municipio="3106200", indicador_ie="9"))
         itens = [dict(desc="Mouse", qtd=2, vunit=50, vtotal=100,
                       tributos=dict(base_icms=100, icms=18, base_pis=100, pis=1.65, base_cofins=100, cofins=7.6),
                       ibscbs=dict(cst="000", classificacao="000001", base=100, uf=0.1, municipal=0, cbs=0.9))]
@@ -137,7 +141,7 @@ class NFeProdutoTests(unittest.TestCase):
         self.assertIsNotNone(lote.find(f"{{{NFE_NS}}}NFe"))
 
     def test_retorno_prioriza_protocolo_sobre_lote(self):
-        for codigo, esperado in (("100", "Autorizada"), ("305", "Rejeitada")):
+        for codigo, esperado in (("100", "Autorizada"), ("297", "Rejeitada"), ("305", "Rejeitada")):
             xml = f'<retEnviNFe xmlns="{NFE_NS}"><cStat>104</cStat><xMotivo>Lote processado</xMotivo><protNFe><infProt><cStat>{codigo}</cStat><xMotivo>Resultado da nota</xMotivo><nProt>123</nProt></infProt></protNFe></retEnviNFe>'
             info = analisar_retorno_nfe_produto(xml)
             self.assertEqual(info["status"], esperado)
@@ -146,7 +150,7 @@ class NFeProdutoTests(unittest.TestCase):
 
     def test_conexao_usa_context_manager_e_bloqueia_ambiente_trocado(self):
         fat, itens, dados = self.exemplo()
-        xml = gerar_xml_nfe_produto_400(fat, itens, dados)
+        xml, _ = self.xml_assinado_teste()
         contexto = object()
         resposta = MagicMock()
         resposta.__enter__.return_value.read.return_value = b"retorno"
@@ -157,7 +161,7 @@ class NFeProdutoTests(unittest.TestCase):
                 enviar_xml_nfe_produto(endpoint_autorizacao_nfe("MG", "producao"), xml, "teste.pfx", "segredo")
             self.assertEqual(abrir.call_count, 1)
 
-    def test_assinatura_valida_e_envelope_preserva_documento(self):
+    def xml_assinado_teste(self, xml=None):
         import tempfile
         from pathlib import Path
         from datetime import datetime, timedelta, timezone
@@ -179,19 +183,154 @@ class NFeProdutoTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as diretorio:
             caminho = Path(diretorio) / "teste.pfx"
             caminho.write_bytes(pkcs12.serialize_key_and_certificates(b"teste", key, cert, None, serialization.NoEncryption()))
-            assinado = assinar_xml_nfe_produto(gerar_xml_nfe_produto_400(fat, itens, dados), str(caminho), "")
+            assinado = assinar_xml_nfe_produto(xml or gerar_xml_nfe_produto_400(fat, itens, dados), str(caminho), "")
+        return assinado, cert
+
+    def test_assinatura_valida_e_envelope_preserva_documento(self):
+        from lxml import etree
+        import base64
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+        assinado, cert = self.xml_assinado_teste()
         self.assertNotIn(b"<ds:Signature", assinado)
         root = etree.fromstring(assinado)
         ds = "http://www.w3.org/2000/09/xmldsig#"
         info = root.find(f".//{{{ds}}}SignedInfo")
         assinatura = base64.b64decode(root.findtext(f".//{{{ds}}}SignatureValue"))
-        cert.public_key().verify(assinatura, etree.tostring(info, method="c14n"), padding.PKCS1v15(), hashes.SHA1())
+        info_isolada = etree.fromstring(etree.tostring(info))
+        cert.public_key().verify(assinatura, etree.tostring(info_isolada, method="c14n"), padding.PKCS1v15(), hashes.SHA1())
         digest = hashes.Hash(hashes.SHA1())
-        digest.update(etree.tostring(root.find(f"{{{NFE_NS}}}infNFe"), method="c14n"))
+        inf_isolada = etree.fromstring(etree.tostring(root.find(f"{{{NFE_NS}}}infNFe")))
+        digest.update(etree.tostring(inf_isolada, method="c14n"))
         self.assertEqual(base64.b64decode(info.findtext(f".//{{{ds}}}DigestValue")), digest.finalize())
-        # A SEFAZ extrai o documento do transporte SOAP antes de verificar a assinatura.
+        # Verifica no contexto final: preservar apenas os bytes não basta em C14N inclusivo.
         documento = assinado.decode("utf-8").split("?>", 1)[-1].strip().encode("utf-8")
-        self.assertIn(documento, montar_envelope_nfe_autorizacao(assinado))
+        envelope = montar_envelope_nfe_autorizacao(assinado)
+        self.assertIn(documento, envelope)
+        embutido = etree.fromstring(envelope).find(f".//{{{NFE_NS}}}NFe")
+        si_embutido = embutido.find(f".//{{{ds}}}SignedInfo")
+        self.assertEqual(etree.tostring(info, method="c14n"), etree.tostring(si_embutido, method="c14n"))
+        self.assertEqual(etree.tostring(root.find(f"{{{NFE_NS}}}infNFe"), method="c14n"),
+                         etree.tostring(embutido.find(f"{{{NFE_NS}}}infNFe"), method="c14n"))
+        si_isolada = etree.fromstring(etree.tostring(si_embutido))
+        cert.public_key().verify(assinatura, etree.tostring(si_isolada, method="c14n"), padding.PKCS1v15(), hashes.SHA1())
+        validar_assinatura_nfe_produto(assinado)
+        validar_assinatura_nfe_produto(envelope)
+
+    def test_namespace_ancestral_antigo_invalida_assinatura(self):
+        assinado, _ = self.xml_assinado_teste()
+        envelope = montar_envelope_nfe_autorizacao(assinado).replace(
+            b'<Envelope xmlns=', b'<Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns=')
+        # O problema 297 antigo ocorre mesmo com os bytes da NFe intactos.
+        self.assertEqual(sha256_nfe_assinada(assinado), sha256_nfe_assinada(envelope))
+        with patch('dsystem_erp.technical_logs.registrar_log_tecnico') as log:
+            registrar_integridade_nfe('isolada', assinado)
+            registrar_integridade_nfe('soap_antigo', envelope)
+        antes, depois = [c.args[3] for c in log.call_args_list]
+        for campo in ('sha256_infNFe_c14n', 'sha256_SignedInfo_c14n'):
+            self.assertNotEqual(antes[campo], depois[campo])
+        with self.assertRaisesRegex(ValueError, 'digest'):
+            validar_assinatura_nfe_produto(envelope)
+
+    def test_tres_hashes_iguais_ate_request_data(self):
+        from hashlib import sha256
+        fat, itens, dados = self.exemplo()
+        itens[0]['desc'] = 'Peça com acentuação & conexão'
+        resposta = MagicMock()
+        resposta.__enter__.return_value.read.return_value = b'retorno'
+        with patch('dsystem_erp.technical_logs.registrar_log_tecnico') as log:
+            assinado, _ = self.xml_assinado_teste(gerar_xml_nfe_produto_400(fat, itens, dados))
+            esperado = sha256_nfe_assinada(assinado)
+            with patch('dsystem_erp.services.nfse_soap.contexto_ssl_certificado_pfx', return_value=nullcontext(None)), \
+                 patch('urllib.request.urlopen', return_value=resposta) as rede:
+                enviar_xml_nfe_produto(endpoint_autorizacao_nfe('MG', 'homologacao'), assinado,
+                                      'teste.pfx', 'senha-nao-logar', sha256_assinado=esperado)
+            etapas = [c.args[3] for c in log.call_args_list]
+        self.assertEqual([d['etapa'] for d in etapas], ['apos_assinar', 'antes_lote', 'antes_envio'])
+        for campo in ('sha256_nfe', 'sha256_infNFe_c14n', 'sha256_SignedInfo_c14n'):
+            self.assertEqual(len({d[campo] for d in etapas}), 1)
+        req = rede.call_args.args[0]
+        original = extrair_nfe_assinada_bytes(assinado)
+        self.assertEqual(original, extrair_nfe_assinada_bytes(req.data))
+        self.assertEqual(esperado, sha256(original).hexdigest())
+        self.assertEqual(etapas[-1]['sha256_documento'], sha256(req.data).hexdigest())
+        self.assertNotIn('senha-nao-logar', str(etapas))
+        self.assertNotIn('<NFe', str(etapas))
+
+    def test_mudanca_lexical_valida_bloqueada_por_hash_de_origem(self):
+        assinado, _ = self.xml_assinado_teste()
+        # Aspas equivalentes mantêm C14N, mas não são os bytes após a assinatura.
+        alterado = assinado.replace(b'versao="4.00"', b"versao='4.00'", 1)
+        self.assertNotEqual(assinado, alterado)
+        validar_assinatura_nfe_produto(alterado)
+        with patch('urllib.request.urlopen') as rede, \
+             patch('dsystem_erp.services.nfse_soap.contexto_ssl_certificado_pfx') as cert:
+            with self.assertRaisesRegex(ValueError, 'antes_lote.*SHA-256'):
+                enviar_xml_nfe_produto('https://exemplo.invalid', alterado, '', '',
+                                      sha256_assinado=sha256_nfe_assinada(assinado))
+        rede.assert_not_called()
+        cert.assert_not_called()
+
+    def test_alteracao_na_montagem_bloqueada_antes_da_rede(self):
+        assinado, _ = self.xml_assinado_teste()
+        envelope = montar_envelope_nfe_autorizacao(assinado)
+        for alterado, mensagem in (
+            (envelope.replace(b'versao="4.00"', b"versao='4.00'"), 'antes_envio.*SHA-256'),
+            (envelope.replace(b'<Envelope xmlns=', b'<Envelope xmlns:s="urn:extra" xmlns='), 'digest'),
+            (envelope.replace(b'<infNFe ', b'\n  <infNFe '), 'antes_envio.*SHA-256'),
+        ):
+            with self.subTest(mensagem=mensagem), \
+                 patch('dsystem_erp.services.nfe_produto.montar_envelope_nfe_autorizacao', return_value=alterado), \
+                 patch('urllib.request.urlopen') as rede, \
+                 patch('dsystem_erp.services.nfse_soap.contexto_ssl_certificado_pfx') as cert:
+                with self.assertRaisesRegex(ValueError, mensagem):
+                    enviar_xml_nfe_produto('https://exemplo.invalid', assinado, '', '')
+                rede.assert_not_called()
+                cert.assert_not_called()
+
+    def test_extracao_preserva_crlf_cdata_comentarios_acentos_e_prefixos(self):
+        for prefixo in ('', 'n:'):
+            ns = 'xmlns:n' if prefixo else 'xmlns'
+            conteudo = (f'<{prefixo}NFe {ns}="{NFE_NS}">\r\n'
+                        '<!-- <NFe>ignorar</NFe> -->\r\n'
+                        '<texto><![CDATA[</NFe> & peça <NFe>]]></texto>\r\n'
+                        f'</{prefixo}NFe>').encode('utf-8')
+            arquivo = b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?>\r\n' + conteudo + b'\r\n'
+            self.assertEqual(extrair_nfe_assinada_bytes(arquivo), conteudo)
+            self.assertEqual(extrair_nfe_assinada_bytes(montar_envelope_nfe_autorizacao(arquivo)), conteudo)
+
+    def test_extracao_rejeita_dtd_multiplas_notas_encoding_e_texto(self):
+        nfe = f'<NFe xmlns="{NFE_NS}"><infNFe/></NFe>'
+        for xml in (nfe, ('<lote>' + nfe + nfe + '</lote>').encode(),
+                    ('<!DOCTYPE NFe>' + nfe).encode(), nfe.encode('utf-16'),
+                    ('<?xml version="1.0" encoding="ISO-8859-1"?>' + nfe).encode()):
+            with self.subTest(xml=type(xml)), self.assertRaises(ValueError):
+                extrair_nfe_assinada_bytes(xml)
+
+    def test_envio_bloqueia_xml_adulterado_sem_rede(self):
+        assinado, _ = self.xml_assinado_teste()
+        for xml in (assinado.replace(b'<vProd>100.00</vProd>', b'<vProd>999.00</vProd>'),
+                    gerar_xml_nfe_produto_400(*self.exemplo())):
+            with self.subTest(xml_assinado=b'SignatureValue' in xml), patch('urllib.request.urlopen') as rede:
+                with self.assertRaisesRegex(ValueError, 'envio bloqueado'):
+                    enviar_xml_nfe_produto(endpoint_autorizacao_nfe('MG', 'homologacao'), xml, '', '')
+                rede.assert_not_called()
+
+    def test_assinatura_e_referencia_adulteradas_sao_bloqueadas(self):
+        from lxml import etree
+        assinado, _ = self.xml_assinado_teste()
+        ds = 'http://www.w3.org/2000/09/xmldsig#'
+        for campo in ('SignatureValue', 'Reference', 'DigestMethod'):
+            xml = etree.fromstring(assinado)
+            elemento = xml.find(f'.//{{{ds}}}{campo}')
+            if campo == 'SignatureValue':
+                elemento.text = 'AAAA'
+            elif campo == 'Reference':
+                elemento.set('URI', '#outra-nota')
+            else:
+                elemento.set('Algorithm', 'nao-suportado')
+            with self.subTest(campo=campo), self.assertRaisesRegex(ValueError, 'envio bloqueado'):
+                validar_assinatura_nfe_produto(etree.tostring(xml))
 
 
 if __name__ == "__main__":

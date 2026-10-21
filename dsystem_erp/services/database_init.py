@@ -355,6 +355,12 @@ def iniciar_banco(conectar_banco):
         alterado_por TEXT, alterado_em TEXT, INDEX idx_base_pesquisa_titulo (titulo)
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS base_pesquisa_anexos (
+        id INT PRIMARY KEY AUTO_INCREMENT, pesquisa_id INTEGER NOT NULL,
+        nome TEXT, mime VARCHAR(255), arquivo LONGBLOB,
+        INDEX idx_pesquisa_anexos (pesquisa_id)
+    )''')
+
     c.execute('''CREATE TABLE IF NOT EXISTS contrato_clausulas (
         id INT PRIMARY KEY AUTO_INCREMENT,
         tipo_contrato VARCHAR(80),
@@ -482,6 +488,7 @@ def iniciar_banco(conectar_banco):
         INDEX idx_contratos_parte (parte_tipo, parte_id)
     )''')
     for coluna_contrato_rec, tipo_contrato_rec in (
+        ("arquivo_word", "LONGBLOB"), ("nome_arquivo_word", "TEXT"),
         ("assinado", "VARCHAR(10) DEFAULT 'Não'"), ("data_assinatura", "TEXT"),
         ("gerar_recorrencia", "VARCHAR(10) DEFAULT 'Não'"),
         ("recorrencia_tipo", "TEXT"), ("recorrencia_periodicidade", "VARCHAR(40)"),
@@ -548,6 +555,9 @@ def iniciar_banco(conectar_banco):
         ("medicao_numero", "VARCHAR(80)"), ("medicao_inicio", "TEXT"),
         ("medicao_fim", "TEXT"), ("medicao_percentual", "DECIMAL(10,4) DEFAULT 0"),
         ("medicao_referencia", "TEXT"), ("medicao_historico", "LONGTEXT"),
+        ("medicao_principal_id", "INTEGER"),
+        ("documentos_entrega", "VARCHAR(40) DEFAULT 'Nota e espelho'"),
+        ("emitir_automaticamente", "INTEGER DEFAULT 0"),
     ):
         try: garantir_coluna(c, "faturamento", coluna_medicao, tipo_medicao)
         except Exception: pass
@@ -579,6 +589,10 @@ def iniciar_banco(conectar_banco):
         data_inicial TEXT, data_final TEXT, centro TEXT, categoria TEXT, gerar_automaticamente VARCHAR(10),
         ativo VARCHAR(10) DEFAULT 'Sim', ultima_geracao TEXT, criado_por TEXT, criado_em TEXT
     )''')
+    for campo_classificacao in ('categoria', 'centro', 'plano_contas', 'conta_bancaria'):
+        garantir_coluna(c, 'faturamento', campo_classificacao, 'TEXT')
+    for campo_classificacao in ('plano_contas', 'conta_bancaria'):
+        garantir_coluna(c, 'financeiro_recorrencias_v2', campo_classificacao, 'TEXT')
     garantir_tabela_nova(conn, c, "financeiro_cobrancas_v2", '''CREATE TABLE IF NOT EXISTS financeiro_cobrancas_v2 (
         id INT PRIMARY KEY AUTO_INCREMENT, conta_receber_id INTEGER, cliente TEXT, dias_atraso INTEGER,
         valor_atualizado DECIMAL(14,2) DEFAULT 0, historico LONGTEXT, status VARCHAR(60),
@@ -666,6 +680,16 @@ def iniciar_banco(conectar_banco):
         link_nota LONGTEXT, observacoes LONGTEXT, criado_por TEXT, criado_em TEXT, emitido_em TEXT,
         xml_envio LONGTEXT, xml_retorno LONGTEXT, xml_autorizado LONGTEXT, pdf_base64 LONGTEXT,
         protocolo TEXT, mensagem_retorno LONGTEXT, numero_lote TEXT, atualizado_em TEXT
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS fiscal_emissoes_auto (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        faturamento_id INTEGER NOT NULL, tipo VARCHAR(20) NOT NULL,
+        estado VARCHAR(40) NOT NULL DEFAULT 'Pendente', nota_id INTEGER,
+        plano_json LONGTEXT, origem_hash VARCHAR(64), mensagem LONGTEXT,
+        xml_envio LONGTEXT, xml_retorno LONGTEXT, autorizado_por TEXT,
+        atualizado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_fiscal_auto_tipo (faturamento_id, tipo)
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS nfse_bh_servicos (
@@ -959,6 +983,8 @@ def iniciar_banco(conectar_banco):
     except Exception: pass
     try: c.execute("ALTER TABLE usuarios ADD COLUMN funcionario_tipo_contrato TEXT")
     except Exception: pass
+    for coluna_empresa_pj in ('funcionario_pj_razao_social','funcionario_pj_cnpj','funcionario_pj_endereco'):
+        garantir_coluna(c,'usuarios',coluna_empresa_pj,'TEXT')
     try: c.execute("ALTER TABLE usuarios ADD COLUMN funcionario_forma_pagamento TEXT")
     except Exception: pass
     try: c.execute("ALTER TABLE usuarios ADD COLUMN funcionario_emite_nf TEXT")
@@ -1032,10 +1058,12 @@ def iniciar_banco(conectar_banco):
              0, 0, 0, json.dumps(["os.view", "os.edit", "recepcao.view", "recepcao.edit"]),
              "[]", "Recepção"))
     
-    from dsystem_erp.services.conciliacao import instalar_protecao_conciliacao
     for coluna_bancaria in ("banco", "agencia", "numero_conta", "titular", "documento_titular", "chave_pix"):
         garantir_coluna(c, "financeiro_cadastros_aux", coluna_bancaria, "TEXT")
-    instalar_protecao_conciliacao(c)
+    from dsystem_erp.services.cadastros_planilha import COLUNAS
+    for coluna_cadastro, tipo_cadastro in COLUNAS.items():
+        garantir_coluna(c, "financeiro_cadastros_aux", coluna_cadastro, tipo_cadastro)
+    # A proteção é aplicada pelo adaptador de conexão, sem exigir CREATE TRIGGER.
     registrar_migration(c, "000_schema_legado_iniciar_banco", "Schema atual criado e atualizado pelo iniciar_banco legado.")
     conn.commit()
     conn.close()

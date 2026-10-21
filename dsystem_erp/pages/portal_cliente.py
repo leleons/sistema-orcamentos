@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.services.portal_cliente import portal_funcionario
 
 
 def renderizar_portal_cliente_page(ctx: dict) -> None:
@@ -51,6 +52,9 @@ def renderizar_portal_cliente_page(ctx: dict) -> None:
             st.session_state["portal_cliente_secao"] = "meus_chamados"
             secao_portal = "meus_chamados"
 
+        if portal_funcionario(st.session_state) and secao_portal not in ('inicio', 'abrir_chamado', 'meus_chamados', 'contato'):
+            secao_portal = 'meus_chamados'
+            st.session_state['portal_cliente_secao'] = secao_portal
         renderizar_portal_cliente_home(cliente_portal, cliente_portal_id)
 
         if secao_portal != "inicio":

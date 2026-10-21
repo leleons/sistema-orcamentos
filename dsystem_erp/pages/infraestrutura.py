@@ -16,6 +16,20 @@ COLUNAS_INFRA_ACESSO_REMOTO = (
 # Alguns blocos antigos são armazenados em uma única coluna por compatibilidade
 # com o banco existente. Esta definição permite apresentá-los como formulários
 # de verdade, sem obrigar o usuário a editar a linha serializada manualmente.
+CAMPOS_HARDWARE_PC = [
+    {"chave": "cpu_modelo", "rotulo": "Processador — Modelo", "marcador": "Processador modelo"},
+    {"chave": "cpu_geracao", "rotulo": "Processador — Geração", "marcador": "Processador geração"},
+    {"chave": "cpu_frequencia", "rotulo": "Processador — Frequência (GHz)", "marcador": "Processador frequência"},
+    {"chave": "ram_1", "rotulo": "RAM — Slot 1 / Capacidade (GB)", "marcador": "RAM slot 1"},
+    {"chave": "ram_2", "rotulo": "RAM — Slot 2 / Capacidade (GB)", "marcador": "RAM slot 2"},
+    {"chave": "gpu", "rotulo": "Placa de vídeo", "marcador": "Placa de vídeo"},
+] + [
+    {"chave": f"ssd_{numero}_{campo}", "rotulo": f"SSD {numero} — {rotulo} (informe GB ou TB)",
+     "marcador": f"SSD {numero} {rotulo}"}
+    for numero in range(1, 4)
+    for campo, rotulo in [("capacidade", "Capacidade"), ("livre", "Espaço livre")]
+]
+
 CAMPOS_COMPOSTOS_INFRA = {
     "faixas_ip": [
         {"chave": "faixa", "rotulo": "Faixa de IP", "marcador": "Faixa"},
@@ -95,7 +109,10 @@ CAMPOS_COMPOSTOS_INFRA = {
         {"chave": "anydesk", "rotulo": "AnyDesk / Senha", "marcador": "AnyDesk", "sensivel": True},
         {"chave": "remote_email", "rotulo": "Remote — E-mail", "marcador": "Remote e-mail"},
         {"chave": "remote_nome", "rotulo": "Remote — Nome da máquina", "marcador": "Remote nome máquina"},
-    ],
+        {"chave": "informacoes", "rotulo": "Informações", "marcador": "Informações", "multilinha": True},
+        {"chave": "usuario", "rotulo": "Usuário", "marcador": "Usuário"},
+        {"chave": "senha", "rotulo": "Senha", "marcador": "Senha", "sensivel": True},
+    ] + CAMPOS_HARDWARE_PC,
     "hospedagem_acessos": [
         {"chave": "provedor", "rotulo": "Nome do provedor", "marcador": "Provedor"},
         {"chave": "site_provedor", "rotulo": "Site do provedor", "marcador": "Site Provedor"},
@@ -307,6 +324,61 @@ def ids_emails_cadastrados(registros):
     return ids
 
 
+def excluir_item_salvo_infra(conectar, ficha, campos, indice, permitido):
+    """Exclui só a posição escolhida, sem deslocar IDs ou fotos dos demais itens."""
+    if not permitido:
+        raise PermissionError('Seu usuário não possui permissão para excluir itens da infraestrutura.')
+    separadores = {campo: sep for campo, _, sep in campos}
+    permitidos = set(CAMPOS_COMPOSTOS_INFRA) | {
+        'sys_dados', 'sys_serial', 'sys_cod', 'sys_adm', 'sys_senha', 'sys_sec',
+        'rede_prov', 'rede_ip', 'rede_log', 'rede_sen', 'rede_wire', 'rede_wsen',
+        'serv_nome', 'serv_ip', 'serv_link', 'serv_log', 'serv_sen', 'serv_anydesk',
+        'serv_radmin', 'serv_google_remote', 'serv_info_gerais', 'cert_log', 'cert_sen',
+        'fin_b1', 'fin_b2', 'fin_b3', 'setores',
+    }
+    if not separadores or not set(separadores) <= permitidos or int(indice) < 0:
+        raise ValueError('Item inválido para exclusão.')
+    if 'serv_nome' in separadores:
+        separadores['cert_sen'] = '|'
+    conn = conectar()
+    try:
+        c = conn.cursor()
+        c.execute('SELECT * FROM infra_v4 WHERE id=? FOR UPDATE', (ficha['id'],))
+        atual = c.fetchone()
+        if not atual or any((atual.get(k) or '') != (ficha.get(k) or '') for k in separadores):
+            raise ValueError('A ficha foi alterada. Atualize a tela e selecione o item novamente.')
+        alteracoes = {}
+        encontrado = False
+        for campo, separador in separadores.items():
+            if campo == 'setores':
+                valores = json.loads(atual.get(campo) or '[]')
+                if not 0 <= int(indice) < len(valores):
+                    raise ValueError('Setor não encontrado.')
+                valores.pop(int(indice))
+                alteracoes[campo] = json.dumps(valores, ensure_ascii=False)
+                encontrado = True
+            else:
+                valores = str(atual.get(campo) or '').split(separador)
+                if int(indice) < len(valores):
+                    encontrado = encontrado or bool(valores[int(indice)].strip())
+                    valores[int(indice)] = ''
+                alteracoes[campo] = separador.join(valores) if any(valores) else ''
+        if not encontrado:
+            raise ValueError('Este item já foi excluído ou não existe.')
+        c.execute('UPDATE infra_v4 SET ' + ', '.join(f'{k}=?' for k in alteracoes) + ' WHERE id=?',
+                  tuple(alteracoes.values()) + (ficha['id'],))
+        for campo, tipo in [('dvr_acessos', 'DVR'), ('cameras_acessos', 'Câmera'), ('alarmes_acessos', 'Alarme')]:
+            if campo in separadores:
+                c.execute('DELETE FROM infra_item_fotos WHERE ficha_id=? AND tipo_item=? AND item_indice=?',
+                          (ficha['id'], tipo, int(indice) + 1))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def renderizar_infraestrutura_ti(ctx: dict) -> None:
     aplicar_contexto_pagina(ctx, globals())
     garantir_colunas_infra_acesso_remoto(conectar_banco)
@@ -324,6 +396,8 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
     for chave_widget in st.session_state.pop("_infra_widgets_para_limpar", []):
         st.session_state.pop(chave_widget, None)
     st.title("Infraestrutura e Acessos de TI")
+    if mensagem_exclusao := st.session_state.pop('infra_exclusao_mensagem', None):
+        st.success(mensagem_exclusao)
     infra_edit_id_ativo = st.session_state.get("infra_editar_id")
     infra_editando = None
     if infra_edit_id_ativo:
@@ -449,6 +523,11 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
 
         def renderizar_historico_tecnico(slug, titulo, campos, ficha=None):
             """Lista e edita os itens serializados da ficha escolhida."""
+            if slug == 'financeiro':
+                for campo in campos:
+                    renderizar_historico_tecnico('financeiro_' + campo[0], campo[1], [campo], ficha=ficha)
+                return
+            slug = ('historico_' if ficha is not None else 'cadastro_') + slug + f"_v{st.session_state.get('infra_delecao_versao', 0)}"
             ficha_ref = ficha or infra_historico_ficha
             st.markdown(f"#### Histórico de {titulo}")
             if not ficha_ref:
@@ -611,9 +690,25 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                     st.session_state.pop(chave_item_ativo, None)
                     st.session_state[f"infra_hist_versao_{slug}"] = st.session_state.get(f"infra_hist_versao_{slug}", 0) + 1
                     st.rerun()
+                if tem_permissao('infra.delete'):
+                    confirmar = st.checkbox('Confirmo a exclusão deste item salvo e de suas fotos vinculadas, se houver.',
+                        key=f"infra_excluir_confirmar_{slug}_{ficha_ref['id']}_{indice_ativo}")
+                    if st.button('Excluir este item', disabled=not confirmar,
+                                 key=f"infra_excluir_item_{slug}_{ficha_ref['id']}_{indice_ativo}"):
+                        try:
+                            excluir_item_salvo_infra(conectar_banco, ficha_ref, campos, indice_ativo, tem_permissao('infra.delete'))
+                        except Exception as erro:
+                            st.error(str(erro))
+                        else:
+                            st.session_state.pop(chave_item_ativo, None)
+                            st.session_state['infra_delecao_versao'] = st.session_state.get('infra_delecao_versao', 0) + 1
+                            st.session_state[f'infra_hist_versao_{slug}'] = st.session_state.get(f'infra_hist_versao_{slug}', 0) + 1
+                            st.session_state['infra_exclusao_mensagem'] = f'Item de {titulo} excluído. Os demais itens foram preservados. Recuperação somente por backup.'
+                            st.rerun()
 
         def renderizar_historico_setores(ficha=None):
             ficha_ref = ficha or infra_historico_ficha
+            setor_namespace = 'historico' if ficha is not None else 'cadastro'
             st.markdown("#### Histórico de Setores")
             if not ficha_ref:
                 st.info("Selecione um cliente que já possua uma ficha salva para consultar o histórico.")
@@ -626,7 +721,7 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                 st.info("Nenhum setor salvo para este cliente.")
                 return
             pesquisa_setor = st.text_input(
-                "Pesquisar setor:", key=f"infra_hist_setor_busca_{ficha_ref.get('id')}"
+                "Pesquisar setor:", key=f"infra_hist_setor_busca_{setor_namespace}_{ficha_ref.get('id')}"
             ).strip().casefold()
             tabela_setores = [{
                 "ID": indice + 1,
@@ -638,7 +733,7 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                 json.dumps(setor.get("softwares") or [], ensure_ascii=False),
             ]).casefold()]
             setor_clicado = tabela_clicavel_id(
-                st, tabela_setores, f"infra_hist_setores_{ficha_ref.get('id')}", campo_id="ID"
+                st, tabela_setores, f"infra_hist_setores_{setor_namespace}_{ficha_ref.get('id')}_{st.session_state.get('infra_setor_versao', 0)}", campo_id="ID"
             ) if tabela_setores else None
             if pesquisa_setor and not tabela_setores:
                 st.info("Nenhum setor encontrado nessa pesquisa.")
@@ -650,12 +745,13 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                 st.caption("Clique em qualquer informação do setor para abrir a edição.")
                 return
             setor = setores_salvos[int(indice_setor)]
+            indice_setor_chave = f"{setor_namespace}_{indice_setor}_{st.session_state.get('infra_setor_versao', 0)}"
             with st.expander(f"Editando setor: {setor.get('nome') or int(indice_setor) + 1}", expanded=True):
-                nome_setor = st.text_input("Nome do setor:", value=setor.get("nome") or "", key=f"infra_hist_setor_nome_{ficha_ref.get('id')}_{indice_setor}")
-                info_setor = st.text_area("Informações gerais:", value=setor.get("informacoes") or "", height=110, key=f"infra_hist_setor_info_{ficha_ref.get('id')}_{indice_setor}")
+                nome_setor = st.text_input("Nome do setor:", value=setor.get("nome") or "", key=f"infra_hist_setor_nome_{ficha_ref.get('id')}_{indice_setor_chave}")
+                info_setor = st.text_area("Informações gerais:", value=setor.get("informacoes") or "", height=110, key=f"infra_hist_setor_info_{ficha_ref.get('id')}_{indice_setor_chave}")
                 st.caption(f"Softwares vinculados preservados: {len(setor.get('softwares') or [])}")
                 salvar_setor, cancelar_setor = st.columns(2)
-                if salvar_setor.button("Salvar alterações do setor", type="primary", width="stretch", key=f"infra_hist_setor_salvar_{ficha_ref.get('id')}_{indice_setor}"):
+                if salvar_setor.button("Salvar alterações do setor", type="primary", width="stretch", key=f"infra_hist_setor_salvar_{ficha_ref.get('id')}_{indice_setor_chave}"):
                     setores_salvos[int(indice_setor)]["nome"] = nome_setor.strip()
                     setores_salvos[int(indice_setor)]["informacoes"] = info_setor.strip()
                     conn_setor = conectar_banco()
@@ -669,9 +765,21 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                     st.session_state.pop(chave_setor_ativo, None)
                     st.success("Setor atualizado sem alterar seus softwares vinculados.")
                     st.rerun()
-                if cancelar_setor.button("Cancelar edição", width="stretch", key=f"infra_hist_setor_cancelar_{ficha_ref.get('id')}_{indice_setor}"):
+                if cancelar_setor.button("Cancelar edição", width="stretch", key=f"infra_hist_setor_cancelar_{ficha_ref.get('id')}_{indice_setor_chave}"):
                     st.session_state.pop(chave_setor_ativo, None)
                     st.rerun()
+                if tem_permissao('infra.delete'):
+                    confirmar_setor = st.checkbox('Confirmo excluir este setor e os softwares vinculados nele.', key=f'infra_del_setor_conf_{setor_namespace}_{ficha_ref["id"]}_{indice_setor}')
+                    if st.button('Excluir este setor', disabled=not confirmar_setor, key=f'infra_del_setor_{setor_namespace}_{ficha_ref["id"]}_{indice_setor}'):
+                        try:
+                            excluir_item_salvo_infra(conectar_banco, ficha_ref, [('setores', 'Setores', '')], indice_setor, tem_permissao('infra.delete'))
+                        except Exception as erro:
+                            st.error(str(erro))
+                        else:
+                            st.session_state.pop(chave_setor_ativo, None)
+                            st.session_state['infra_setor_versao'] = st.session_state.get('infra_setor_versao', 0) + 1
+                            st.session_state['infra_exclusao_mensagem'] = 'Setor excluído. Os outros setores foram preservados. Recuperação somente por backup.'
+                            st.rerun()
         
         with t_sys:
             qtd_sys = st.number_input("Qtd Sistemas:", min_value=1, max_value=10, value=1)
@@ -887,8 +995,23 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                 c_pc4, c_pc5 = st.columns(2)
                 p_remote_email = c_pc4.text_input(f"Remote e-mail {i+1}:", key=f"premail_{i}")
                 p_remote_nome = c_pc5.text_input(f"Remote nome máquina {i+1}:", key=f"prnome_{i}")
-                if p_nome or p_aces or p_remote_email or p_remote_nome:
-                    pcs_l.append(f"{p_tipo} | {p_nome} | AnyDesk: {p_aces} | Remote: {p_remote_email} / {p_remote_nome}")
+                p_info = st.text_area(f"Informações {i+1}:", height=80, key=f"pinfo_{i}")
+                c_pc6, c_pc7 = st.columns(2)
+                p_usuario = c_pc6.text_input(f"Usuário {i+1}:", key=f"pusuario_{i}")
+                p_senha = c_pc7.text_input(f"Senha {i+1}:", type="password", key=f"psenha_{i}")
+                st.caption(f"Configuração de hardware — Computador {i+1}")
+                hardware_pc = {}
+                colunas_hw = st.columns(3)
+                for posicao, campo_hw in enumerate(CAMPOS_HARDWARE_PC):
+                    hardware_pc[campo_hw['chave']] = colunas_hw[posicao % 3].text_input(
+                        campo_hw['rotulo'], key=f"pc_hw_{campo_hw['chave']}_{i}")
+                if p_nome or p_aces or p_remote_email or p_remote_nome or p_info or p_usuario or p_senha or any(hardware_pc.values()):
+                    pcs_l.append(compor_item_composto_infra("pcs_acessos", {
+                        "tipo": p_tipo, "nome": p_nome, "anydesk": p_aces,
+                        "remote_email": p_remote_email, "remote_nome": p_remote_nome,
+                        "informacoes": p_info, "usuario": p_usuario, "senha": p_senha,
+                        **hardware_pc,
+                    }))
 
         setores_l = []
         if t_setores:
@@ -1065,14 +1188,16 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                     else:
                         st.caption("Clique em qualquer informação do equipamento para consultar ou editar.")
                     if tem_permissao("infra.delete") and eq_sel:
-                        if st.button("Excluir Equipamento", key="infra_eq_excluir"):
+                        confirmar_eq = st.checkbox('Confirmo excluir este equipamento e suas fotos.', key=f'infra_eq_confirmar_excluir_{id_eq_ver}')
+                        if st.button("Excluir Equipamento", key="infra_eq_excluir", disabled=not confirmar_eq):
                             conn_del_eq = conectar_banco()
                             cdel_eq = conn_del_eq.cursor()
                             cdel_eq.execute("DELETE FROM infra_equipamentos_fotos WHERE equipamento_id=?", (id_eq_ver,))
                             cdel_eq.execute("DELETE FROM infra_equipamentos WHERE id=?", (id_eq_ver,))
                             conn_del_eq.commit()
                             conn_del_eq.close()
-                            st.success("Equipamento excluído.")
+                            st.session_state.pop('infra_eq_id_ativo', None)
+                            st.session_state['infra_exclusao_mensagem'] = 'Equipamento e fotos excluídos. Recuperação somente por backup.'
                             st.rerun()
                 else:
                     st.info("Nenhum equipamento cadastrado.")
@@ -1285,6 +1410,23 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                             if cancelar_email_col.button("Cancelar edição", width="stretch", key=f"infra_cancelar_email_{email_editar_id}"):
                                 fechar_email_infraestrutura(st.session_state)
                                 st.rerun()
+                            if tem_permissao('emails.delete'):
+                                confirmar_email = st.checkbox('Confirmo excluir somente este e-mail do cadastro (não apaga a conta no provedor).', key=f'infra_del_email_conf_{email_editar_id}')
+                                if st.button('Excluir este e-mail', disabled=not confirmar_email, key=f'infra_del_email_{email_editar_id}'):
+                                    conn_del_email = conectar_banco()
+                                    try:
+                                        cdel_email = conn_del_email.cursor()
+                                        cdel_email.execute('DELETE FROM emails_clientes WHERE id=? AND email=?', (email_editar_id, email_editar.get('email')))
+                                        conn_del_email.commit()
+                                    except Exception as erro:
+                                        conn_del_email.rollback()
+                                        st.error(f'Não foi possível excluir: {erro}')
+                                    else:
+                                        fechar_email_infraestrutura(st.session_state)
+                                        st.session_state['infra_email_mensagem'] = 'E-mail excluído do cadastro. Os demais foram preservados. Recuperação somente por backup.'
+                                        st.rerun()
+                                    finally:
+                                        conn_del_email.close()
                     fora_do_vinculo = [e for e in emails_existentes_infra if (e.get("cliente_vinculado") or "") != cliente_email_infra]
                     if fora_do_vinculo and cliente_email_infra != "-- Avulso --":
                         st.warning("Alguns e-mails foram encontrados pelo domínio ou outro nome, mas ainda não estão vinculados a esta empresa.")
@@ -1550,11 +1692,13 @@ def renderizar_infraestrutura_ti(ctx: dict) -> None:
                     ficha_id = c.lastrowid
                 for foto_item in fotos_infra_itens:
                     foto_dados, foto_nome, foto_mime = dados_upload(foto_item["arquivo"])
+                    campo_foto = {'DVR': 'dvr_acessos', 'Câmera': 'cameras_acessos', 'Alarme': 'alarmes_acessos'}[foto_item['tipo']]
+                    indice_foto_salvar = foto_item['indice'] + len(separar_itens_infra((ficha_base_salvar or {}).get(campo_foto)))
                     c.execute(
                         """INSERT INTO infra_item_fotos
                            (ficha_id, tipo_item, item_indice, item_nome, foto_nome, foto_mime, foto, criado_em)
                            VALUES (?,?,?,?,?,?,?,?)""",
-                        (ficha_id, foto_item["tipo"], foto_item["indice"], foto_item["nome"], foto_nome,
+                        (ficha_id, foto_item["tipo"], indice_foto_salvar, foto_item["nome"], foto_nome,
                          foto_mime, foto_dados, datetime.now().strftime("%d/%m/%Y %H:%M")),
                     )
                 for conta_email in emails_infra_para_salvar:

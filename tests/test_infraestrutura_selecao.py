@@ -183,6 +183,9 @@ class InfraestruturaSelecaoTests(unittest.TestCase):
         self.assertEqual(valores["anydesk"], "123 / senha")
         self.assertEqual(valores["remote_email"], "ti@empresa.com")
         self.assertEqual(valores["remote_nome"], "PC-FIN")
+        self.assertEqual(valores["informacoes"], "")
+        self.assertEqual(valores["usuario"], "")
+        self.assertEqual(valores["senha"], "")
 
     def test_item_composto_regravado_mantem_marcadores_dos_campos(self):
         texto = compor_item_composto_infra("faixas_ip", {

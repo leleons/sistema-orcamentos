@@ -21,7 +21,7 @@ PERMISSOES_PORTAL_CLIENTE = frozenset(
 
 # Administradores comuns também precisam destas permissões nominais.
 # A conta principal Daniel.fabio, quando administradora, mantém acesso às senhas.
-PERMISSOES_EXPLICITAS = frozenset({"infra.senhas.view"})
+PERMISSOES_EXPLICITAS = frozenset({"infra.senhas.view", "inter.view", "inter.preparar", "inter.aprovar", "inter.executar", "inter.conciliar", "inter.configurar"})
 
 
 def carregar_submodulos(valor: Any) -> set[str]:

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from dsystem_erp.app_context import aplicar_contexto_pagina
+from dsystem_erp.services.faturamento_espelho import gerar_pdf_espelho_faturamento
+from dsystem_erp.services.fiscal_automatico import listar_emissoes, processar_emissoes, tipos_fiscais, recuperar_pdfs, permite_correcao, liberar_correcao
+from dsystem_erp.services.fiscal_documentos import consultar_documentos_fiscais
 from dsystem_erp.services.pacote_faturamento import (
     DocumentoFaturamento,
-    decodificar_pdf_base64,
     juntar_documentos_pdf,
     nome_pacote_faturamento,
     pdf_de_referencia,
@@ -39,37 +43,27 @@ def _contato_cliente(faturamento: dict) -> dict:
         conn.close()
 
 
+def _grupo_orcamento(faturamento, faturamentos):
+    """Agrupa dentro dos registros já autorizados para o usuário da tela."""
+    referencia = str(faturamento.get('orc_ref') or '').strip()
+    documento = ''.join(filter(str.isdigit, str(faturamento.get('cnpj') or '')))
+    if not referencia or not documento:
+        return [faturamento]
+    grupo = [dict(r) for r in faturamentos if r.get('status') == 'Faturado'
+             and str(r.get('orc_ref') or '').strip() == referencia
+             and ''.join(filter(str.isdigit, str(r.get('cnpj') or ''))) == documento]
+    return sorted(grupo, key=lambda r: int(r['id'])) or [faturamento]
+
+
 def _documentos_disponiveis(faturamento: dict) -> list[DocumentoFaturamento]:
     faturamento_id = int(faturamento["id"])
-    documentos: list[DocumentoFaturamento] = []
+    documentos: list[DocumentoFaturamento] = [DocumentoFaturamento(
+        codigo=f"espelho:{faturamento_id}", titulo=f"Espelho #{faturamento_id}", categoria="Espelho",
+        arquivo=gerar_pdf_espelho_faturamento(faturamento), nome_arquivo=f"espelho_{faturamento_id}.pdf")]
+    documentos.extend(consultar_documentos_fiscais(conectar_banco, faturamento_id)['documentos'])
     conn = conectar_banco()
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            """SELECT id, tipo_nota, numero_nota, status, pdf_base64, link_nota
-               FROM notas_fiscais WHERE faturamento_id=? ORDER BY id DESC""",
-            (faturamento_id,),
-        )
-        for nota in cursor.fetchall():
-            numero = nota.get("numero_nota") or nota.get("id")
-            titulo = f"Nota {nota.get('tipo_nota') or 'fiscal'} #{numero} ({nota.get('status') or 'Pendente'})"
-            pdf_oficial_servico = (
-                nota.get("tipo_nota") != "Serviço"
-                or str(nota.get("link_nota") or "").startswith(
-                    ("https://www.nfse.gov.br/ConsultaPublica/", "https://www.producaorestrita.nfse.gov.br/ConsultaPublica/")
-                )
-            )
-            if nota.get("pdf_base64") and pdf_oficial_servico:
-                arquivo = decodificar_pdf_base64(nota.get("pdf_base64"))
-            elif nota.get("link_nota"):
-                arquivo = pdf_de_referencia(titulo, "A nota fiscal está disponível no link abaixo:", nota.get("link_nota"))
-            else:
-                continue
-            documentos.append(DocumentoFaturamento(
-                codigo=f"nota:{nota.get('id')}", titulo=titulo, categoria="Nota fiscal",
-                arquivo=arquivo, nome_arquivo=f"nota_fiscal_{numero}.pdf",
-            ))
-
         cursor.execute(
             """SELECT id, tipo, nome_arquivo, mime_type, arquivo
                FROM faturamento_anexos WHERE faturamento_id=? ORDER BY id DESC""",
@@ -125,7 +119,7 @@ def _documentos_disponiveis(faturamento: dict) -> list[DocumentoFaturamento]:
     ):
         referencia = str(faturamento.get(campo) or "").strip()
         if referencia and not any(documento.categoria == categoria for documento in documentos):
-            codigo = f"referencia:{campo}"
+            codigo = f"referencia:{faturamento_id}:{campo}"
             if codigo not in codigos:
                 documentos.append(DocumentoFaturamento(
                     codigo=codigo, titulo=titulo, categoria=categoria,
@@ -133,6 +127,15 @@ def _documentos_disponiveis(faturamento: dict) -> list[DocumentoFaturamento]:
                     nome_arquivo=f"{campo}_referencia.pdf",
                 ))
     return documentos
+
+
+def _pendencias_notas(grupo):
+    pendencias = []
+    for fat in grupo:
+        if tipos_fiscais(fat):
+            estado = consultar_documentos_fiscais(conectar_banco, fat['id'])
+            pendencias.extend(f"#{fat['id']} — {p}" for p in estado['pendencias'])
+    return pendencias
 
 
 def _salvar_pdf_anexo(faturamento_id: int, tipo: str, upload) -> None:
@@ -161,7 +164,7 @@ def _salvar_pdf_anexo(faturamento_id: int, tipo: str, upload) -> None:
 def renderizar_central_documentos_faturados(ctx: dict, faturamentos: list[dict]) -> None:
     aplicar_contexto_pagina(ctx, globals())
     st.subheader("Enviar documentos ao cliente")
-    st.caption("Escolha a nota fiscal, o boleto e um ou mais orçamentos para formar um único PDF.")
+    st.caption("Escolha o espelho, a nota fiscal ou ambos, junto dos demais documentos do faturamento.")
 
     faturados = [f for f in faturamentos if (f.get("status") or "Aberto") == "Faturado"]
     if not faturados:
@@ -178,6 +181,48 @@ def renderizar_central_documentos_faturados(ctx: dict, faturamentos: list[dict])
         key="faturado_documentos_id",
     )
     faturamento = next(f for f in faturados if int(f["id"]) == int(selecionado_id))
+    grupo = _grupo_orcamento(faturamento, faturados)
+    if len(grupo) > 1:
+        st.info('Documentos reunidos do orçamento ' + str(faturamento.get('orc_ref')) + ': faturamentos ' + ', '.join(f"#{f['id']}" for f in grupo))
+    for fat_grupo in grupo:
+        estados_auto = listar_emissoes(conectar_banco, fat_grupo['id'])
+        if estados_auto:
+            st.dataframe([{'Faturamento': fat_grupo['id'], 'Nota': r['tipo'], 'Situação': r['estado'], 'Mensagem': r.get('mensagem')} for r in estados_auto], hide_index=True)
+            for envio in estados_auto:
+                with st.expander(f"Detalhes / corrigir nota — {envio['tipo']} #{fat_grupo['id']}"):
+                    st.write(envio.get('mensagem') or 'Sem mensagem de erro.')
+                    if permite_correcao(envio):
+                        st.caption('A correção não cria outro faturamento nem repete a baixa. Depois de corrigir em Emissão de Nota, salve a preparação e use Continuar notas preparadas nesta tela.')
+                        confirmar_correcao = st.checkbox('Quero corrigir os dados desta nota, sem enviá-la agora.', key=f"auto_corrigir_conf_{envio['id']}")
+                        if st.button('Corrigir esta nota', key=f"auto_corrigir_{envio['id']}", disabled=not confirmar_correcao or not (tem_permissao('faturamento.edit') or tem_permissao('faturamento.faturado.edit'))):
+                            try:
+                                liberar_correcao(conectar_banco, fat_grupo['id'], envio['tipo'], tem_permissao('faturamento.edit') or tem_permissao('faturamento.faturado.edit'))
+                            except Exception as erro:
+                                st.error(str(erro))
+                            else:
+                                st.session_state['auto_correcao_destino'] = fat_grupo['id']
+                                st.session_state['auto_correcao_aviso'] = f"Nota de {envio['tipo']} do faturamento #{fat_grupo['id']} liberada para correção. Abra a aba Emissão de Nota, corrija os dados e salve a preparação automática. Depois volte em Enviar documentos e clique em Continuar notas preparadas."
+                                st.rerun()
+                    elif envio.get('estado') in ('Conferir', 'Transmitindo'):
+                        st.warning('O resultado deste envio é incerto. A correção permanece bloqueada até consultar o resultado no governo, para evitar nota duplicada.')
+                if envio.get('xml_envio'):
+                    st.download_button(f"Baixar XML enviado — {envio['tipo']} #{fat_grupo['id']}",
+                        data=envio['xml_envio'], file_name=f"xml_enviado_{fat_grupo['id']}_{envio['tipo']}.xml",
+                        mime='application/xml', key=f"auto_xml_{envio['id']}")
+        if fat_grupo.get('emitir_automaticamente') and (tem_permissao('faturamento.edit') or tem_permissao('faturamento.faturado.edit')):
+            if st.button('Continuar notas preparadas (não reenvia notas autorizadas/em conferência)', key=f"continuar_auto_{fat_grupo['id']}"):
+                try:
+                    processar_emissoes(conectar_banco, fat_grupo['id'], config_sistema_val, salvar_retorno_nota_fiscal)
+                    st.rerun()
+                except Exception as erro:
+                    st.error(str(erro))
+        if tem_permissao('faturamento.edit') or tem_permissao('faturamento.faturado.edit'):
+            if st.button(f"Gerar PDFs autorizados pendentes — #{fat_grupo['id']} (sem reemitir)", key=f"auto_pdf_{fat_grupo['id']}"):
+                try:
+                    recuperar_pdfs(conectar_banco, fat_grupo['id'])
+                    st.rerun()
+                except Exception as erro:
+                    st.error(str(erro))
 
     if tem_permissao("faturamento.faturado.edit") or tem_permissao("faturamento.edit"):
         with st.expander("Adicionar nota fiscal ou boleto em PDF", expanded=False):
@@ -197,7 +242,7 @@ def renderizar_central_documentos_faturados(ctx: dict, faturamentos: list[dict])
                         st.error(f"Não foi possível salvar: {exc}")
 
     try:
-        documentos = _documentos_disponiveis(faturamento)
+        documentos = list({doc.codigo: doc for fat in grupo for doc in _documentos_disponiveis(fat)}.values())
     except Exception as exc:
         st.error(f"Não foi possível carregar os documentos: {exc}")
         return
@@ -207,10 +252,30 @@ def renderizar_central_documentos_faturados(ctx: dict, faturamentos: list[dict])
 
     por_codigo = {documento.codigo: documento for documento in documentos}
     codigos = list(por_codigo)
+    opcoes_entrega = ["Somente espelho"] if faturamento.get("emite_nf") == "Não" else ["Nota e espelho", "Somente nota", "Somente espelho"]
+    preferencia = faturamento.get("documentos_entrega") or "Nota e espelho"
+    modo_entrega = st.radio("Conteúdo do envio:", opcoes_entrega,
+        index=opcoes_entrega.index(preferencia) if preferencia in opcoes_entrega else 0,
+        key=f"docs_modo_{selecionado_id}")
+    pendencias_documentos = _pendencias_notas(grupo) if modo_entrega != 'Somente espelho' else []
+    envio_parcial_confirmado = False
+    if pendencias_documentos:
+        st.warning('Pacote fiscal incompleto: ' + '; '.join(pendencias_documentos))
+        envio_parcial_confirmado = st.checkbox('Quero enviar somente os documentos disponíveis, ciente das notas pendentes.', key=f'docs_parcial_{selecionado_id}')
+    elif modo_entrega != 'Somente espelho' and any(tipos_fiscais(f) for f in grupo):
+        st.success('Pacote fiscal pronto: todas as notas previstas estão autorizadas e têm PDF. Confira o ambiente das notas antes de enviar ao cliente.')
+    codigos = [k for k in codigos if not (
+        (modo_entrega == "Somente espelho" and por_codigo[k].categoria == "Nota fiscal") or
+        (modo_entrega == "Somente nota" and por_codigo[k].categoria == "Espelho"))]
+    if modo_entrega != "Somente espelho" and not any(por_codigo[k].categoria == "Nota fiscal" for k in codigos):
+        st.warning("Não há nota fiscal disponível neste lançamento. O espelho não substitui a nota.")
+    # Quando uma nova nota fica pronta, inclua-a no conjunto, mesmo se a tela
+    # já estava aberta anteriormente mostrando somente o espelho.
+    versao_documentos = hashlib.sha256('|'.join(sorted(codigos)).encode()).hexdigest()[:12]
     selecionados = st.multiselect(
         "Documentos que serao enviados:", codigos, default=codigos,
         format_func=lambda codigo: f"{por_codigo[codigo].categoria} - {por_codigo[codigo].titulo}",
-        key=f"docs_selecionados_{selecionado_id}",
+        key=f"docs_selecionados_{selecionado_id}_{modo_entrega}_{versao_documentos}",
     )
     try:
         pacote = juntar_documentos_pdf(
@@ -227,6 +292,7 @@ def renderizar_central_documentos_faturados(ctx: dict, faturamentos: list[dict])
         "Baixar conjunto em um único PDF", data=pacote, file_name=nome_pacote,
         mime="application/pdf", type="primary", width="stretch",
         key=f"baixar_pacote_{selecionado_id}",
+        disabled=bool(pendencias_documentos) and not envio_parcial_confirmado,
     )
 
     contato = _contato_cliente(faturamento)
@@ -245,7 +311,7 @@ def renderizar_central_documentos_faturados(ctx: dict, faturamentos: list[dict])
     email = st.text_input("E-mail do cliente:", value=email_padrao, key=f"docs_email_{selecionado_id}")
     assunto = st.text_input("Assunto:", value=assunto_padrao, key=f"docs_assunto_{selecionado_id}")
     mensagem = st.text_area("Mensagem:", value=mensagem_padrao, height=150, key=f"docs_mensagem_{selecionado_id}")
-    if st.button("Enviar PDF por e-mail", type="primary", width="stretch", key=f"enviar_email_docs_{selecionado_id}"):
+    if st.button("Enviar PDF por e-mail", type="primary", width="stretch", key=f"enviar_email_docs_{selecionado_id}", disabled=bool(pendencias_documentos) and not envio_parcial_confirmado):
         if not email.strip():
             st.error("Informe o e-mail do cliente.")
         else:
@@ -261,7 +327,7 @@ def renderizar_central_documentos_faturados(ctx: dict, faturamentos: list[dict])
     if telefone.strip():
         st.link_button(
             "Abrir conversa no WhatsApp", url_whatsapp(telefone, mensagem_whatsapp),
-            width="stretch", type="primary",
+            width="stretch", type="primary", disabled=bool(pendencias_documentos) and not envio_parcial_confirmado,
         )
         st.caption("Por segurança, o WhatsApp abre a conversa com a mensagem pronta; anexe nela o PDF baixado acima.")
     else:

@@ -73,6 +73,8 @@ class CompatCursor:
             acao = "delete"
 
         tabela = extrair_tabela_sql(sql_adaptado, acao) if acao else ""
+        from .services.conciliacao import proteger_escrita_financeira
+        proteger_escrita_financeira(self._cursor, sql_adaptado, params, tabela, acao)
         deve_logar = bool(
             self._registrar_log
             and acao
@@ -127,6 +129,10 @@ class CompatCursor:
         return resultado
 
     def executemany(self, sql, params=None):
+        if re.match(r"\s*(UPDATE\s+|DELETE\s+FROM\s+)`?contas_(pagar|receber)\b", sql, re.I):
+            for valores in params or ():
+                self.execute(sql, valores)
+            return
         return self._cursor.executemany(self._adaptar_sql(sql), params)
 
     def fetchone(self):

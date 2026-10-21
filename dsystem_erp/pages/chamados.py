@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.ui_consulta import tabela_clicavel_id
+from dsystem_erp.services.portal_cliente import filtro_chamados_portal, exigir_acesso_chamado, exigir_conta_portal_ativa
 
 def renderizar_chat_chamado(chamado, cliente_portal, ctx=None):
     if ctx is not None:
@@ -48,6 +49,12 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
     if ctx is not None:
         aplicar_contexto_pagina(ctx, globals())
     st.subheader("Abrir chamado")
+    if st.session_state.get('tipo_login') == 'cliente':
+        cliente_id = st.session_state.get('cliente_id')
+        cliente_portal = st.session_state.get('cliente_nome')
+        if not cliente_id or not st.session_state.get('username'):
+            st.error('Entre novamente com seu login individual.')
+            return
     if st.session_state.get("acao_portal") == "abrir_chamado":
         st.info("Preencha as informações abaixo para registrar seu chamado.")
     st.write("Descreva o que precisa ser feito. A equipe combinará o atendimento com você pelo próprio chamado.")
@@ -56,7 +63,7 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
     with st.form("form_novo_chamado_cliente"):
         c0, c1, c2 = st.columns(3)
         area_destino = c0.selectbox("Com quem deseja falar:", AREAS_CHAMADO)
-        solicitante = c1.text_input("Solicitante:", value=st.session_state.get("username", ""))
+        solicitante = c1.text_input("Solicitante:", value=st.session_state.get("portal_usuario_nome") or st.session_state.get("username", ""), disabled=st.session_state.get('tipo_login') == 'cliente')
         tipo = c2.selectbox("Tipo de atendimento:", ["Remoto", "Presencial", "Presencial ou remoto"])
         titulo = st.text_input("Assunto:")
         descricao = st.text_area("Informações do que precisa:", height=130)
@@ -81,6 +88,14 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
         agora = datetime.now().strftime("%d/%m/%Y %H:%M")
         conn = conectar_banco()
         c = conn.cursor()
+        try:
+            exigir_conta_portal_ativa(c, st.session_state)
+        except PermissionError as erro:
+            conn.close()
+            st.error(str(erro))
+            return
+        if st.session_state.get('tipo_login') == 'cliente':
+            solicitante = st.session_state.get('portal_usuario_nome') or st.session_state.get('username')
         funcionario_inicial = responsavel_area_chamado(area_destino)
         c.execute(
             """INSERT INTO chamados_cliente
@@ -125,16 +140,11 @@ def renderizar_abertura_chamado(cliente_portal, cliente_id=None, ctx=None):
 def renderizar_chamados_cliente(cliente_portal, cliente_id=None, ctx=None):
     if ctx is not None:
         aplicar_contexto_pagina(ctx, globals())
-    st.subheader("Meus chamados")
+    st.subheader("Chamados da empresa" if st.session_state.get('portal_tipo_usuario') == 'Empresa' else "Meus chamados")
     conn = conectar_banco()
     c = conn.cursor(dictionary=True)
-    if cliente_id:
-        c.execute(
-            "SELECT * FROM chamados_cliente WHERE cliente_id=%s OR (cliente_id IS NULL AND cliente_nome=%s) ORDER BY id DESC",
-            (cliente_id, cliente_portal),
-        )
-    else:
-        c.execute("SELECT * FROM chamados_cliente WHERE cliente_nome=%s ORDER BY id DESC", (cliente_portal,))
+    filtro, parametros = filtro_chamados_portal(st.session_state, cliente_id, cliente_portal)
+    c.execute(f"SELECT * FROM chamados_cliente WHERE {filtro} ORDER BY id DESC", parametros)
     chamados = c.fetchall()
     conn.close()
 
@@ -186,6 +196,12 @@ def renderizar_chamados_cliente(cliente_portal, cliente_id=None, ctx=None):
             agora_edicao = datetime.now().strftime("%d/%m/%Y %H:%M")
             conn_ed = conectar_banco()
             ced = conn_ed.cursor()
+            try:
+                exigir_acesso_chamado(ced, st.session_state, chamado.get('id'))
+            except PermissionError as erro:
+                conn_ed.close()
+                st.error(str(erro))
+                return
             ced.execute(
                 "UPDATE chamados_cliente SET titulo=?, descricao=?, atualizado_em=? WHERE id=? AND cliente_nome=?",
                 (titulo_editado.strip(), descricao_editada.strip(), agora_edicao, chamado.get("id"), cliente_portal),
@@ -234,6 +250,12 @@ def renderizar_chamados_cliente(cliente_portal, cliente_id=None, ctx=None):
                 agora_cancelamento = datetime.now().strftime("%d/%m/%Y %H:%M")
                 conn_can = conectar_banco()
                 ccan = conn_can.cursor()
+                try:
+                    exigir_acesso_chamado(ccan, st.session_state, chamado.get('id'))
+                except PermissionError as erro:
+                    conn_can.close()
+                    st.error(str(erro))
+                    return
                 ccan.execute(
                     "UPDATE chamados_cliente SET status='Cancelado', atualizado_em=? WHERE id=? AND cliente_nome=?",
                     (agora_cancelamento, chamado.get("id"), cliente_portal),
@@ -255,6 +277,12 @@ def renderizar_chamados_cliente(cliente_portal, cliente_id=None, ctx=None):
         if b1.button("Aprovar alterações", key=f"aprov_ch_{chamado['id']}", width="stretch"):
             conn_ap = conectar_banco()
             cap = conn_ap.cursor()
+            try:
+                exigir_acesso_chamado(cap, st.session_state, chamado.get('id'))
+            except PermissionError as erro:
+                conn_ap.close()
+                st.error(str(erro))
+                return
             agora = datetime.now().strftime("%d/%m/%Y %H:%M")
             cap.execute(
                 "UPDATE chamados_cliente SET status=?, resposta_cliente=?, atualizado_em=? WHERE id=?",
@@ -271,6 +299,12 @@ def renderizar_chamados_cliente(cliente_portal, cliente_id=None, ctx=None):
         if b2.button("Recusar alterações", key=f"rec_ch_{chamado['id']}", width="stretch"):
             conn_rec = conectar_banco()
             crec = conn_rec.cursor()
+            try:
+                exigir_acesso_chamado(crec, st.session_state, chamado.get('id'))
+            except PermissionError as erro:
+                conn_rec.close()
+                st.error(str(erro))
+                return
             agora = datetime.now().strftime("%d/%m/%Y %H:%M")
             crec.execute(
                 "UPDATE chamados_cliente SET status=?, resposta_cliente=?, atualizado_em=? WHERE id=?",
@@ -489,6 +523,8 @@ def renderizar_gestao_chamados_chefe(ctx=None):
         tabela.append({
             "ID": chamado.get("id"),
             "Cliente": chamado.get("cliente_nome"),
+            "Solicitante do cliente": chamado.get("solicitante") or "",
+            "Login de origem": chamado.get("criado_por") or "",
             "Área": chamado.get("area_destino") or "Suporte",
             "Assunto": chamado.get("titulo"),
             "Status": chamado.get("status"),
@@ -500,7 +536,7 @@ def renderizar_gestao_chamados_chefe(ctx=None):
         })
     pesquisa_chamado = st.text_input(
         "Pesquisar chamado:",
-        placeholder="Cliente, assunto, área, funcionário, status ou ID",
+        placeholder="Empresa, solicitante, login, assunto, área, técnico, status ou ID",
         key="gest_ch_pesquisa",
     ).strip().casefold()
     tabela_filtrada = [
@@ -520,6 +556,7 @@ def renderizar_gestao_chamados_chefe(ctx=None):
 
     data_ch, inicio_ch, fim_ch, tipo_ch, descricao_ch = periodo_chamado(chamado)
     with st.expander(f"Gerenciando chamado #{id_ed} - {chamado.get('cliente_nome')}", expanded=True):
+        st.write(f"**Solicitante:** {chamado.get('solicitante') or '-'} — **Login:** {chamado.get('criado_por') or 'Histórico sem autoria'}")
         st.write(f"**Pedido original:** {chamado.get('descricao') or ''}")
         st.write(f"**Solicitado para:** {texto_data_br(chamado.get('data_solicitada'))} das {chamado.get('hora_inicio')} às {chamado.get('hora_fim')}")
         contato_cliente = buscar_contato_cliente(chamado.get("cliente_id"), chamado.get("cliente_nome") or "")

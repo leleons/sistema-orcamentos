@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
@@ -127,9 +128,19 @@ def gerar_xml_dps_nacional(faturamento: dict, dados: dict) -> bytes:
     descricao = str(dados.get("descricao") or "").strip()
     if not descricao:
         raise ValueError("Informe a descricao do servico.")
-    valor = float(dados.get("valor") or 0)
-    if valor <= 0:
-        raise ValueError("O valor do servico deve ser maior que zero.")
+    try:
+        valor = Decimal(str(dados.get("valor") or 0))
+        if not valor.is_finite() or valor <= 0:
+            raise ValueError()
+        valor = valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if valor <= 0:
+            raise ValueError()
+    except (InvalidOperation, ValueError):
+        raise ValueError("O valor do serviço deve ser um número válido maior que zero.") from None
+    if len(descricao) > 1000:
+        raise ValueError("A descrição do serviço excede 1000 caracteres. Divida as informações entre descrição e observações; nenhum conteúdo será cortado automaticamente.")
+    if len(str(dados.get("observacoes") or "").strip()) > 2000:
+        raise ValueError("As observações excedem 2000 caracteres. Reduza o texto antes de emitir.")
     opcao_simples = str(dados.get("opcao_simples_nacional") or "").strip()
     if opcao_simples not in {"1", "2", "3"}:
         raise ValueError("Selecione a situacao do prestador perante o Simples Nacional.")
@@ -300,6 +311,27 @@ def _mensagens_retorno(resposta: dict) -> str:
     return "; ".join(mensagens)
 
 
+class RejeicaoNacionalHTTP(RuntimeError):
+    def __init__(self, mensagem, resposta, status):
+        super().__init__(mensagem)
+        self.resposta = resposta
+        self.status = status
+
+
+def _rejeicao_exclusiva_im(resposta):
+    if not isinstance(resposta, dict) or any(resposta.get(k) for k in (
+        'chaveAcesso', 'chave', 'nfseXmlGZipB64', 'xmlNfseGZipB64', 'numeroNfse', 'numeroNFSe'
+    )):
+        return False
+    erros = resposta.get('erros')
+    if isinstance(erros, dict):
+        erros = [erros]
+    return bool(erros) and isinstance(erros, list) and all(
+        isinstance(erro, dict) and str(erro.get('Codigo') or erro.get('codigo') or '').upper() == 'E0120'
+        for erro in erros
+    )
+
+
 def enviar_dps_nacional(
     endpoint: str,
     xml_assinado: bytes,
@@ -307,6 +339,7 @@ def enviar_dps_nacional(
     cert_password: str,
     timeout: int = 60,
 ) -> dict:
+    validar_destino_dps(endpoint, xml_assinado)
     url = endpoint.rstrip("/") + "/nfse"
     corpo = json.dumps({"dpsXmlGZipB64": compactar_xml_base64(xml_assinado)}).encode("utf-8")
     requisicao = Request(
@@ -321,17 +354,31 @@ def enviar_dps_nacional(
                 bruto = resposta.read().decode("utf-8", errors="replace")
     except HTTPError as erro:
         bruto = erro.read().decode("utf-8", errors="replace")
+        resposta_erro = None
         try:
-            detalhe = _mensagens_retorno(json.loads(bruto)) or bruto[:1000]
+            resposta_erro = json.loads(bruto)
+            detalhe = _mensagens_retorno(resposta_erro) if isinstance(resposta_erro, dict) else bruto[:1000]
         except json.JSONDecodeError:
             detalhe = bruto[:1000]
-        raise RuntimeError(f"API Nacional retornou HTTP {erro.code}: {detalhe}") from erro
+        raise RejeicaoNacionalHTTP(f"API Nacional retornou HTTP {erro.code}: {detalhe}", resposta_erro, erro.code) from erro
     except URLError as erro:
         raise RuntimeError(f"Falha de conexao com a API Nacional: {erro.reason}") from erro
     try:
         return json.loads(bruto)
     except json.JSONDecodeError as erro:
         raise RuntimeError(f"A API Nacional retornou resposta invalida: {bruto[:500]}") from erro
+
+
+def validar_destino_dps(endpoint: str, xml: bytes) -> None:
+    """Impede transmitir uma DPS para outro ambiente ou destino não oficial."""
+    url = urlparse(endpoint)
+    ambientes = {'sefin.nfse.gov.br': '1', 'sefin.producaorestrita.nfse.gov.br': '2'}
+    if url.scheme != 'https' or url.hostname not in ambientes or url.username or url.password or url.query or url.fragment:
+        raise ValueError('O envio exige um endereço HTTPS oficial do Emissor Nacional.')
+    raiz = etree.fromstring(xml, parser=etree.XMLParser(resolve_entities=False, no_network=True))
+    ambiente = raiz.findtext(f"{_tag('infDPS')}/{_tag('tpAmb')}")
+    if raiz.tag != _tag('DPS') or ambiente != ambientes[url.hostname]:
+        raise ValueError('O ambiente da DPS não corresponde ao endpoint. Nenhuma nota foi enviada.')
 
 
 def executar_fluxo_nfse_nacional(
@@ -342,10 +389,35 @@ def executar_fluxo_nfse_nacional(
     cert_path: str,
     cert_password: str,
     timeout: int = 60,
+    antes_envio=None,
 ) -> NfseNacionalResult:
     xml = gerar_xml_dps_nacional(faturamento, dados)
+    validar_destino_dps(endpoint, xml)
     assinado = assinar_xml_dps_nacional(xml, cert_path, cert_password)
-    resposta = enviar_dps_nacional(endpoint, assinado, cert_path, cert_password, timeout)
+    if antes_envio:
+        antes_envio(assinado)
+    try:
+        resposta = enviar_dps_nacional(endpoint, assinado, cert_path, cert_password, timeout)
+    except RejeicaoNacionalHTTP as erro:
+        if erro.status not in (400, 422) or not _rejeicao_exclusiva_im(erro.resposta):
+            raise
+        if not str(dados.get('inscricao_municipal') or '').strip():
+            raise
+        resposta = erro.resposta
+    ajuste_im = False
+    if str(dados.get('inscricao_municipal') or '').strip() and _rejeicao_exclusiva_im(resposta):
+        # Altera só a IM da DPS rejeitada; preserva número, emissão e todos os dados.
+        raiz = etree.fromstring(xml)
+        prest = raiz.find(f"{_tag('infDPS')}/{_tag('prest')}")
+        im = prest.find(_tag('IM'))
+        if im is not None:
+            prest.remove(im)
+            xml = etree.tostring(raiz, encoding='UTF-8', xml_declaration=True)
+            assinado = assinar_xml_dps_nacional(xml, cert_path, cert_password)
+            if antes_envio:
+                antes_envio(assinado)
+            resposta = enviar_dps_nacional(endpoint, assinado, cert_path, cert_password, timeout)
+            ajuste_im = True
     erros = resposta.get("erros") or []
     xml_b64 = resposta.get("nfseXmlGZipB64") or resposta.get("xmlNfseGZipB64") or ""
     xml_nfse = descompactar_xml_base64(xml_b64) if xml_b64 else None
@@ -365,4 +437,6 @@ def executar_fluxo_nfse_nacional(
     mensagem = _mensagens_retorno(resposta) or (
         "NFS-e Nacional autorizada." if status == "Autorizada" else "DPS recebida pela API Nacional."
     )
+    if ajuste_im:
+        mensagem += " Inscrição municipal omitida automaticamente após rejeição E0120; cadastro preservado."
     return NfseNacionalResult(status, mensagem, xml, assinado, resposta, xml_nfse, chave, id_dps, numero_nfse)

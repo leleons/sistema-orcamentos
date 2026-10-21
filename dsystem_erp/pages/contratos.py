@@ -6,6 +6,8 @@ from dsystem_erp.services.cobrancas_recorrentes import (
     sincronizar_lancamentos_recorrentes,
 )
 from dsystem_erp.ui_consulta import tabela_selecionavel_id
+from dsystem_erp.services.permissions import usuario_eh_gerencial
+from dsystem_erp.pages.contratos_download import renderizar_downloads
 
 
 def renderizar_contratos(ctx: dict) -> None:
@@ -16,6 +18,28 @@ def renderizar_contratos(ctx: dict) -> None:
 
     st.title("Contratos")
     st.caption("Consulta central de contratos de clientes, fornecedores e funcionários.")
+    from dsystem_erp.pages.contratos_gerar import renderizar_gerador
+    renderizar_gerador(ctx)
+    with st.expander('Contratos já anexados no portal / atendimento', expanded=False):
+        conn_legado = conectar_banco()
+        try:
+            cur_legado = conn_legado.cursor()
+            cur_legado.execute("SELECT * FROM propostas_contratos_cliente WHERE LOWER(tipo) LIKE '%contrato%' ORDER BY id DESC")
+            legados = [dict(r) for r in cur_legado.fetchall()]
+        finally:
+            conn_legado.close()
+        permitidos = buscar_clientes()
+        ids_permitidos = {str(c['id']) for c in permitidos}
+        nomes_permitidos = {str(c.get('nome') or '').strip().casefold() for c in permitidos}
+        for legado in legados:
+            autorizado = (str(legado.get('cliente_id')) in ids_permitidos if legado.get('cliente_id') else
+                          str(legado.get('cliente_nome') or '').strip().casefold() in nomes_permitidos)
+            if not autorizado:
+                continue
+            st.write(f"#{legado['id']} — {legado.get('cliente_nome')} — {legado.get('titulo') or legado.get('tipo')} — {legado.get('status')}")
+            if legado.get('arquivo'):
+                renderizar_downloads(st, legado, prefixo='contrato_legado')
+        st.caption('Os arquivos são consultados na origem, sem duplicar ou alterar os contratos existentes.')
     if tem_permissao("contratos.edit"):
         with st.expander("Cadastrar contrato existente", expanded=False):
             with st.form("contrato_existente", clear_on_submit=True):
@@ -51,6 +75,8 @@ def renderizar_contratos(ctx: dict) -> None:
     c.execute("SELECT * FROM contratos ORDER BY id DESC")
     contratos = [dict(item) for item in c.fetchall()]
     conn.close()
+    if not usuario_eh_gerencial(st.session_state):
+        contratos = [item for item in contratos if item.get('parte_tipo') != 'Funcionário']
 
     f1, f2, f3 = st.columns(3)
     busca = f1.text_input("Buscar nome, tipo ou arquivo:", key="contratos_busca").strip().casefold()
@@ -148,8 +174,7 @@ def renderizar_contratos(ctx: dict) -> None:
         st.warning("A recorrência ficará configurada, mas só será gerada depois que o contrato for marcado como assinado.")
     if contrato.get("cobranca_recorrente_id"):
         st.info(f"Cobrança recorrente vinculada: #{contrato.get('cobranca_recorrente_id')}")
-    if contrato.get("arquivo"):
-        st.download_button("Baixar contrato", data=contrato["arquivo"], file_name=contrato.get("nome_arquivo") or f"contrato_{contrato['id']}.pdf", mime=contrato.get("mime_type") or "application/pdf", width="stretch")
+    renderizar_downloads(st, contrato)
     if tem_permissao("contratos.edit"):
         if st.button("Salvar alterações do contrato", type="primary", width="stretch", key=f"contrato_salvar_{contrato['id']}"):
             conn = conectar_banco(); c = conn.cursor()

@@ -34,8 +34,8 @@ def listar_faturamentos_para_nf(conn_factory: ConnectionFactory) -> list[dict]:
 def listar_faturados_para_nf(conn_factory: ConnectionFactory) -> list[dict]:
     return _fetchall(
         conn_factory,
-        """SELECT id, cliente, cnpj, tipo_nota, itens, valor_total, obs_nota
+        """SELECT *
            FROM faturamento
-           WHERE emite_nf='Sim' AND status='Faturado'
+           WHERE emite_nf='Sim' AND COALESCE(status,'Aberto') <> 'Cancelado'
            ORDER BY id DESC""",
     )

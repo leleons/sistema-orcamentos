@@ -9,6 +9,7 @@ ARVORE_PERMISSOES = [
         "submodulos": [
             {"titulo": "Cadastro de Clientes/Fornecedores", "acoes": [("clientes.view", "Acessar"), ("clientes.edit", "Editar"), ("clientes.delete", "Excluir")], "legacy": {"clientes.view": "perm_clientes"}},
             {"titulo": "Gerenciador de Usuários", "acoes": [("usuarios.view", "Acessar"), ("usuarios.edit", "Editar"), ("usuarios.delete", "Excluir")]},
+            {"titulo": "Cadastrar impostos", "acoes": [("impostos.view", "Consultar impostos"), ("impostos.edit", "Cadastrar impostos/parâmetros")]},
             {"titulo": "Contratos", "acoes": [("contratos.view", "Consultar"), ("contratos.edit", "Editar"), ("contratos.delete", "Excluir")], "legacy": {"contratos.view": "perm_clientes", "contratos.edit": "perm_clientes"}},
         ],
     },
@@ -20,6 +21,7 @@ ARVORE_PERMISSOES = [
             {"titulo": "Incluir Contas a Receber", "acoes": [("financeiro.receber", "Acessar"), ("financeiro.receber.edit", "Editar/baixar"), ("financeiro.receber.delete", "Excluir")]},
             {"titulo": "Lançamentos Financeiros", "acoes": [("financeiro.lancamentos", "Acessar"), ("financeiro.lancamentos.edit", "Editar/baixar"), ("financeiro.lancamentos.delete", "Excluir")]},
             {"titulo": "Cadastros Financeiros", "acoes": [("financeiro.cadastros", "Acessar"), ("financeiro.cadastros.edit", "Editar"), ("financeiro.cadastros.delete", "Excluir")]},
+            {"titulo": "Banco Inter", "acoes": [("inter.view", "Consultar banco"), ("inter.preparar", "Preparar operações"), ("inter.aprovar", "Aprovar operações"), ("inter.executar", "Enviar operações aprovadas"), ("inter.conciliar", "Vincular e conciliar títulos"), ("inter.configurar", "Configurar credenciais")]},
             {"titulo": "Dashboard", "acoes": [("dashboard.view", "Acessar indicadores permitidos")]},
         ],
     },
@@ -135,6 +137,8 @@ MODULOS_NAVEGACAO = [
         "submodulos": [
             {"titulo": "Cadastro de Clientes/Fornecedores", "pagina": "Cadastro de Cliente/Fornecedor", "acoes": ["clientes.view"], "botao": "Acessar Cadastro"},
             {"titulo": "Gerenciador de Usuários", "pagina": "Gerenciador de Usuários", "acoes": ["usuarios.view"], "botao": "Acessar Usuários"},
+            {"titulo": "Cadastrar impostos", "pagina": "Cadastrar impostos", "acoes": ["impostos.view"], "botao": "Cadastrar impostos"},
+            {"titulo": "Impostos do Simples", "pagina": "Impostos", "acoes": ["impostos.view"], "botao": "Impostos do Simples"},
             {"titulo": "Contratos", "pagina": "Contratos", "acoes": ["contratos.view"], "botao": "Acessar Contratos"},
         ],
     },
@@ -145,6 +149,7 @@ MODULOS_NAVEGACAO = [
             {"titulo": "Incluir Contas a Receber", "pagina": "Contas a Receber", "acoes": ["financeiro.receber"], "botao": "Incluir Contas a Receber"},
             {"titulo": "Lançamentos Financeiros", "pagina": "Lançamentos Financeiros", "acoes": ["financeiro.lancamentos"], "botao": "Acessar Lançamentos"},
             {"titulo": "Cadastros Financeiros", "pagina": "Cadastros Financeiros", "acoes": ["financeiro.cadastros"], "botao": "Acessar Cadastros"},
+            {"titulo": "Banco Inter", "pagina": "Banco Inter", "acoes": ["inter.view"], "botao": "Banco Inter"},
             {"titulo": "Dashboard", "pagina": "Dashboard", "acoes": ["dashboard.view"], "botao": "Abrir Dashboard"},
         ],
     },

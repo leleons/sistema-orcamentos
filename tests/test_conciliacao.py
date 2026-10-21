@@ -5,6 +5,24 @@ from dsystem_erp.services.conciliacao import esta_baixado, instalar_protecao_con
 
 
 class ConciliacaoTests(unittest.TestCase):
+    def test_adapter_bloqueia_conciliado_sem_trigger(self):
+        from dsystem_erp.db import CompatCursor
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [{"conciliado": "Sim", "status": "Pago", "data_baixa": "2026-09-21"}]
+        with self.assertRaisesRegex(ValueError, "bloqueada"):
+            CompatCursor(cursor).execute("UPDATE contas_pagar SET valor_total=? WHERE id=?", (100, 7))
+        self.assertEqual(cursor.execute.call_count, 1)
+        self.assertIn("FOR UPDATE", cursor.execute.call_args.args[0])
+        self.assertEqual(cursor.execute.call_args.args[1], (7,))
+
+    def test_adapter_exige_baixa_antes_de_conciliar(self):
+        from dsystem_erp.db import CompatCursor
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [{"conciliado": "Não", "status": "Aberto", "data_baixa": ""}]
+        with self.assertRaisesRegex(ValueError, "baixa integral"):
+            CompatCursor(cursor).execute("UPDATE contas_receber SET conciliado=?, data_conciliacao=? WHERE id=?", ("Sim", "2026-09-21", 8))
+        self.assertEqual(cursor.execute.call_count, 1)
+
     def test_exige_baixa_integral_com_data(self):
         for status in ("Pago", "Recebido"):
             self.assertTrue(esta_baixado({"status": status, "data_baixa": "18/09/2026"}))

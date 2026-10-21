@@ -17,6 +17,44 @@ def caminho_modelo_contrato(tipo_contrato):
         raise ValueError("Tipo de contrato inválido.")
     return PROJECT_ROOT / "modelos_contratos" / "CONTRATOS" / nome_arquivo
 
+
+def _corrigir_layout_preenchivel(escritor, tipo):
+    """Corrige somente posições defeituosas dos originais na cópia de saída."""
+    from pypdf import PdfReader
+    from pypdf.generic import ContentStream, FloatObject, ArrayObject, NameObject, TextStringObject
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
+    for pagina in escritor.pages:
+        conteudo = ContentStream(pagina.get_contents(),escritor)
+        matriz, tamanho = None, 7.5
+        for operandos, operador in conteudo.operations:
+            if operador == b'Tf':
+                tamanho = float(operandos[1])
+            elif operador == b'Tm':
+                matriz = operandos
+            elif operador == b'Tj' and matriz is not None:
+                texto = str(operandos[0])
+                if float(matriz[5]) > 790 and float(matriz[4]) > float(pagina.mediabox.width)/2:
+                    largura = pdfmetrics.stringWidth(texto,'Helvetica-Bold',tamanho)
+                    matriz[4] = FloatObject(float(pagina.mediabox.width)-56.7-largura)
+                if tipo == 'Corporativo CLT' and texto == 'ATIVIDADES ESPECÍFICAS / OBSERVAÇÕES':
+                    operandos[0] = TextStringObject('')
+        pagina.replace_contents(conteudo)
+        if tipo == 'Corporativo CLT':
+            for ref in pagina.get('/Annots',[]):
+                widget = ref.get_object()
+                if widget.get('/T') == 'atividades_especificas':
+                    rect = list(widget['/Rect'])
+                    rect[3] = FloatObject(float(rect[3])-14)
+                    widget[NameObject('/Rect')] = ArrayObject(rect)
+                    camada = io.BytesIO()
+                    rotulo = canvas.Canvas(camada,pagesize=(float(pagina.mediabox.width),float(pagina.mediabox.height)))
+                    rotulo.setFont('Helvetica-Bold',7)
+                    rotulo.setFillColorRGB(.4,.466667,.517647)
+                    rotulo.drawString(float(rect[0]),float(rect[3])+5,'ATIVIDADES ESPECÍFICAS / OBSERVAÇÕES')
+                    rotulo.save()
+                    pagina.merge_page(PdfReader(io.BytesIO(camada.getvalue())).pages[0])
+
 def _texto_pdf(canvas_pdf, texto, x, y, largura, tamanho=9, entrelinha=None, negrito=False, max_linhas=5):
     entrelinha = entrelinha or (tamanho + 2)
     try:
@@ -49,7 +87,7 @@ def _caixa_pdf(canvas_pdf, x, y, largura, altura):
 
 def anexar_clausulas_pdf(pdf_original, clausulas, tipo_contrato=""):
     clausulas_validas = [
-        {"titulo": str(item.get("titulo") or "").strip(), "texto": str(item.get("texto") or "").strip()}
+        {"titulo": str(item.get("titulo") or "").strip(), "texto": str(item.get("texto") or "").strip(), "categoria": item.get('categoria','clausula')}
         for item in (clausulas or [])
         if str(item.get("titulo") or "").strip() and str(item.get("texto") or "").strip()
     ]
@@ -82,6 +120,15 @@ def anexar_clausulas_pdf(pdf_original, clausulas, tipo_contrato=""):
             palavras = paragrafo.split()
             atual = ""
             for palavra in palavras:
+                while pdf.stringWidth(palavra, fonte, tamanho) > largura:
+                    if atual:
+                        linhas.append(atual)
+                        atual = ''
+                    corte = 1
+                    while corte < len(palavra) and pdf.stringWidth(palavra[:corte+1],fonte,tamanho) <= largura:
+                        corte += 1
+                    linhas.append(palavra[:corte])
+                    palavra = palavra[corte:]
                 tentativa = f"{atual} {palavra}".strip()
                 if pdf.stringWidth(tentativa, fonte, tamanho) <= largura:
                     atual = tentativa
@@ -105,7 +152,7 @@ def anexar_clausulas_pdf(pdf_original, clausulas, tipo_contrato=""):
         pdf.rect(0, altura - 48, largura, 48, fill=1, stroke=0)
         pdf.setFillColorRGB(1, 1, 1)
         pdf.setFont(fonte_negrito, 11)
-        pdf.drawString(margem, altura - 30, "CLÁUSULAS ADICIONAIS")
+        pdf.drawString(margem, altura - 30, "CLÁUSULAS E DADOS COMPLEMENTARES")
         pdf.setFont(fonte_normal, 8)
         pdf.drawRightString(largura - margem, altura - 30, tipo_contrato)
         pdf.setFillColorRGB(0.35, 0.42, 0.46)
@@ -116,18 +163,27 @@ def anexar_clausulas_pdf(pdf_original, clausulas, tipo_contrato=""):
     cabecalho()
     for indice, item in enumerate(clausulas_validas, start=1):
         linhas = quebrar_linhas(pdf, item["texto"], largura - (2 * margem), tamanho=9)
-        altura_bloco = 30 + (len(linhas) * 13)
-        if y - altura_bloco < 55:
+        titulo = (f"Dado complementar {indice} - " if item['categoria'] == 'dados' else f"Cláusula adicional {indice}ª - ") + item['titulo']
+        linhas_titulo = quebrar_linhas(pdf,titulo,largura-2*margem,fonte_negrito,10)
+        if y - (len(linhas_titulo)*14+26) < 55:
             pdf.showPage()
             numero_pagina += 1
             cabecalho()
         pdf.setFont(fonte_negrito, 10)
         pdf.setFillColorRGB(0.10, 0.46, 0.66)
-        pdf.drawString(margem, y, f"Cláusula adicional {indice}ª - {item['titulo']}")
-        y -= 18
+        for linha in linhas_titulo:
+            pdf.drawString(margem,y,linha)
+            y -= 14
+        y -= 4
         pdf.setFont(fonte_normal, 9)
         pdf.setFillColorRGB(0.12, 0.15, 0.17)
         for linha in linhas:
+            if y < 55:
+                pdf.showPage()
+                numero_pagina += 1
+                cabecalho()
+                pdf.setFont(fonte_normal,9)
+                pdf.setFillColorRGB(0.12,0.15,0.17)
             pdf.drawString(margem, y, linha)
             y -= 13
         y -= 14
@@ -171,6 +227,7 @@ def gerar_contrato_pdf(tipo_contrato, dados):
     escritor = PdfWriter()
     if tipo_contrato in {"Estágio", "Corporativo CLT", "Suporte Tecnológico"} and leitor.get_fields():
         escritor.clone_document_from_reader(leitor)
+        _corrigir_layout_preenchivel(escritor, tipo_contrato)
         endereco_formulario = ", ".join(
             parte for parte in [dados.get("endereco"), dados.get("numero"), dados.get("complemento"),
                                 dados.get("bairro"), dados.get("cidade_estado"), dados.get("cep")]
@@ -202,11 +259,66 @@ def gerar_contrato_pdf(tipo_contrato, dados):
                 "dia_vencimento": dados.get("dia_vencimento") or "", "valor_mensal": dados.get("valor_contrato") or "",
                 "forma_pagamento": dados.get("forma_pagamento") or "", "data_emissao": dados.get("data_contrato") or "",
             }
+        # Exponha e preencha também os campos nativos antes ignorados, incluindo
+        # empresa, condições, jornada e observações. Assinaturas não são simuladas.
+        campos_nativos = leitor.get_fields()
+        for nome, campo in campos_nativos.items():
+            if nome.startswith('assinatura_') or nome == 'data_assinatura':
+                continue
+            if nome in dados:
+                valor = dados[nome]
+                campos_formulario[nome] = ('/Yes' if valor else '/Off') if campo.get('/FT') == '/Btn' else str(valor or '')
+        from dsystem_erp.services.contratos_vigencia import data_contrato, fim_vigencia
+        inicio = data_contrato(dados.get('data_contrato') or __import__('datetime').date.today())
+        fim = fim_vigencia(inicio)
+        assinatura = data_contrato(dados['data_assinatura']) if dados.get('data_assinatura') else inicio
+        campos_formulario.update(data_emissao=assinatura.strftime('%d/%m/%Y'), data_inicio=inicio.strftime('%d/%m/%Y'), vigencia='1 ano')
+        if dados.get('data_assinatura'):
+            campos_formulario['data_assinatura'] = assinatura.strftime('%d/%m/%Y')
+        campos_formulario = {nome: valor for nome, valor in campos_formulario.items() if nome in campos_nativos}
+        complementos = []
+        from reportlab.lib.utils import simpleSplit
+        for pagina in escritor.pages:
+            for referencia in pagina.get('/Annots', []):
+                widget = referencia.get_object()
+                pai = widget.get('/Parent')
+                nome = widget.get('/T') or (pai.get_object().get('/T') if pai else None)
+                if nome not in campos_formulario or campos_nativos[nome].get('/FT') != '/Tx':
+                    continue
+                valor = str(campos_formulario[nome])
+                if isinstance(campos_formulario[nome], tuple):
+                    continue
+                x1,y1,x2,y2 = map(float,widget['/Rect'])
+                largura, altura = x2-x1-4, y2-y1-4
+                multiline = int(campos_nativos[nome].get('/Ff',0)) & 4096
+                tamanho = 9.0
+                def cabe():
+                    if multiline:
+                        linhas = [linha for p in valor.splitlines() or [''] for linha in simpleSplit(p,'Helvetica',tamanho,largura)]
+                        return len(linhas)*tamanho*1.25 <= altura and all(pdfmetrics.stringWidth(l,'Helvetica',tamanho) <= largura for l in linhas)
+                    return '\n' not in valor and pdfmetrics.stringWidth(valor,'Helvetica',tamanho) <= largura and tamanho <= altura
+                while tamanho > 6 and not cabe():
+                    tamanho = round(tamanho-.25,2)
+                if not cabe():
+                    complementos.append({'titulo':nome.replace('_',' ').capitalize(),'texto':valor,'categoria':'dados'})
+                    valor = 'Ver complemento.'
+                    tamanho = min(9, largura / max(pdfmetrics.stringWidth(valor,'Helvetica',1),1))
+                campos_formulario[nome] = (valor,'/Helv',tamanho)
         for pagina in escritor.pages:
             escritor.update_page_form_field_values(pagina, campos_formulario, auto_regenerate=False)
+        # Os modelos CLT/estágio não têm um campo nativo de vigência. Registrar
+        # as datas na área livre da capa sem encobrir cláusulas ou assinaturas.
+        camada_vigencia = io.BytesIO()
+        capa = escritor.pages[0]
+        carimbo = canvas.Canvas(camada_vigencia, pagesize=(float(capa.mediabox.width), float(capa.mediabox.height)))
+        carimbo.setFont('ContratoSans', 11)
+        carimbo.drawString(56.7, 250, 'Vigência: 1 ano')
+        carimbo.drawString(56.7, 230, f'Início: {inicio:%d/%m/%Y} — Término: {fim:%d/%m/%Y}')
+        carimbo.save()
+        capa.merge_page(PdfReader(io.BytesIO(camada_vigencia.getvalue())).pages[0])
         saida = io.BytesIO()
         escritor.write(saida)
-        return anexar_clausulas_pdf(saida.getvalue(), dados.get("clausulas"), tipo_contrato)
+        return anexar_clausulas_pdf(saida.getvalue(), list(dados.get("clausulas") or []) + complementos, tipo_contrato)
 
     endereco_completo = ", ".join(
         parte for parte in [
@@ -245,7 +357,7 @@ def gerar_contrato_pdf(tipo_contrato, dados):
             elif indice_pagina == 3:
                 _caixa_pdf(pdf, 90, 685, 260, 30)
                 _caixa_pdf(pdf, 35, 525, largura - 70, 175)
-                _texto_pdf(pdf, f"Belo Horizonte, {dados.get('data_contrato')}.", 42, altura - 165, largura - 84, 10)
+                _texto_pdf(pdf, f"Belo Horizonte, {dados.get('data_assinatura') or dados.get('data_contrato')}.", 42, altura - 165, largura - 84, 10)
                 _texto_pdf(pdf, dados.get("nome"), 42, altura - 225, largura - 84, 10, negrito=True)
                 _texto_pdf(pdf, "(Assinatura certificado gov.br)", 42, altura - 244, largura - 84, 9)
                 _texto_pdf(pdf, f"{dados.get('responsavel_legal')} - CPF {dados.get('cpf_responsavel')}", 42, altura - 263, largura - 84, 9)

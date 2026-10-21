@@ -3,6 +3,7 @@
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.services.dados_publicos import (
     ConsultaDadosPublicosErro,
+    ConsultaDadosPublicosIndisponivel,
     consultar_cep,
     consultar_cnpj,
 )
@@ -113,7 +114,7 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
         cnpj_consulta = consulta1.text_input(
             "Consultar CNPJ:", placeholder="00.000.000/0000-00", key="cad_cli_consulta_cnpj"
         )
-        consulta1.caption("Dados empresariais públicos consultados pela BrasilAPI.")
+        consulta1.caption("Dados públicos pela BrasilAPI, com CNPJ.ws como alternativa automática em caso de indisponibilidade.")
         consultar_cnpj_agora = acao1.button("Buscar CNPJ", width="stretch", key="btn_cad_buscar_cnpj")
         cpf_consulta = consulta_cpf.text_input(
             "Consultar CPF:", placeholder="000.000.000-00", key="cad_cli_consulta_cpf"
@@ -127,11 +128,14 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
         consultar_cep_agora = acao2.button("Buscar CEP", width="stretch", key="btn_cad_buscar_cep")
         if consultar_cnpj_agora:
             try:
-                dados_cnpj = consultar_cnpj(cnpj_consulta)
+                with st.spinner('Consultando CNPJ; em caso de falha temporária, tentaremos mais uma vez...'):
+                    dados_cnpj = consultar_cnpj(cnpj_consulta)
                 _preencher_campos(st.session_state, dados_cnpj, _campos_novo_cliente())
                 situacao = dados_cnpj.get("situacao_cadastral") or "não informada"
                 st.session_state["cad_cli_consulta_mensagem"] = f"CNPJ localizado. Situação cadastral: {situacao}."
                 st.rerun()
+            except ConsultaDadosPublicosIndisponivel as ex:
+                st.warning(str(ex))
             except ConsultaDadosPublicosErro as ex:
                 st.error(str(ex))
         if consultar_cpf_agora:
@@ -245,6 +249,7 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
         funcionarios_sem_email = []
         
         if is_empresa:
+            st.caption('Cada funcionário terá login pelo próprio e-mail, vinculado a esta empresa, e verá somente seus chamados e conversas. A D-System mantém a visão de todos. A senha inicial segue o primeiro acesso do portal, com troca obrigatória.')
             qtd_func = st.number_input("Quantidade de Funcionários:", min_value=1, max_value=50, value=1)
             for i in range(qtd_func):
                 st.write(f"**Funcionário {i+1}**")
@@ -396,12 +401,16 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                         )
                         if buscar_cnpj_edicao:
                             try:
+                                with st.spinner('Consultando CNPJ; em caso de falha temporária, tentaremos mais uma vez...'):
+                                    dados_cnpj_edicao = consultar_cnpj(cnpj_edicao_consulta)
                                 _preencher_campos(
-                                    st.session_state, consultar_cnpj(cnpj_edicao_consulta),
+                                    st.session_state, dados_cnpj_edicao,
                                     _campos_edicao_cliente(id_edit_cli),
                                 )
                                 st.session_state[f"edit_cli_consulta_ok_{id_edit_cli}"] = "Dados do CNPJ atualizados na tela."
                                 st.rerun()
+                            except ConsultaDadosPublicosIndisponivel as ex:
+                                st.warning(str(ex))
                             except ConsultaDadosPublicosErro as ex:
                                 st.error(str(ex))
                         if buscar_cep_edicao:
@@ -507,6 +516,7 @@ def renderizar_cadastro_cliente_fornecedor(ctx: dict) -> None:
                         funcionarios_edit_sem_email = []
                         
                         if is_empresa_edit:
+                            st.caption('O e-mail de cada funcionário é seu login individual. Ele vê somente seus chamados; remover o funcionário desativa o acesso, sem apagar o histórico da D-System.')
                             qtd_func_edit = st.number_input("Quantidade de Funcionários:", min_value=1, max_value=50, value=max(1, len(func_existentes)), key=f"qf_{id_edit_cli}")
                             for i in range(qtd_func_edit):
                                 default_fn = func_existentes[i].get('nome', '') if i < len(func_existentes) else ""

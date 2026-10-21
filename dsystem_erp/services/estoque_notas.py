@@ -89,8 +89,10 @@ def interpretar_xml_nfe(conteudo: bytes | str) -> dict:
     }
 
 
-def validar_saida_com_cliente(cliente_id, cliente_nome: str, quantidade: int, disponivel: int) -> str | None:
+def validar_saida_com_cliente(cliente_id, cliente_nome: str, quantidade: int, disponivel: int, *, uso_interno=False) -> str | None:
     if not cliente_id or not str(cliente_nome or "").strip():
+        if uso_interno:
+            return "Selecione o usuário da empresa que receberá o item para uso interno."
         return "Selecione o cliente que receberá o item. Toda saída precisa estar vinculada a um cliente."
     if int(quantidade or 0) <= 0:
         return "Informe uma quantidade maior que zero."
@@ -185,6 +187,39 @@ def _data_iso(valor) -> str:
         except ValueError:
             continue
     raise ValueError("Data de compra inválida.")
+
+
+def cancelar_saida_manual(conn, movimento_id, motivo, usuario, criado_em):
+    """Estorna uma baixa manual uma única vez, preservando a trilha original."""
+    if not str(motivo or "").strip():
+        raise ValueError("Informe o motivo do cancelamento.")
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM estoque_movimentacoes WHERE id=? FOR UPDATE", (movimento_id,))
+        mov = c.fetchone()
+        if not mov or mov.get("tipo") not in ("Saída para cliente", "Saída para uso interno") or mov.get("origem") != "Baixa manual":
+            raise ValueError("Selecione uma saída manual para cliente ou uso interno.")
+        c.execute("SELECT id FROM estoque_movimentacoes WHERE origem='Estorno de saída' AND origem_id=?", (movimento_id,))
+        if c.fetchone():
+            raise ValueError("Esta saída já foi cancelada e devolvida ao estoque.")
+        c.execute("SELECT quantidade FROM estoque WHERE id=? FOR UPDATE", (mov["produto_id"],))
+        produto = c.fetchone()
+        if not produto:
+            raise ValueError("Produto não encontrado.")
+        anterior = float(produto["quantidade"] or 0)
+        quantidade = float(mov["quantidade"])
+        if quantidade <= 0:
+            raise ValueError("Quantidade da saída inválida.")
+        c.execute("UPDATE estoque SET quantidade=? WHERE id=?", (anterior + quantidade, mov["produto_id"]))
+        registrar_movimentacao(c, produto_id=mov["produto_id"], tipo="Estorno de saída",
+            quantidade=quantidade, estoque_anterior=anterior, estoque_atual=anterior + quantidade,
+            cliente_id=mov.get("cliente_id"), cliente_nome=mov.get("cliente_nome"),
+            origem="Estorno de saída", origem_id=movimento_id, observacoes=motivo,
+            criado_por=usuario, criado_em=criado_em)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def registrar_entrada_nota(

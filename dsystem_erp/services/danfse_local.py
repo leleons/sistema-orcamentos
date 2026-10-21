@@ -62,11 +62,11 @@ def gerar_danfse_local(nota):
     c = canvas.Canvas(out, pagesize=(595, 842), pageCompression=1)
     c.setTitle('DANFSe v2.0 - NFS-e ' + dados['numero'])
     c.setAuthor('Dsystem ERP - DANFSe gerado do XML autorizado')
-    style = ParagraphStyle('valor', fontName='Helvetica', fontSize=7, leading=8)
-    y = 40
+    style = ParagraphStyle('valor', fontName='Helvetica', fontSize=6.75, leading=8.25)
+    y = 48
     pending_title = None
 
-    def text(value, x, top, width, size=7, bold=False, color='black'):
+    def text(value, x, top, width, size=6.75, bold=False, color='black'):
         s = ParagraphStyle('linha', parent=style, fontSize=size, leading=size+1,
                            fontName='Helvetica-Bold' if bold else 'Helvetica', textColor=color)
         p = Paragraph(escape(str(value or '-')).replace('\n', '<br/>'), s)
@@ -76,31 +76,31 @@ def gerar_danfse_local(nota):
 
     def line(top):
         c.setLineWidth(.5)
-        c.line(5, 842-top, 590, 842-top)
+        c.line(13, 842-top, 578, 842-top)
 
-    def row(fields, widths=None, height=18):
+    def row(fields, widths=None, height=20.25):
         nonlocal y, pending_title
-        widths = widths or [585/len(fields)] * len(fields)
+        widths = [w * 565 / 585 for w in widths] if widths else [565/len(fields)] * len(fields)
         title = pending_title
         pending_title = None
         if title:
-            widths = [438.75/len(fields)] * len(fields)
+            widths = [423.75/len(fields)] * len(fields)
         # Measure before drawing so long names/descriptions never overwrite rows.
         heights = []
         for (label, value), w in zip(fields, widths):
             p = Paragraph(escape(str(value or '-')).replace('\n', '<br/>'), style)
             heights.append(p.wrap(w-8, 800)[1] + 10)
         h = max([height] + heights)
-        x = 151.25 if title else 5
+        x = 154.25 if title else 13
         if title:
             c.setFillColorRGB(.94, .94, .94)
-            c.rect(5, 842-y-12, 146.25, 12, stroke=0, fill=1)
+            c.rect(13, 842-y-18, 140, 18, stroke=0, fill=1)
             c.setFillColorRGB(0, 0, 0)
-            text(title, 9, y+1, 139, 7, True)
+            text(title, 13.5, y+2, 138, 6.75, True)
         for (label, value), w in zip(fields, widths):
             if label:
-                text(label, x+4, y+1, w-8, 6, True)
-            text(value, x+4, y+9, w-8)
+                text(label, x+.5, y+1, w-3, 6.25, True)
+            text(value, x+.5, y+9, w-3)
             x += w
         y += h
 
@@ -108,40 +108,44 @@ def gerar_danfse_local(nota):
         nonlocal y, pending_title
         line(y)
         if 'NÃO IDENTIFICADO' in title:
-            text(title, 185, y+1, 400, 7)
-            y += 13
+            text(title, 195, y+2, 380, 6.75)
+            y += 17
             return
         if title != 'INFORMAÇÕES COMPLEMENTARES':
             pending_title = title
             return
         c.setFillColorRGB(.94, .94, .94)
-        c.rect(5, 842-y-12, 585, 12, stroke=0, fill=1)
+        c.rect(13, 842-y-12, 565, 12, stroke=0, fill=1)
         c.setFillColorRGB(0, 0, 0)
-        text(title, 9, y+1, 577, 7, True)
+        text(title, 13.5, y+1, 560, 6.75, True)
         y += 13
 
     # Same compact monochrome structure and A4 proportions as the government sample.
     c.setFillColorRGB(.94, .94, .94)
-    c.rect(5, 802, 585, 35, stroke=0, fill=1)
+    c.rect(13, 798, 565, 36, stroke=0, fill=1)
     c.setFillColorRGB(0, 0, 0)
     logo = Path(__file__).with_name('assets') / 'nfse_logo.png'
     if logo.exists():
-        c.drawImage(str(logo), 12, 808, width=116, height=23, mask='auto')
-    text('DANFSe v2.0', 245, 7, 180, 9, True)
-    text('Documento Auxiliar da NFS-e', 220, 17, 215, 9, True)
+        c.drawImage(str(logo), 14, 805, width=116, height=23, mask='auto')
+    text('DANFSe v2.0', 282, 16, 140, 9, True)
+    text('Documento Auxiliar da NFS-e', 247, 27, 180, 9, True)
     if dados['ambiente'] == '2':
-        text('NFS-e SEM VALIDADE JURÍDICA', 210, 28, 235, 9, True, 'red')
-    text('Município: ' + (get('xLocEmi') or '-') + (' - '+get('emit/enderNac/UF') if get('emit/enderNac/UF') else ''), 445, 9, 140, 7)
-    text('Ambiente Gerador: ' + (get('ambGer') or '-'), 445, 20, 140, 6)
-    text('Tipo de Ambiente: ' + dados['ambiente'], 445, 28, 140, 6)
+        text('NFS-e SEM VALIDADE JURÍDICA', 224, 38, 210, 7, True, 'red')
+    cidade = get('xLocEmi') or '-'
+    uf_emitente = get('emit/enderNac/UF')
+    if uf_emitente and not cidade.endswith(uf_emitente):
+        cidade += ' / ' + uf_emitente
+    text('Município: ' + cidade, 437, 16, 140, 7)
+    text('Ambiente Gerador: ' + {'1':'Sistema Próprio do Município','2':'Sistema Nacional da NFS-e'}.get(get('ambGer'), get('ambGer') or '-'), 437, 27, 140, 6)
+    text('Tipo de Ambiente: ' + {'1':'Produção','2':'Homologação'}.get(dados['ambiente'], '-'), 437, 35, 140, 6)
     line(y)
-    row([('CHAVE DE ACESSO DA NFS-e', dados['chave'])], [435], 25)
+    row([('CHAVE DE ACESSO DA NFS-e', dados['chave'])], [435], 20.25)
     qr = QrCodeWidget(url_consulta_publica(dados['chave'], dados['ambiente']))
     bounds = qr.getBounds()
     drawing = Drawing(48, 48, transform=[48/(bounds[2]-bounds[0]), 0, 0, 48/(bounds[3]-bounds[1]), 0, 0])
     drawing.add(qr)
-    renderPDF.draw(drawing, c, 511, 749)
-    text('A autenticidade desta NFS-e pode ser verificada pela leitura deste código QR ou pela consulta da chave de acesso no portal nacional da NFS-e', 447, 94, 139, 6)
+    renderPDF.draw(drawing, c, 485, 737)
+    text('A autenticidade desta NFS-e pode ser verificada pela leitura deste código QR ou pela consulta da chave de acesso no portal nacional da NFS-e', 444, 108, 131, 6)
     row([('NÚMERO DA NFS-e', dados['numero']), ('COMPETÊNCIA DA NFS-e', date(d('dCompet'))), ('DATA E HORA DA EMISSÃO DA NFS-e', date(get('dhProc')))], [145,145,145])
     row([('NÚMERO DA DPS', d('nDPS')), ('SÉRIE DA DPS', d('serie')), ('DATA E HORA DA EMISSÃO DA DPS', date(d('dhEmi')))], [145,145,145])
     row([('EMITENTE DA NFS-e', {'1':'Prestador','2':'Tomador','3':'Intermediário'}.get(d('tpEmit'), '-')), ('SITUAÇÃO DA NFS-e', 'NFS-e Gerada'), ('FINALIDADE', d('finNFSe'))], [145,145,145], 21)
@@ -206,10 +210,6 @@ def gerar_danfse_local(nota):
     row([('',extra)],height=30)
     if y > 795:
         raise ValueError('Os dados desta nota excedem uma página A4 no DANFSe. Revise a extensão dos campos antes de gerar o PDF.')
-    y = 800
-    line(y)
-    row([('DATA CIENTIFICAÇÃO:', ' '), ('IDENTIFICAÇÃO E ASSINATURA',' '), ('Nº NFS-e / CHAVE NFS-e',dados['numero']+' / '+dados['chave'])], [145,145,295],height=24)
-    line(y)
     c.setLineWidth(1)
     c.rect(5,5,585,832,stroke=1,fill=0)
     c.showPage()

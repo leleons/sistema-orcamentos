@@ -3,6 +3,8 @@
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.services.usuarios import cpf_em_uso, cpf_usuario_valido, filtrar_usuarios
 from dsystem_erp.ui_consulta import tabela_clicavel_id
+from dsystem_erp.services.contratos_pj import eh_pj, tipos_contrato_funcionario, salvar_empresa_pj
+from dsystem_erp.pages.funcionario_pj import campos_empresa_pj
 
 
 def renderizar_gerenciador_usuarios(ctx: dict) -> None:
@@ -42,7 +44,7 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
         f1, f2, f3 = st.columns(3)
         funcionario_nome = f1.text_input("Nome:")
         funcionario_cpf = f2.text_input("CPF:")
-        funcionario_rj = f3.text_input("PJ:")
+        funcionario_rj = f3.text_input("RG / identificação adicional:")
 
         f4, f5 = st.columns(2)
         funcionario_dados_bancarios = f4.text_area("Dados Bancários (Ag, conta, banco, pix):", height=90)
@@ -51,7 +53,8 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
         f6, f7, f8 = st.columns(3)
         funcionario_telefone = f6.text_input("Telefone:")
         funcionario_email = f7.text_input("E-mail:")
-        funcionario_tipo_contrato = f8.selectbox("Tipo de Contrato:", ["Estágio", "CLT", "PJ", "Contrato terceirizado", "RPA"])
+        funcionario_tipo_contrato = f8.selectbox("Tipo de Contrato:", tipos_contrato_funcionario())
+        empresa_pj_nova = campos_empresa_pj(st,funcionario_tipo_contrato,'novo_usuario')
 
         f9, f10 = st.columns(2)
         funcionario_forma_pagamento = f9.selectbox("Forma de pagamento:", ["PIX", "Transferência", "Boleto"])
@@ -107,6 +110,7 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                                funcionario_telefone, funcionario_email, funcionario_endereco,
                                funcionario_tipo_contrato, funcionario_forma_pagamento, funcionario_emite_nf,
                                json.dumps(funcionario_deslocamento, ensure_ascii=False)))
+                    salvar_empresa_pj(c, c.lastrowid, empresa_pj_nova)
                     conn.commit()
                     st.success(f"Usuário {u_nome} criado!")
                     st.rerun()
@@ -171,8 +175,11 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                     f"{funcionario_contrato.get('funcionario_email') or 'não informado'}"
                 )
 
-                if not tipo_modelo_funcionario:
-                    st.warning("Este funcionário não está cadastrado como CLT ou Estágio. Atualmente há modelos somente para esses dois tipos.")
+                if eh_pj(tipo_cadastrado):
+                    from dsystem_erp.pages.contratos_gerar import renderizar_gerador
+                    renderizar_gerador(ctx, prestador_pj=funcionario_contrato)
+                elif not tipo_modelo_funcionario:
+                    st.warning("O fluxo da empresa utiliza PJ ou Estágio. Confira o tipo do cadastro antes de gerar o contrato.")
                 else:
                     conn_clausulas = conectar_banco()
                     c_clausulas = conn_clausulas.cursor()
@@ -287,6 +294,8 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                     rg_funcionario = cf1.text_input("RG:", key="contrato_func_rg")
                     cargo_funcionario = cf2.text_input("Cargo / função:", key="contrato_func_cargo")
                     data_contrato_funcionario = cf3.date_input("Data do contrato:", value=date.today(), key="contrato_func_data")
+                    from dsystem_erp.pages.contratos_gerar import escolher_data_assinatura
+                    data_assinatura_funcionario = escolher_data_assinatura(st, data_contrato_funcionario, f"contrato_func_{funcionario_contrato['id']}")
 
                     salario_funcionario = 0.0
                     instituicao_funcionario = ""
@@ -315,6 +324,7 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                         "telefone": funcionario_contrato.get("funcionario_telefone") or "",
                         "email": funcionario_contrato.get("funcionario_email") or "",
                         "data_contrato": data_contrato_funcionario.strftime("%d/%m/%Y"),
+                        "data_assinatura": data_assinatura_funcionario.strftime("%d/%m/%Y"),
                         "cargo": cargo_funcionario,
                         "valor_contrato": formatar_moeda_br(salario_funcionario) if salario_funcionario > 0 else "",
                         "instituicao_ensino": instituicao_funcionario,
@@ -357,6 +367,8 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                     ):
                         try:
                             bytes_contrato_funcionario = gerar_contrato_pdf(tipo_modelo_funcionario, dados_contrato_funcionario)
+                            from dsystem_erp.services.contratos_word import gerar_contrato_word, nome_word, MIME_WORD
+                            word_contrato_funcionario = gerar_contrato_word(tipo_modelo_funcionario, dados_contrato_funcionario, pdf=bytes_contrato_funcionario)
                             nome_funcionario_limpo = re.sub(
                                 r"[^A-Za-z0-9_-]+", "_", dados_contrato_funcionario["nome"]
                             ).strip("_") or "funcionario"
@@ -366,6 +378,7 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                                 conn_contrato_func, tipo=tipo_modelo_funcionario, parte_tipo="Funcionário",
                                 parte_id=funcionario_contrato.get("id"), parte_nome=dados_contrato_funcionario["nome"],
                                 nome_arquivo=arquivo_contrato_funcionario, arquivo=bytes_contrato_funcionario,
+                                arquivo_word=word_contrato_funcionario, nome_arquivo_word=nome_word(arquivo_contrato_funcionario),
                                 valor=dados_contrato_funcionario.get("valor_contrato") or "",
                                 inicio=dados_contrato_funcionario.get("data_contrato") or "",
                                 criado_por=st.session_state.get("username", ""), criado_em=datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -374,13 +387,18 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                             st.session_state["contrato_funcionario_gerado"] = {
                                 "dados": bytes_contrato_funcionario,
                                 "nome": arquivo_contrato_funcionario,
+                                "word": word_contrato_funcionario,
+                                "formulario": dict(dados_contrato_funcionario),
+                                "funcionario_id": funcionario_contrato['id'],
                             }
                             st.success("Contrato do funcionário gerado com sucesso.")
                         except Exception as ex:
                             st.error(f"Não foi possível gerar o contrato: {ex}")
 
                     contrato_funcionario_gerado = st.session_state.get("contrato_funcionario_gerado")
-                    if contrato_funcionario_gerado:
+                    if (contrato_funcionario_gerado
+                        and contrato_funcionario_gerado.get('formulario') == dados_contrato_funcionario
+                        and contrato_funcionario_gerado.get('funcionario_id') == funcionario_contrato['id']):
                         st.download_button(
                             "Baixar contrato do funcionário em PDF",
                             data=contrato_funcionario_gerado["dados"],
@@ -390,6 +408,11 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                             width="stretch",
                             key="download_contrato_funcionario",
                         )
+                        if contrato_funcionario_gerado.get('word'):
+                            from dsystem_erp.services.contratos_word import nome_word, MIME_WORD
+                            st.download_button('Baixar contrato do funcionário em Word (.docx)',
+                                contrato_funcionario_gerado['word'], file_name=nome_word(contrato_funcionario_gerado['nome']),
+                                mime=MIME_WORD, key='download_contrato_funcionario_word')
 
         st.write("---")
         act_u = st.radio("Ação (Usuários):", ["Editar Usuário", "Excluir Usuário"], horizontal=True)
@@ -434,7 +457,7 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                         ef1, ef2, ef3 = st.columns(3)
                         e_funcionario_nome = ef1.text_input("Nome:", value=ud.get("funcionario_nome") or "", key=f"ef_nome_{id_ed_u}")
                         e_funcionario_cpf = ef2.text_input("CPF:", value=ud.get("funcionario_cpf") or "", key=f"ef_cpf_{id_ed_u}")
-                        e_funcionario_rj = ef3.text_input("PJ:", value=ud.get("funcionario_rj") or "", key=f"ef_rj_{id_ed_u}")
+                        e_funcionario_rj = ef3.text_input("RG / identificação adicional:", value=ud.get("funcionario_rj") or "", key=f"ef_rj_{id_ed_u}")
 
                         ef4, ef5 = st.columns(2)
                         e_funcionario_dados_bancarios = ef4.text_area("Dados Bancários (Ag, conta, banco, pix):", value=ud.get("funcionario_dados_bancarios") or "", height=90, key=f"ef_banco_{id_ed_u}")
@@ -443,9 +466,10 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                         ef6, ef7, ef8 = st.columns(3)
                         e_funcionario_telefone = ef6.text_input("Telefone:", value=ud.get("funcionario_telefone") or "", key=f"ef_tel_{id_ed_u}")
                         e_funcionario_email = ef7.text_input("E-mail:", value=ud.get("funcionario_email") or "", key=f"ef_email_{id_ed_u}")
-                        tipos_contrato = ["Estágio", "CLT", "PJ", "Contrato terceirizado", "RPA"]
-                        tipo_atual = ud.get("funcionario_tipo_contrato") or "CLT"
+                        tipo_atual = ud.get("funcionario_tipo_contrato") or "PJ"
+                        tipos_contrato = tipos_contrato_funcionario(tipo_atual)
                         e_funcionario_tipo_contrato = ef8.selectbox("Tipo de Contrato:", tipos_contrato, index=tipos_contrato.index(tipo_atual) if tipo_atual in tipos_contrato else 1, key=f"ef_tipo_{id_ed_u}")
+                        empresa_pj_edicao = campos_empresa_pj(st,e_funcionario_tipo_contrato,f'edit_usuario_{id_ed_u}',ud)
 
                         ef9, ef10 = st.columns(2)
                         formas_pagamento = ["PIX", "Transferência", "Boleto"]
@@ -494,6 +518,7 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
                                 st.stop()
                             senha_para_salvar = criar_hash_senha(eu_s) if eu_s else ud["password"]
                             c.execute('''UPDATE usuarios SET username=?, password=?, modulo_gerencial=?, perm_orcamentos=?, perm_del_orc=?, perm_infra=?, perm_edit_infra=?, perm_os=?, perm_edit_os=?, perm_del_os=?, perm_del_infra=?, perm_emails=?, perm_edit_em=?, perm_del_em=?, perm_clientes=?, perm_estoque=?, perm_faturamento=?, perm_atendimentos=?, perm_edit_atendimentos=?, submodulos=?, empresas_permitidas=?, funcionario_nome=?, funcionario_cpf=?, funcionario_rj=?, funcionario_dados_bancarios=?, funcionario_telefone=?, funcionario_email=?, funcionario_endereco=?, funcionario_tipo_contrato=?, funcionario_forma_pagamento=?, funcionario_emite_nf=?, funcionario_deslocamento=? WHERE id=?''', (eu_n, senha_para_salvar, int(e_modulo_gerencial), flags_usuario.get("perm_orcamentos", 0), flags_usuario.get("perm_del_orc", 0), flags_usuario.get("perm_infra", 0), flags_usuario.get("perm_edit_infra", 0), flags_usuario.get("perm_os", 0), flags_usuario.get("perm_edit_os", 0), flags_usuario.get("perm_del_os", 0), flags_usuario.get("perm_del_infra", 0), flags_usuario.get("perm_emails", 0), flags_usuario.get("perm_edit_em", 0), flags_usuario.get("perm_del_em", 0), flags_usuario.get("perm_clientes", 0), flags_usuario.get("perm_estoque", 0), flags_usuario.get("perm_faturamento", 0), flags_usuario.get("perm_atendimentos", 0), flags_usuario.get("perm_edit_atendimentos", 0), json.dumps(sorted(permissoes_usuario), ensure_ascii=False), json.dumps(e_empresas_permitidas, ensure_ascii=False), e_funcionario_nome, e_funcionario_cpf, e_funcionario_rj, e_funcionario_dados_bancarios, e_funcionario_telefone, e_funcionario_email, e_funcionario_endereco, e_funcionario_tipo_contrato, e_funcionario_forma_pagamento, e_funcionario_emite_nf, json.dumps(e_funcionario_deslocamento, ensure_ascii=False), id_ed_u))
+                            salvar_empresa_pj(c,id_ed_u,empresa_pj_edicao)
                             conn.commit()
                             conn.close()
                             if (st.session_state.get("username") or "") == (ud.get("username") or ""):

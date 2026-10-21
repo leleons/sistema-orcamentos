@@ -16,6 +16,8 @@ class FakeCursor:
         self.last_sql = sql
 
     def fetchall(self):
+        if "<> 'Cancelado'" in self.last_sql:
+            return [row for row in self.rows if row.get('emite_nf') == 'Sim' and row.get('status') != 'Cancelado']
         if "status='Faturado'" in self.last_sql:
             return [row for row in self.rows if row.get("emite_nf") == "Sim" and row.get("status") == "Faturado"]
         if "emite_nf='Sim'" in self.last_sql:
@@ -54,7 +56,11 @@ class FaturamentoRepositoryTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in listar_faturamentos_para_nf(self.factory)], [1, 2])
 
     def test_listar_faturados_para_nf(self):
-        self.assertEqual([r["id"] for r in listar_faturados_para_nf(self.factory)], [2])
+        self.assertEqual([r["id"] for r in listar_faturados_para_nf(self.factory)], [1, 2])
+
+    def test_preparacao_nao_lista_cancelados(self):
+        self.conn.rows.append({'id': 4, 'emite_nf': 'Sim', 'status': 'Cancelado'})
+        self.assertEqual([r['id'] for r in listar_faturados_para_nf(self.factory)], [1, 2])
 
 
 if __name__ == "__main__":

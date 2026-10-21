@@ -40,6 +40,17 @@ def desdobramento_suporte_bh(servico, municipio, codigo_nacional, ambiente):
     return ""
 
 
+def chave_desdobramento_salvo(servico, municipio, codigo_nacional, ambiente):
+    """Isola configurações por serviço/município/ambiente, sem inferir tributos."""
+    municipio = str(municipio or '').strip()
+    codigo = re.sub(r'\D', '', str(codigo_nacional or ''))
+    servico_id = str((servico or {}).get('id') or '')
+    if (not servico_id.isdigit() or len(municipio) != 7 or not municipio.isdigit()
+            or len(codigo) != 6 or ambiente not in ('homologacao', 'producao')):
+        return ''
+    return f'NFSE_DESDOBRO_{ambiente}_{municipio}_{codigo}_{servico_id}'
+
+
 def cadastrar_catalogo_ti(cursor, padroes_anteriores):
     """Corrige apenas sementes intactas; não modifica cadastros personalizados/notas.
 

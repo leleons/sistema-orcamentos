@@ -3,12 +3,15 @@ from __future__ import annotations
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.migrations import garantir_coluna
 from dsystem_erp.kanban_component import quadro_interativo
+from dsystem_erp.pages.etiquetas_os import renderizar_etiquetas_os
 from dsystem_erp.services.recepcao_kanban import (
     CORES_KANBAN_OS,
     STATUS_KANBAN_OS,
     alteracoes_do_quadro_registros,
-    gerar_etiqueta_equipamento,
     montar_quadro_registros,
+    alvo_qr_equipamento,
+    buscar_equipamento_qr,
+    servicos_equipamento,
 )
 
 
@@ -23,6 +26,8 @@ def renderizar_recepcao_kanban(ctx: dict) -> None:
         st.session_state["kanban_estrutura_verificada"] = True
 
     st.title("Recepção de Equipamentos — Kanban")
+    if _renderizar_ficha_qr():
+        return
     st.caption("Acompanhe em um único quadro as Ordens de Serviço, os atendimentos e os chamados.")
     if st.button("Abrir nova O.S. para receber equipamento", type="primary"):
         st.session_state["pagina_atual"] = "Ordem de Serviço (OS)"
@@ -147,14 +152,37 @@ def renderizar_recepcao_kanban(ctx: dict) -> None:
     d2.write(f"**Equipamento:** {item_selecionado.get('equipamento') or 'Não informado'}")
     d3.write(f"**Série/patrimônio:** {item_selecionado.get('numero_serie') or 'Não informado'}")
     d4.write(f"**Técnico:** {item_selecionado.get('atendente') or item_selecionado.get('tecnico_extra') or 'Não definido'}")
-    st.download_button(
-        "Imprimir etiqueta com código de barras e QR Code",
-        data=gerar_etiqueta_equipamento(item_selecionado, APP_BASE_URL),
-        file_name=f"etiqueta_{item_selecionado.get('numero_item')}.pdf",
-        mime="application/pdf",
-        width="stretch",
-        key=f"kanban_etiqueta_{item_selecionado['id']}",
-    )
+    renderizar_etiquetas_os(st, [item_selecionado], config_sistema_val, APP_BASE_URL, "kanban_etiqueta")
+
+
+def _renderizar_ficha_qr():
+    alvo = alvo_qr_equipamento({chave: obter_query_param(chave) for chave in ("pagina", "equipamento_id", "os", "item")})
+    if not alvo:
+        return False
+    # Chamado somente depois da autenticação e de recepcao.view, inclusive para arquivados.
+    conn = conectar_banco()
+    try:
+        item = buscar_equipamento_qr(conn.cursor(), alvo)
+    finally:
+        conn.close()
+    st.subheader("Ficha do equipamento da etiqueta")
+    st.caption("Dados consultados agora no sistema. Editar o serviço não altera o QR já impresso.")
+    if st.button("Atualizar ficha", key="qr_os_atualizar"):
+        st.rerun()
+    if item:
+        registro = _registro_os(item)
+        st.session_state["kanban_registro_ativo"] = registro["_chave"]
+        _renderizar_detalhes_registro([registro], tem_permissao("recepcao.edit"), int(item.get("kanban_arquivado") or 0), ficha_qr=True)
+    else:
+        st.warning("Este equipamento não foi encontrado. Ele pode ter sido excluído; confira a O.S. com a recepção.")
+    if st.button("Voltar ao quadro da recepção", key="qr_os_voltar"):
+        for chave in ("pagina", "equipamento_id", "os", "item", "cliente", "equipamento", "serie", "chamado"):
+            if chave in st.query_params:
+                del st.query_params[chave]
+        st.session_state.pop("qr_os_aberto", None)
+        st.session_state.pop("kanban_registro_ativo", None)
+        st.rerun()
+    return True
 
 
 def _salvar_alteracoes_quadro(alteracoes: list[dict]) -> None:
@@ -268,7 +296,7 @@ def _registro_chamado(item: dict) -> dict:
 
 
 def _renderizar_detalhes_registro(
-    registros: list[dict], pode_editar: bool = False, arquivados: int = 0
+    registros: list[dict], pode_editar: bool = False, arquivados: int = 0, ficha_qr: bool = False
 ) -> None:
     chave = st.session_state.get("kanban_registro_ativo")
     registro = next((item for item in registros if item.get("_chave") == chave), None)
@@ -288,7 +316,29 @@ def _renderizar_detalhes_registro(
             st.write(f"**Equipamento:** {registro.get('tipo_equipamento') or ''} {registro.get('equipamento') or ''}")
             st.write(f"**Marca / série:** {registro.get('marca') or ''} / {registro.get('numero_serie') or 'Não informada'}")
             st.write(f"**Avaria/defeito:** {registro.get('avaria') or ''} {registro.get('defeito') or ''}")
-            st.write(f"**Serviço:** {registro.get('servico') or 'Não informado'}")
+            st.markdown("**O que fazer neste equipamento:**")
+            st.text(servicos_equipamento(registro))
+            if pode_editar:
+                with st.expander("Editar serviço a fazer"):
+                    with st.form(f"kanban_servico_{registro['_registro_id']}"):
+                        novo_servico = st.text_area("Serviço / instruções para este item:", value=registro.get("servico") or registro.get("defeito") or "")
+                        st.caption("Os indicadores de formatação, backup e aplicativos continuam sendo os do cadastro do equipamento.")
+                        salvar = st.form_submit_button("Salvar instruções do equipamento")
+                    if salvar:
+                        conn_srv = conectar_banco()
+                        try:
+                            conn_srv.cursor().execute(
+                                "UPDATE equipamentos_os SET servico=?, kanban_alterado_por=?, kanban_alterado_em=? WHERE id=?",
+                                (novo_servico.strip(), st.session_state.get("username", ""), agora_br(), registro["_registro_id"]),
+                            )
+                            conn_srv.commit()
+                        except Exception:
+                            conn_srv.rollback()
+                            raise
+                        finally:
+                            conn_srv.close()
+                        st.toast("Instruções salvas. O mesmo QR abre o serviço atualizado.")
+                        st.rerun()
             if registro.get("chamado_id"):
                 st.write(f"**Chamado vinculado:** #{registro.get('chamado_id')}")
         elif origem == "atendimento":
@@ -325,6 +375,6 @@ def _renderizar_detalhes_registro(
                     st.session_state["kanban_registro_ativo"] = None
                     st.toast("Item restaurado no quadro." if arquivados else "Item entregue arquivado.")
                     st.rerun()
-        if st.button("Fechar detalhes", key=f"kanban_fechar_{chave}"):
+        if not ficha_qr and st.button("Fechar detalhes", key=f"kanban_fechar_{chave}"):
             st.session_state["kanban_registro_ativo"] = None
             st.rerun()

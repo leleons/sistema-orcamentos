@@ -28,6 +28,21 @@ from dsystem_erp.services.whatsapp import criar_url_whatsapp, normalizar_telefon
 from dsystem_erp.services.nfse import analisar_retorno_nfse, chamar_webservice_nfse, consultar_protocolo_nfse, executar_fluxo_emissao_nfse, validar_nfse, validar_xml_nfse_basico
 from dsystem_erp.services.portal_cliente import normalizar_secao_portal, portal_card_html, portal_mini_grid_html
 try:
+    from dsystem_erp.services.portal_cliente import exigir_acesso_chamado
+except ImportError:
+    from dsystem_erp.services.portal_cliente import filtro_chamados_portal
+
+    def exigir_acesso_chamado(cursor, estado, chamado_id):
+        if estado.get("tipo_login") != "cliente":
+            return
+        filtro, params = filtro_chamados_portal(estado)
+        cursor.execute(
+            f"SELECT id FROM chamados_cliente WHERE id=%s AND ({filtro})",
+            (chamado_id, *params),
+        )
+        if not cursor.fetchone():
+            raise PermissionError("Este chamado não pertence ao seu acesso ou seu login foi desativado.")
+try:
     from dsystem_erp.services.settings import endpoint_nfse_nacional_rest, normalizar_whatsapp_config, validar_nfse_config
 except ImportError:
     from dsystem_erp.services.settings import normalizar_whatsapp_config, validar_nfse_config
@@ -1052,6 +1067,14 @@ def salvar_mensagem_chamado(chamado_id, autor_tipo, autor_nome, mensagem, anexo_
     anexo_dados, anexo_nome, anexo_mime = dados_upload(anexo_upload)
     conn = conectar_banco()
     c = conn.cursor()
+    try:
+        exigir_acesso_chamado(c, st.session_state, chamado_id)
+    except PermissionError:
+        conn.close()
+        raise
+    if st.session_state.get('tipo_login') == 'cliente':
+        autor_tipo = 'cliente'
+        autor_nome = st.session_state.get('portal_usuario_nome') or st.session_state.get('username')
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
     c.execute(
         """INSERT INTO chamados_mensagens
@@ -1066,6 +1089,11 @@ def salvar_mensagem_chamado(chamado_id, autor_tipo, autor_nome, mensagem, anexo_
 def mensagens_chamado(chamado_id):
     conn = conectar_banco()
     c = conn.cursor(dictionary=True)
+    try:
+        exigir_acesso_chamado(c, st.session_state, chamado_id)
+    except PermissionError:
+        conn.close()
+        raise
     c.execute("SELECT * FROM chamados_mensagens WHERE chamado_id=%s ORDER BY id ASC", (chamado_id,))
     rows = c.fetchall()
     conn.close()
@@ -1539,6 +1567,17 @@ def preparar_nota_fiscal_por_tipo(faturamento, tipo_item, competencia=None):
     data_competencia = data_para_banco_br(competencia or date.today())
     conn_nf_tipo = conectar_banco()
     cnf_tipo = conn_nf_tipo.cursor()
+    cnf_tipo.execute("SELECT emitir_automaticamente, status FROM faturamento WHERE id=? FOR UPDATE", (faturamento.get('id'),))
+    origem_nf = cnf_tipo.fetchone()
+    if not origem_nf or origem_nf.get('status') == 'Cancelado':
+        conn_nf_tipo.close()
+        raise ValueError('Lançamento indisponível para emissão.')
+    cnf_tipo.execute("SELECT estado FROM fiscal_emissoes_auto WHERE faturamento_id=? AND tipo=?", (faturamento.get('id'), tipo_item))
+    bloqueio_auto = cnf_tipo.fetchone()
+    estados_manuais = ('Pendente', 'Rejeitada') if origem_nf.get('emitir_automaticamente') else ('Pendente', 'Pronta', 'Rejeitada')
+    if bloqueio_auto and bloqueio_auto.get('estado') not in estados_manuais:
+        conn_nf_tipo.close()
+        raise ValueError('Esta nota está preparada para emissão automática, enviada ou em conferência. Use o acompanhamento da emissão automática.')
     valores_nf = (
         faturamento.get("cliente") or "",
         faturamento.get("cnpj") or "",
@@ -1553,11 +1592,18 @@ def preparar_nota_fiscal_por_tipo(faturamento, tipo_item, competencia=None):
         observacoes,
     )
     cnf_tipo.execute(
-        "SELECT id FROM notas_fiscais WHERE faturamento_id=? AND tipo_nota=? LIMIT 1",
+        "SELECT id, status FROM notas_fiscais WHERE faturamento_id=? AND tipo_nota=? ORDER BY id DESC FOR UPDATE",
         (faturamento.get("id"), tipo_item),
     )
-    existente_nf = cnf_tipo.fetchone()
+    existentes_nf = cnf_tipo.fetchall()
+    if any(n.get('status') not in ('Pendente', 'Rejeitada', '', None) for n in existentes_nf):
+        conn_nf_tipo.close()
+        raise ValueError('Nota já enviada ou em conferência. Não será sobrescrita; consulte o retorno.')
+    existente_nf = existentes_nf[0] if existentes_nf else None
     if existente_nf:
+        if existente_nf.get('status') not in ('Pendente', 'Rejeitada', '', None):
+            conn_nf_tipo.close()
+            raise ValueError('Nota já enviada ou em conferência. Não será sobrescrita; consulte o retorno.')
         cnf_tipo.execute("""UPDATE notas_fiscais SET cliente=?, cpf_cnpj=?, tipo_nota=?, data_competencia=?,
                             descricao=?, valor_servicos=?, aliquota_iss=?, valor_iss=?, codigo_servico=?,
                             municipio_prestacao=?, observacoes=? WHERE id=?""",
@@ -1599,7 +1645,7 @@ def salvar_retorno_nota_fiscal(nota_id, xml_envio, xml_retorno, retorno_info, ge
     cur.execute("SELECT * FROM notas_fiscais WHERE id=%s", (nota_id,))
     nota = cur.fetchone() or {}
     status = retorno_info.get("status") or "Recebida"
-    numero = retorno_info.get("numero_nfse") or nota.get("numero_nota") or ""
+    numero = retorno_info.get("numero_nfse") or retorno_info.get("numero_nota") or nota.get("numero_nota") or ""
     chave = retorno_info.get("chave_acesso") or nota.get("chave_acesso") or ""
     protocolo = retorno_info.get("protocolo") or nota.get("protocolo") or ""
     lote = retorno_info.get("numero_lote") or nota.get("numero_lote") or ""
@@ -1609,6 +1655,15 @@ def salvar_retorno_nota_fiscal(nota_id, xml_envio, xml_retorno, retorno_info, ge
     pdf_base64 = nota.get("pdf_base64") or ""
     link_nota = nota.get("link_nota") or ""
     emitido_em = nota.get("emitido_em")
+    # A confirmação fiscal não pode ser inferida apenas de um cStat isolado.
+    # Validar a chave/ambiente antes de salvar como autorizada, inclusive no envio manual.
+    if status == 'Autorizada' and nota.get('tipo_nota') == 'Produto':
+        from dsystem_erp.services.nfe_documento import montar_nfe_processada
+        try:
+            xml_retorno_txt = montar_nfe_processada(xml_envio_txt.encode(), xml_retorno_txt.encode()).decode()
+        except ValueError as erro_protocolo:
+            status = retorno_info['status'] = 'Conferir'
+            mensagem = retorno_info['mensagem'] = str(erro_protocolo)
     if status == "Autorizada":
         emitido_em = emitido_em or agora_br()
         xml_nacional = (
@@ -1628,6 +1683,15 @@ def salvar_retorno_nota_fiscal(nota_id, xml_envio, xml_retorno, retorno_info, ge
                 retorno_info["danfse_local_salvo"] = True
             except Exception as erro_danfse:
                 retorno_info["danfse_erro"] = str(erro_danfse)
+        elif nota.get('tipo_nota') == 'Produto':
+            from dsystem_erp.services.nfe_documento import montar_nfe_processada, gerar_danfe_autorizado
+            try:
+                if '<nfeProc' not in xml_retorno_txt:
+                    xml_retorno_txt = montar_nfe_processada(xml_envio_txt.encode(), xml_retorno_txt.encode()).decode()
+                pdf_base64 = base64.b64encode(gerar_danfe_autorizado(xml_retorno_txt.encode())).decode('ascii')
+            except Exception as erro_danfe:
+                retorno_info['danfse_erro'] = str(erro_danfe)
+                mensagem += ' PDF pendente: ' + str(erro_danfe)
         elif gerar_pdf:
             nota_pdf = {**nota, "numero_nota": numero, "chave_acesso": chave, "protocolo": protocolo, "mensagem_retorno": mensagem, "xml_autorizado": xml_retorno_txt, "xml_envio": xml_envio_txt}
             pdf_base64 = base64.b64encode(gerar_pdf_nota_autorizada_simples(nota_pdf, retorno_info)).decode("ascii")
@@ -1911,12 +1975,25 @@ def localizar_produto_estoque(cursor, item):
             return dict(encontrado)
     return None
 
-def faturar_lancamento_com_integracoes(faturamento):
+def faturar_lancamento_com_integracoes(faturamento, emitir_automaticamente=None):
+    if faturamento.get("modalidade_faturamento") == "Por medição" and not faturamento.get("medicao_principal_id"):
+        return {"ok": False, "mensagem": "Abra o lançamento e registre as medições parciais. Fature cada medição individualmente."}
     fat_id = int(faturamento.get("id") or 0)
     if not fat_id:
         return {"ok": False, "mensagem": "Faturamento inválido."}
     if (faturamento.get("status") or "Aberto") == "Faturado":
         return {"ok": False, "mensagem": "Este lançamento já está marcado como faturado."}
+
+    from dsystem_erp.services.fiscal_automatico import preparar_antes_de_faturar, hash_origem, tipos_fiscais
+    ativar_auto = bool(faturamento.get('emitir_automaticamente') if emitir_automaticamente is None else emitir_automaticamente)
+    origem_conferida = None
+    if ativar_auto and tipos_fiscais(faturamento):
+        try:
+            origem_conferida = preparar_antes_de_faturar(conectar_banco, fat_id, config_sistema_val)
+            if origem_conferida != hash_origem(faturamento):
+                raise ValueError('O lançamento foi alterado. Atualize a tela antes de faturar e emitir.')
+        except Exception as erro:
+            return {"ok": False, "fiscal_pronto": False, "mensagem": str(erro)}
 
     itens = itens_faturamento_lista(faturamento.get("itens"))
     cliente_baixa_estoque = str(faturamento.get("cliente") or "").strip()
@@ -1938,6 +2015,15 @@ def faturar_lancamento_com_integracoes(faturamento):
     conn_fat = conectar_banco()
     cfat = conn_fat.cursor()
     try:
+        cfat.execute("SELECT * FROM faturamento WHERE id=? FOR UPDATE", (fat_id,))
+        atual_fat = cfat.fetchone()
+        if not atual_fat or atual_fat.get('status') in ('Faturado', 'Cancelado'):
+            raise ValueError('Lançamento já faturado, cancelado ou indisponível. Nenhuma nova baixa foi feita.')
+        ativar_auto = bool((atual_fat.get('emitir_automaticamente') if emitir_automaticamente is None else emitir_automaticamente) and tipos_fiscais(atual_fat))
+        if ativar_auto and origem_conferida != hash_origem(atual_fat):
+            raise ValueError('O lançamento mudou durante a preparação automática. Atualize a tela e confira antes de faturar.')
+        if emitir_automaticamente is not None:
+            cfat.execute('UPDATE faturamento SET emitir_automaticamente=? WHERE id=?', (int(ativar_auto), fat_id))
         cliente_baixa_id = None
         if cliente_baixa_estoque:
             cfat.execute(
@@ -1963,7 +2049,7 @@ def faturar_lancamento_com_integracoes(faturamento):
                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                          (
                              faturamento.get("cliente") or "", faturamento.get("cnpj") or "", documento,
-                             faturamento.get("tipo") or "Eventual", "Faturamento", "Faturamento",
+                             faturamento.get("tipo") or "Eventual", atual_fat.get('categoria') or "Faturamento", atual_fat.get('centro') or "Faturamento",
                              data_para_banco_br(date.today()), faturamento.get("data_lanc") or data_para_banco_br(date.today()),
                              parcela["vencimento"], parcela["valor"], parcela["valor"],
                              faturamento.get("forma_pag") or "", "Sim" if faturamento.get("emite_nf") == "Sim" else "Não",
@@ -1973,6 +2059,10 @@ def faturar_lancamento_com_integracoes(faturamento):
                              usuario, agora, "Sim" if quantidade_parcelas > 1 else "Não",
                              quantidade_parcelas, faturamento.get("forma_pag") or "", detalhes_parcela,
                          ))
+
+            if atual_fat.get('plano_contas') or atual_fat.get('conta_bancaria'):
+                cfat.execute('UPDATE contas_receber SET plano_contas=?, conta_bancaria=? WHERE id=?',
+                             (atual_fat.get('plano_contas') or '', atual_fat.get('conta_bancaria') or '', cfat.lastrowid))
 
         for item in itens:
             if not item.get("estoque_id") and (item.get("tipo_item") or "Serviço") != "Produto":
@@ -2036,7 +2126,18 @@ def faturar_lancamento_com_integracoes(faturamento):
         mensagem += f" Estoque baixado em {len(baixas_estoque)} item(ns)."
     if alertas:
         mensagem += " Atenção: " + " | ".join(alertas)
-    return {"ok": True, "mensagem": mensagem}
+    resultado_fiscal = {}
+    try:
+        from dsystem_erp.services.fiscal_automatico import processar_emissoes
+        from dsystem_erp.services.fiscal_documentos import resultado_emissao
+        emissoes = processar_emissoes(conectar_banco, fat_id, config_sistema_val, salvar_retorno_nota_fiscal)
+        if ativar_auto or emissoes:
+            resultado_fiscal = resultado_emissao(conectar_banco, fat_id)
+            mensagem += ' ' + resultado_fiscal.pop('mensagem')
+    except Exception as erro_auto:
+        resultado_fiscal['fiscal_pronto'] = False
+        mensagem += f' Faturamento concluído; emissão fiscal pendente de conferência: {erro_auto}'
+    return {"ok": True, "mensagem": mensagem, **resultado_fiscal}
 
 def gerar_pdfs_tres_orcamentos(dados):
     return service_gerar_pdfs_tres_orcamentos(dados)
@@ -2545,6 +2646,8 @@ def renderizar_modulos_home():
 
 def renderizar_agenda_usuario_home():
     usuario_logado = st.session_state.get("username", "")
+    if not usuario_logado or st.session_state.get('tipo_login') == 'cliente':
+        return
     nome_funcionario = st.session_state.get("funcionario_nome", "")
     tecnicos_filtro = [usuario_logado]
     if nome_funcionario and nome_funcionario not in tecnicos_filtro:
@@ -2557,9 +2660,8 @@ def renderizar_agenda_usuario_home():
     c.execute(
         f"""SELECT * FROM agenda_visitas
             WHERE tecnico IN ({placeholders})
-              AND data_visita >= ?
-              AND status NOT IN ('Concluído', 'Realizado', 'Cancelado')
-            ORDER BY data_visita ASC, hora_inicio ASC
+              AND COALESCE(status,'') NOT IN ('Concluído', 'Realizado', 'Cancelado')
+            ORDER BY CASE WHEN data_visita < ? THEN 1 ELSE 0 END, data_visita ASC, hora_inicio ASC
             LIMIT 8""",
         tecnicos_filtro + [hoje],
     )
@@ -2567,9 +2669,10 @@ def renderizar_agenda_usuario_home():
     conn.close()
 
     st.write("---")
-    st.subheader("Minha Agenda")
+    st.header("📅 Minha Agenda — compromissos e pendências")
+    st.caption('Até 8 compromissos: próximos primeiro, seguidos de pendências anteriores. Use Abrir compromisso para ver ou editar na agenda.')
     if not visitas:
-        st.info("Você não tem visitas agendadas a partir de hoje.")
+        st.info("Você não tem compromissos pendentes na agenda.")
         return
 
     status_cores = {
@@ -2593,21 +2696,13 @@ def renderizar_agenda_usuario_home():
         horario = visita.get("hora_inicio") or "Horário não definido"
         if visita.get("hora_fim"):
             horario = f"{horario} - {visita['hora_fim']}"
-        st.markdown(
-            f"""
-<div style="border-left:5px solid {cor}; background:#f8f9fa; border-radius:6px; padding:12px 16px; margin-bottom:8px;">
-  <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-    <b>{visita.get('cliente_nome') or 'Cliente não informado'}</b>
-    <span style="color:#555;">{data_br} | {horario}</span>
-  </div>
-  <div style="font-size:13px; color:#333; margin-top:4px;">
-    <b>Status:</b> {visita.get('status') or ''} &nbsp;|&nbsp; <b>Tipo:</b> {visita.get('tipo_visita') or ''}
-  </div>
-  <div style="font-size:13px; color:#555; margin-top:4px;">{visita.get('descricao') or ''}</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
+        from dsystem_erp.pages.agenda_visual import cartao_visita
+        if str(visita.get('data_visita') or '')[:10] == hoje:
+            st.warning(f"Hoje, {horario}: {visita.get('cliente_nome') or 'Compromisso'}")
+        st.markdown(cartao_visita(visita), unsafe_allow_html=True)
+        if tem_permissao('atendimentos.view') and st.button('Abrir compromisso', key=f"home_visita_{visita['id']}"):
+            st.session_state['agenda_abrir_home'] = dict(visita)
+            mudar_pagina('Atendimentos e Checklists')
 
 def renderizar_chamados_usuario_home():
     username = (st.session_state.get("username") or "").strip()
@@ -2982,6 +3077,25 @@ def renderizar_configuracoes_sistema():
         cfg_end = e1.text_input("Endereço:", value=config_sistema_val("DSYSTEM_ENDERECO", "Rua Glória, 25"))
         cfg_cidade = e2.text_input("Cidade/UF:", value=config_sistema_val("DSYSTEM_CIDADE_UF", "Sabará / MG"))
         cfg_base = e3.text_input("URL do sistema:", value=config_sistema_val("APP_BASE_URL", APP_BASE_URL))
+        st.caption("Use uma URL estável acessível pelo celular para as etiquetas QR. Se trocar o endereço, mantenha um redirecionamento do endereço antigo.")
+        def medida_etiqueta(chave, padrao, minimo):
+            try:
+                valor = float(config_sistema_val(chave, str(padrao)))
+                return valor if minimo <= valor <= 150 else float(padrao)
+            except (TypeError, ValueError):
+                return float(padrao)
+        cfg_et_perfil = st.selectbox("Impressora para identificação dos equipamentos:", ["elgin_i8", "personalizado"],
+                                    index=1 if config_sistema_val("ETIQUETA_OS_PERFIL", "elgin_i8") == "personalizado" else 0,
+                                    format_func=lambda p: "Elgin i8 — cupom em bobina de 80 mm" if p == "elgin_i8" else "Etiquetadora / tamanho personalizado")
+        et1, et2 = st.columns(2)
+        cfg_et_largura = et1.number_input("Largura personalizada (mm):", min_value=70.0, max_value=150.0, value=medida_etiqueta("ETIQUETA_OS_LARGURA_MM", 100, 70), step=1.0, disabled=cfg_et_perfil == "elgin_i8")
+        cfg_et_altura = et2.number_input("Altura personalizada (mm):", min_value=40.0, max_value=150.0, value=medida_etiqueta("ETIQUETA_OS_ALTURA_MM", 50, 40), step=1.0, disabled=cfg_et_perfil == "elgin_i8")
+        st.caption("Elgin i8: PDF fixo 80 × 60 mm, conteúdo dentro de 72 mm e impressão a 100%. As medidas personalizadas acima só valem no perfil personalizado. Instale o driver Elgin no computador que imprimirá; o PDF não instala nem configura o driver.")
+        if cfg_et_perfil == "elgin_i8":
+            st.warning("A i8 usa papel térmico de cupom. Não é confirmação de compatibilidade com etiquetas adesivas; consulte a Elgin antes de utilizar esse material.")
+        cfg_representante = st.text_input("Representante legal da Dsystem:", value=config_sistema_val("DSYSTEM_REPRESENTANTE_LEGAL", ""))
+        cfg_representante_cpf = st.text_input("CPF do representante legal:", value=config_sistema_val("DSYSTEM_REPRESENTANTE_CPF", ""))
+        st.caption("Esses dados são preenchidos automaticamente nos contratos. Informe o representante uma única vez e salve.")
         if st.button("Salvar dados da empresa", type="primary", width="stretch", key="cfg_salvar_empresa"):
             for chave, valor, desc in [
                 ("DSYSTEM_NOME", cfg_nome, "Nome usado em documentos"),
@@ -2989,7 +3103,12 @@ def renderizar_configuracoes_sistema():
                 ("NFSE_INSCRICAO_MUNICIPAL", cfg_im, "Inscrição municipal"),
                 ("DSYSTEM_ENDERECO", cfg_end, "Endereço da Dsystem"),
                 ("DSYSTEM_CIDADE_UF", cfg_cidade, "Cidade/UF da Dsystem"),
+                ("DSYSTEM_REPRESENTANTE_LEGAL", cfg_representante, "Representante legal nos contratos"),
+                ("DSYSTEM_REPRESENTANTE_CPF", cfg_representante_cpf, "CPF do representante legal nos contratos"),
                 ("APP_BASE_URL", cfg_base, "URL pública do ERP"),
+                ("ETIQUETA_OS_LARGURA_MM", cfg_et_largura, "Largura física da etiqueta de O.S. em mm"),
+                ("ETIQUETA_OS_ALTURA_MM", cfg_et_altura, "Altura física da etiqueta de O.S. em mm"),
+                ("ETIQUETA_OS_PERFIL", cfg_et_perfil, "Perfil de impressão dos equipamentos"),
             ]:
                 salvar_config_sistema(chave, valor, desc)
             st.success("Configurações da empresa salvas.")
@@ -3384,6 +3503,10 @@ else:
     st.sidebar.write("---")
 
     opcoes = paginas_disponiveis_usuario()
+    from dsystem_erp.services.recepcao_kanban import encaminhar_qr_equipamento
+    encaminhar_qr_equipamento(st.session_state, {
+        chave: obter_query_param(chave) for chave in ("pagina", "equipamento_id", "os", "item")
+    }, opcoes)
 
     if st.session_state['pagina_atual'] not in opcoes:
         st.session_state['pagina_atual'] = opcoes[0]
@@ -3418,6 +3541,18 @@ elif menu == "Página Inicial":
 
 elif menu == "Contas a Pagar":
     renderizar_conta_financeira("pagar")
+
+elif menu == "Banco Inter":
+    from dsystem_erp.pages.banco_inter import renderizar_banco_inter
+    renderizar_banco_inter(criar_app_context(globals()))
+
+elif menu == "Impostos":
+    from dsystem_erp.pages.impostos import renderizar_impostos
+    renderizar_impostos(criar_app_context(globals()))
+
+elif menu == "Cadastrar impostos":
+    from dsystem_erp.pages.impostos import renderizar_cadastro_impostos
+    renderizar_cadastro_impostos(criar_app_context(globals()))
 
 elif menu == "Contas a Receber":
     renderizar_conta_financeira("receber")

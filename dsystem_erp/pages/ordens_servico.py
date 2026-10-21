@@ -2,7 +2,16 @@
 
 from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.ui_consulta import tabela_selecionavel_id
-from dsystem_erp.services.recepcao_kanban import gerar_etiqueta_equipamento
+from dsystem_erp.services.recepcao_kanban import atualizar_equipamentos_os
+from dsystem_erp.pages.etiquetas_os import renderizar_etiquetas_os
+
+
+def limpar_equipamento_ao_trocar_tipo(estado, versao, indice):
+    prefixo = f"os_novo_{versao}_"
+    tipo_key = f"{prefixo}tipo_{indice}"
+    for chave in list(estado):
+        if chave.startswith(prefixo) and chave.endswith(f"_{indice}") and chave != tipo_key:
+            del estado[chave]
 
 
 def renderizar_ordem_servico(ctx: dict) -> None:
@@ -91,8 +100,12 @@ def renderizar_ordem_servico(ctx: dict) -> None:
         st.caption(f"Item atual: NOVA-{letra_equipamento(item_idx)}. A numeracao final sera gerada depois de salvar a O.S.")
 
         eqc1, eqc2, eqc3, eqc4 = st.columns([2, 2, 2, 1])
-        tipo_eq = eqc1.selectbox("Tipo:", tipos_os_ativos, key=f"os_novo_{versao_nova_os}_tipo_{item_idx}")
-        eq_nome = eqc2.text_input("Aparelho:", key=f"os_novo_{versao_nova_os}_equip_{item_idx}")
+        tipo_eq = eqc1.selectbox("Tipo:", tipos_os_ativos, key=f"os_novo_{versao_nova_os}_tipo_{item_idx}",
+                               on_change=limpar_equipamento_ao_trocar_tipo,
+                               args=(st.session_state, versao_nova_os, item_idx))
+        eq_nome = eqc2.text_input("Aparelho / identificação:", key=f"os_novo_{versao_nova_os}_equip_{item_idx}",
+                                placeholder="Ex.: câmera da entrada ou notebook da recepção",
+                                help="Nome para distinguir este aparelho. Tipo é a categoria; marca/modelo fica no campo ao lado.")
         eq_marca = eqc3.text_input("Marca/Modelo:", key=f"os_novo_{versao_nova_os}_marca_{item_idx}")
         eq_avaria = eqc4.selectbox("Avaria?", ["Nao", "Sim"], key=f"os_novo_{versao_nova_os}_avaria_{item_idx}")
         eq_serie = st.text_input("Numero de serie / patrimonio:", key=f"os_novo_{versao_nova_os}_serie_{item_idx}")
@@ -215,13 +228,7 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                 conn_et.close()
                 st.success("O.S. salva. Equipamentos enviados ao Kanban na etapa Recebido.")
                 st.markdown("#### Etiquetas dos equipamentos")
-                for item_etiqueta in equipamentos_etiqueta:
-                    st.download_button(
-                        f"Imprimir etiqueta {item_etiqueta.get('numero_item')}",
-                        data=gerar_etiqueta_equipamento(item_etiqueta, APP_BASE_URL),
-                        file_name=f"etiqueta_{item_etiqueta.get('numero_item')}.pdf",
-                        mime="application/pdf", key=f"etiqueta_os_nova_{item_etiqueta.get('id')}",
-                    )
+                renderizar_etiquetas_os(st, equipamentos_etiqueta, config_sistema_val, APP_BASE_URL, "etiqueta_os_nova")
 
                 
                 logo_html = carrega_logo("logo_dsystem.png","DSYSTEM","#004488","130")
@@ -523,6 +530,8 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                 c = conn.cursor()
                 c.execute('SELECT * FROM ordens_servico WHERE os_id=?',(ide,))
                 osdb = c.fetchone()
+                c.execute("SELECT * FROM equipamentos_os WHERE os_id=? ORDER BY id", (ide,))
+                eqs_salvos = [dict(item) for item in c.fetchall()]
                 conn.close()
                 
                 if osdb:
@@ -550,11 +559,17 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                         lista_eq = osdb['equipamento'].split('|') if osdb['equipamento'] else []
                         lista_ma = osdb['marca'].split('|') if osdb['marca'] else []
                         lista_av = osdb['avaria'].split('|') if osdb['avaria'] else []
+                        if eqs_salvos:
+                            lista_eq = [item.get("equipamento") or "" for item in eqs_salvos]
+                            lista_ma = [item.get("marca") or "" for item in eqs_salvos]
+                            lista_av = [item.get("avaria") or "Não" for item in eqs_salvos]
+                        st.caption("Edite cada aparelho no seu próprio bloco para manter o QR. Itens já etiquetados não são removidos ou renumerados por este formulário.")
                         
-                        qtd_eq_edit = st.number_input("Qtd Equipamentos:", min_value=1, max_value=10, value=max(1, len(lista_eq)), key=f"os_eqtd_{ide}")
+                        qtd_eq_edit = st.number_input("Qtd Equipamentos:", min_value=max(1, len(eqs_salvos)), max_value=max(10, len(eqs_salvos)), value=max(1, len(lista_eq)), key=f"os_eqtd_{ide}")
                         equipamentos_edit = []
                         
                         for i in range(qtd_eq_edit):
+                            salvo = eqs_salvos[i] if i < len(eqs_salvos) else {}
                             c1, c2, c3 = st.columns(3)
                             def_eq = lista_eq[i] if i < len(lista_eq) else ""
                             def_ma = lista_ma[i] if i < len(lista_ma) else ""
@@ -566,8 +581,22 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                             m = c2.text_input(f"Série/Marca ({i+1})", value=def_ma, key=f"os_ema_{ide}_{i}")
                             a = c3.selectbox(f"Avaria? ({i+1})", ["Não", "Sim"], index=["Não", "Sim"].index(def_av), key=f"os_eav_{ide}_{i}")
                             
-                            if e: 
-                                equipamentos_edit.append({"e": e, "m": m, "a": a})
+                            serie_edit = st.text_input(f"Número de série / patrimônio ({i+1}):", value=salvo.get("numero_serie") or "", key=f"os_eserie_{ide}_{i}")
+                            servico_item = st.text_area(f"Serviço a fazer no item {salvo.get('numero_item') or i+1}:", value=salvo.get("servico") or "", key=f"os_eservico_item_{ide}_{i}")
+                            try:
+                                cfg_item = json.loads(salvo.get("configuracao") or "{}")
+                            except (ValueError, TypeError):
+                                cfg_item = {}
+                            if not isinstance(cfg_item, dict):
+                                cfg_item = {}
+                            with st.expander(f"Tarefas específicas do aparelho ({i+1})"):
+                                for campo, rotulo in (("formatar", "Formatar"), ("backup", "Fazer backup"), ("apps_padrao", "Instalar aplicativos padrão"), ("app_especifico", "Instalar aplicativo específico")):
+                                    cfg_item[campo] = "Sim" if st.checkbox(rotulo, value=str(cfg_item.get(campo)).casefold() == "sim", key=f"os_tarefa_{ide}_{i}_{campo}") else "Não"
+                                cfg_item["app_especifico_nome"] = st.text_input("Nome do aplicativo:", value=cfg_item.get("app_especifico_nome") or "", key=f"os_tarefa_app_{ide}_{i}")
+                            if e or salvo.get("id"):
+                                equipamentos_edit.append({"id": salvo.get("id"), "e": e, "m": m, "a": a,
+                                                          "serie": serie_edit, "servico": servico_item,
+                                                          "configuracao": cfg_item})
                             
                         col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
                         def idx(val, lst): return lst.index(val) if val in lst else 0
@@ -607,7 +636,8 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                         with col_h7: 
                             e_chave = st.text_input("Chave S.O.:", value=osdb['chave_so'] or "", key=f"os_ech_{ide}")
 
-                        e_servico = st.text_area("Problema:", value=osdb['servico'] or "", key=f"os_esrv_{ide}")
+                        st.caption("O serviço por aparelho e suas tarefas são editados nos blocos acima. Os campos gerais abaixo não substituem as tarefas específicas da etiqueta.")
+                        e_servico = st.text_area("Observações gerais da O.S.:", value=osdb['servico'] or "", key=f"os_esrv_{ide}")
                         col_et1, col_et2 = st.columns(2)
                         with col_et1:
                             e_tec = selecionar_tecnico("Técnico:", osdb['atendente'] or "", key=f"os_etec_{ide}")
@@ -683,6 +713,13 @@ def renderizar_ordem_servico(ctx: dict) -> None:
                                  e_servico, e_tec, e_so, e_formatar, e_backup, e_apps, e_fonte, e_hd, e_ram, 
                                  e_cpu, e_gpu, e_placa, e_gab, e_chave, e_app_chk, e_app_nome, e_tec_extra, ide
                             ))
+                            try:
+                                atualizar_equipamentos_os(c, ide, equipamentos_edit, numero_item_os, letra_equipamento)
+                            except Exception as exc:
+                                conn.rollback()
+                                conn.close()
+                                st.error(f"Não foi possível salvar os equipamentos: {exc}")
+                                st.stop()
                             conn.commit()
                             conn.close()
                             st.success("O.S. atualizada e salva no banco de dados!")

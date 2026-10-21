@@ -8,6 +8,7 @@ from dsystem_erp.app_context import aplicar_contexto_pagina
 from dsystem_erp.ui_consulta import tabela_clicavel_id, tabela_clicavel_registro
 from dsystem_erp.services.conciliacao import esta_baixado
 from dsystem_erp.services.permissions import usuario_eh_gerencial
+from dsystem_erp.pages.classificacao_financeira import carregar_opcoes, selecionar, renderizar as classificacao_financeira
 
 
 TIPOS_CONTA_EMPRESA = ("Conta bancária", "Caixa físico", "Boleto", "Cartão de crédito")
@@ -40,6 +41,48 @@ def lancamento_esta_conciliado(registro: dict | None) -> bool:
 
 def total_itens_fatura_cartao(itens: list[dict] | None) -> float:
     return round(sum(max(0.0, float(item.get("valor") or 0)) for item in (itens or [])), 2)
+
+
+def abrir_lancamento_no_historico(estado, origem: str, registro_id: int) -> str:
+    """Prepara a navegação para abrir um título específico no histórico financeiro."""
+    eh_pagar = str(origem or "").strip().casefold() == "pagar"
+    tabela = "contas_pagar" if eh_pagar else "contas_receber"
+    pagina = "Contas a Pagar" if eh_pagar else "Contas a Receber"
+    registro_id = int(registro_id or 0)
+    if not registro_id:
+        return pagina
+
+    estado[f"financeiro_historico_selecionado_{tabela}"] = registro_id
+    estado[f"{tabela}_aba_destino"] = "Histórico e baixa"
+    # Aplicado no próximo ciclo, antes de instanciar os widgets da página.
+    estado[f"{tabela}_abrir_pendente"] = registro_id
+    estado[f"{tabela}_dashboard_versao"] = estado.get(f"{tabela}_dashboard_versao", 0) + 1
+    estado["lancamentos_financeiros_versao"] = estado.get("lancamentos_financeiros_versao", 0) + 1
+    return pagina
+
+
+def preparar_abertura_financeira(estado, tabela):
+    registro_id = estado.pop(f"{tabela}_abrir_pendente", None)
+    if registro_id is None:
+        return
+    estado[f"financeiro_historico_selecionado_{tabela}"] = registro_id
+    estado[f"{tabela}_historico_versao"] = estado.get(f"{tabela}_historico_versao", 0) + 1
+    # Filtros antigos não podem esconder o título que acabou de ser aberto.
+    estado[f"{tabela}_status"] = "Todos"
+    estado[f"{tabela}_busca"] = ""
+    estado[f"{tabela}_venc"] = None
+    estado[f"{tabela}_filtro_conciliacao"] = "Todos"
+
+
+def limpar_novo_recebimento(estado):
+    """Limpa apenas o formulário novo, antes da criação dos widgets."""
+    if not estado.pop("limpar_novo_recebimento", False):
+        return False
+    for chave in list(estado):
+        if (str(chave).startswith(("rec_", "contas_receber_novo_"))
+                or chave in {"contas_receber_conta_nova", "contas_receber_anexo_novo"}):
+            del estado[chave]
+    return True
 
 
 def validar_prestador_terceirizado(
@@ -211,6 +254,9 @@ def renderizar_conta_financeira(ctx, tipo):
         return
 
     st.title(titulo)
+    if not eh_pagar and limpar_novo_recebimento(st.session_state):
+        st.success("Lançamento salvo. Campos limpos para um novo recebimento.")
+    preparar_abertura_financeira(st.session_state, tabela)
     nomes_abas = ["Dashboard", "Novo lançamento", "Histórico e baixa", "Recorrências"]
     if not eh_pagar:
         nomes_abas.append("Cobrança e renegociação")
@@ -226,7 +272,7 @@ def renderizar_conta_financeira(ctx, tipo):
     cursor_contas = conn_contas.cursor()
     cursor_contas.execute(
         """SELECT * FROM financeiro_cadastros_aux
-           WHERE ativo='Sim' AND tipo IN ('Conta bancária', 'Caixa físico', 'Boleto', 'Cartão de crédito')
+           WHERE ativo='Sim' AND tipo IN ('Conta bancária', 'Caixa físico', 'Boleto', 'Cartão de crédito', 'Conta financeira')
            ORDER BY tipo, nome"""
     )
     cadastros_contas = [dict(item) for item in cursor_contas.fetchall()]
@@ -234,6 +280,7 @@ def renderizar_conta_financeira(ctx, tipo):
         cadastros_contas = []
     conn_contas.close()
     contas_financeiras = opcoes_contas_financeiras(cadastros_contas)
+    opcoes_classificacao = carregar_opcoes(conectar_banco)
     with aba_dash:
         conn_dash = conectar_banco()
         cdash = conn_dash.cursor()
@@ -254,9 +301,10 @@ def renderizar_conta_financeira(ctx, tipo):
         st.markdown("#### Lançamentos por vencimento")
         campo_parte_dash = "fornecedor" if eh_pagar else "cliente"
         fd1, fd2, fd3 = st.columns(3)
-        filtro_parte_dash = fd1.text_input(
-            f"Filtrar por {parte_label.lower()}:", key=f"{tabela}_dashboard_parte"
-        ).strip().casefold()
+        cadastros_painel = {str(c["id"]): c for c in clientes}
+        filtro_parte_dash = fd1.selectbox("Cliente/fornecedor cadastrado:", [""] + list(cadastros_painel),
+            format_func=lambda v: f"{cadastros_painel[v].get('nome')} — {cadastros_painel[v].get('cnpj') or ''} (#{v})" if v else "Todos",
+            key=f"{tabela}_dashboard_cadastro")
         filtro_venc_inicio_dash = fd2.date_input(
             "Vencimento inicial:", value=None, key=f"{tabela}_dashboard_venc_inicio"
         )
@@ -266,8 +314,14 @@ def renderizar_conta_financeira(ctx, tipo):
         abertos_filtrados = []
         for registro in abertos:
             vencimento_registro = parse_data_flex(registro.get("data_vencimento"))
-            if filtro_parte_dash and filtro_parte_dash not in str(registro.get(campo_parte_dash) or "").casefold():
-                continue
+            if filtro_parte_dash:
+                cadastro = cadastros_painel[filtro_parte_dash]
+                doc = lambda v: "".join(c for c in str(v or "") if c.isdigit())
+                if doc(registro.get("cpf_cnpj")) and doc(cadastro.get("cnpj")):
+                    if doc(registro.get("cpf_cnpj")) != doc(cadastro.get("cnpj")):
+                        continue
+                elif str(registro.get(campo_parte_dash) or "").strip().casefold() != str(cadastro.get("nome") or "").strip().casefold():
+                    continue
             if filtro_venc_inicio_dash and (not vencimento_registro or vencimento_registro < filtro_venc_inicio_dash):
                 continue
             if filtro_venc_fim_dash and (not vencimento_registro or vencimento_registro > filtro_venc_fim_dash):
@@ -291,16 +345,17 @@ def renderizar_conta_financeira(ctx, tipo):
             )
         ]
         if painel_lancamentos:
-            id_dashboard_clicado = tabela_clicavel_id(
-                st, painel_lancamentos, f"{tabela}_dashboard_grade", "ID"
+            id_painel_clicado = tabela_clicavel_id(
+                st, painel_lancamentos, f"{tabela}_dashboard_grade_{st.session_state.get(f'{tabela}_dashboard_versao', 0)}", "ID"
             )
-            if id_dashboard_clicado is not None:
-                st.session_state[f"financeiro_historico_selecionado_{tabela}"] = int(id_dashboard_clicado)
-                st.session_state[f"{tabela}_aba_destino"] = "Histórico e baixa"
+            if id_painel_clicado:
+                abrir_lancamento_no_historico(
+                    st.session_state, "Pagar" if eh_pagar else "Receber", id_painel_clicado
+                )
                 st.rerun()
             st.caption(
-                f"Este painel é somente para consulta. Clique em um lançamento para abri-lo na tela de histórico, "
-                f"onde ficam as ações permitidas. A coluna {parte_label} identifica a pessoa ou empresa."
+                f"Somente consulta. Clique em um lançamento para abri-lo em Histórico e baixa, "
+                f"onde estão as opções de {'pagamento' if eh_pagar else 'recebimento'} e cancelamento."
             )
         else:
             st.info("Nenhum lançamento aberto no momento.")
@@ -308,7 +363,7 @@ def renderizar_conta_financeira(ctx, tipo):
             "Baixar relatório financeiro",
             data=gerar_excel_tabela([
                 {k: v for k, v in dict(r).items() if k not in ("anexo", "comprovante")}
-                for r in dados_dash
+                for r in abertos_filtrados
             ], titulo),
             file_name=f"{tabela}.xls",
             mime="application/vnd.ms-excel",
@@ -359,41 +414,51 @@ def renderizar_conta_financeira(ctx, tipo):
                     value=1, step=1, key="pagar_fatura_cartao_qtd",
                 )
 
+        cadastro_pagar = None
+        if eh_pagar:
+            opcoes_pagar = {str(c["id"]): c for c in clientes}
+            cadastro_id = st.selectbox("Cliente/fornecedor do lançamento:", [""] + list(opcoes_pagar),
+                format_func=lambda v: f"{opcoes_pagar[v].get('nome')} — {opcoes_pagar[v].get('cnpj') or ''} (#{v})" if v else "Selecione um cadastro",
+                key="pagar_cadastro_selecionado")
+            cadastro_pagar = opcoes_pagar.get(cadastro_id)
         contexto_lancamento = st.form(f"form_{tabela}", clear_on_submit=True) if eh_pagar else st.container()
         with contexto_lancamento:
             p1, p2, p3 = st.columns(3)
             if eh_pagar:
-                parte = p1.text_input("Fornecedor:")
-                parte_id = None
-                cpf_cnpj = p2.text_input("CNPJ/CPF:")
+                parte = (cadastro_pagar or {}).get("nome") or ""
+                parte_id = (cadastro_pagar or {}).get("id")
+                cpf_cnpj = (cadastro_pagar or {}).get("cnpj") or ""
+                p1.text_input("Cliente/fornecedor:", value=parte, disabled=True, key=f"pagar_nome_{parte_id}")
+                p2.text_input("CNPJ/CPF:", value=cpf_cnpj, disabled=True, key=f"pagar_doc_{parte_id}")
             else:
-                parte = p1.selectbox("Cliente:", ["-- Selecionar --"] + [c["nome"] for c in clientes])
+                parte = p1.selectbox("Cliente:", ["-- Selecionar --"] + [c["nome"] for c in clientes], key="contas_receber_novo_cliente")
                 cliente_sel = next((c for c in clientes if c["nome"] == parte), None)
                 parte_id = cliente_sel.get("id") if cliente_sel else None
-                cpf_cnpj = p2.text_input("CNPJ/CPF:", value=(cliente_sel.get("cnpj") or "") if cliente_sel else "")
-            numero_documento = p3.text_input("Número do documento:")
+                cpf_cnpj = p2.text_input("CNPJ/CPF:", value=(cliente_sel.get("cnpj") or "") if cliente_sel else "", key=f"contas_receber_novo_documento_{parte_id}")
+            numero_documento = p3.text_input("Número do documento:", key=f"{tabela}_novo_numero")
 
             q1, q2, q3, q4 = st.columns(4)
-            tipo_doc = q1.selectbox("Tipo de documento:" if eh_pagar else "Tipo de receita:", ["Boleto", "Nota fiscal", "Recibo", "Fatura", "Contrato", "Imposto", "Folha", "Serviço", "Produto", "Mensalidade", "Outro"])
-            categoria = q2.text_input("Categoria financeira:")
-            centro = q3.text_input("Centro de custo:" if eh_pagar else "Centro de receita:")
-            plano = q4.text_input("Plano de contas:")
+            tipo_doc = q1.selectbox("Tipo de documento:" if eh_pagar else "Tipo de receita:", ["Boleto", "Nota fiscal", "Recibo", "Fatura", "Contrato", "Imposto", "Folha", "Serviço", "Produto", "Mensalidade", "Outro"], key=f"{tabela}_novo_tipo")
+            categoria = selecionar(q2, 'categoria', opcoes_classificacao, f"{tabela}_novo_categoria_cadastro")
+            centro = selecionar(q3, 'centro', opcoes_classificacao, f"{tabela}_novo_centro_cadastro")
+            plano = selecionar(q4, 'plano_contas', opcoes_classificacao, f"{tabela}_novo_plano_cadastro")
 
             r1, r2, r3, r4 = st.columns(4)
             conta_bancaria = selecionar_conta(r1, "Conta financeira:", contas_financeiras, "", f"{tabela}_conta_nova")
-            data_emissao = r2.date_input("Data de emissão:", value=date.today())
-            data_competencia = r3.date_input("Data de competência:", value=date.today())
-            data_vencimento = r4.date_input("Data de vencimento:", value=date.today())
+            data_emissao = r2.date_input("Data de emissão:", value=date.today(), key=f"{tabela}_novo_emissao")
+            data_competencia = r3.date_input("Data de competência:", value=date.today(), key=f"{tabela}_novo_competencia")
+            data_vencimento = r4.date_input("Data de vencimento:", value=date.today(), key=f"{tabela}_novo_vencimento")
 
             v1, v2, v3, v4, v5 = st.columns(5)
             valor_original = v1.number_input(
                 "Valor original R$:", min_value=0.0, step=0.01, format="%.2f",
+                key=f"{tabela}_novo_valor",
                 disabled=bool(eh_pagar and fatura_cartao_ativa),
                 help="Em uma fatura de cartão, este valor é calculado pela soma dos itens.",
             )
-            desconto = v2.number_input("Desconto R$:", min_value=0.0, step=0.01, format="%.2f")
-            juros = v3.number_input("Juros R$:", min_value=0.0, step=0.01, format="%.2f")
-            multa = v4.number_input("Multa R$:", min_value=0.0, step=0.01, format="%.2f")
+            desconto = v2.number_input("Desconto R$:", min_value=0.0, step=0.01, format="%.2f", key=f"{tabela}_novo_desconto")
+            juros = v3.number_input("Juros R$:", min_value=0.0, step=0.01, format="%.2f", key=f"{tabela}_novo_juros")
+            multa = v4.number_input("Multa R$:", min_value=0.0, step=0.01, format="%.2f", key=f"{tabela}_novo_multa")
             valor_total = max(0.0, valor_original - desconto + juros + multa)
             v5.metric("Valor total", formatar_moeda_br(valor_total))
 
@@ -648,8 +713,8 @@ def renderizar_conta_financeira(ctx, tipo):
                     ], width="stretch", hide_index=True)
 
             s1, s2 = st.columns(2)
-            forma = s1.selectbox(forma_label + ":", ["PIX", "Boleto", "Transferência", "TED", "Cartão de crédito", "Dinheiro", "Outro"])
-            status = s2.selectbox("Status:", status_opcoes)
+            forma = s1.selectbox(forma_label + ":", ["PIX", "Boleto", "Transferência", "TED", "Cartão de crédito", "Dinheiro", "Outro"], key=f"{tabela}_novo_forma")
+            status = s2.selectbox("Status:", status_opcoes, key=f"{tabela}_novo_status")
 
             conciliado_novo = False
             data_conciliacao_nova = None
@@ -661,9 +726,9 @@ def renderizar_conta_financeira(ctx, tipo):
                 extra2 = x2.text_input("Chave PIX:")
             else:
                 x1, x2 = st.columns(2)
-                extra1 = x1.text_input("Nota fiscal vinculada:")
-                extra2 = x2.text_input("Boleto vinculado:")
-            observacoes = st.text_area("Observações:", height=90)
+                extra1 = x1.text_input("Nota fiscal vinculada:", key="contas_receber_novo_nota")
+                extra2 = x2.text_input("Boleto vinculado:", key="contas_receber_novo_boleto")
+            observacoes = st.text_area("Observações:", height=90, key=f"{tabela}_novo_observacoes")
             anexo_lancamento = st.file_uploader("Anexo do lançamento (nota, boleto, contrato ou comprovante):", key=f"{tabela}_anexo_novo")
 
             salvar = st.form_submit_button("Salvar lançamento", type="primary", width="stretch") if eh_pagar else st.button("Salvar lançamento", type="primary", width="stretch", key="salvar_conta_receber")
@@ -785,6 +850,8 @@ def renderizar_conta_financeira(ctx, tipo):
                     conn.commit()
                     conn.close()
                     st.success("Lançamento salvo.")
+                    if not eh_pagar:
+                        st.session_state["limpar_novo_recebimento"] = True
                     st.rerun()
 
     with aba2:
@@ -841,7 +908,7 @@ def renderizar_conta_financeira(ctx, tipo):
         } for r in registros]
         id_financeiro_selecionado = None
         if resumo:
-            id_financeiro_clicado = tabela_clicavel_id(st, resumo, f"{tabela}_grade_consulta", "ID")
+            id_financeiro_clicado = tabela_clicavel_id(st, resumo, f"{tabela}_grade_consulta_{st.session_state.get(f'{tabela}_historico_versao', 0)}", "ID")
             if id_financeiro_clicado is not None:
                 st.session_state[f"financeiro_historico_selecionado_{tabela}"] = int(id_financeiro_clicado)
             id_financeiro_selecionado = st.session_state.get(f"financeiro_historico_selecionado_{tabela}")
@@ -1046,6 +1113,13 @@ def renderizar_conta_financeira(ctx, tipo):
                     conta_atual = registro.get("conta_bancaria") or ""
                     conta_editada = selecionar_conta(ed3, "Conta financeira:", contas_financeiras,
                         conta_atual, f"{tabela}_editar_conta_{id_baixa}", bloqueado_conciliacao)
+                    campos_edicao = st.columns(3)
+                    class_editada = {
+                        campo: selecionar(coluna, campo, opcoes_classificacao, f'{tabela}_editar_class_{id_baixa}_{campo}',
+                                          registro.get('centro_custo' if eh_pagar else 'centro_receita') if campo == 'centro' else registro.get(campo),
+                                          bloqueado_conciliacao)
+                        for coluna, campo in zip(campos_edicao, ('categoria', 'centro', 'plano_contas'))
+                    }
                     ec1, ec2 = st.columns(2)
                     marcar_conciliado = ec1.checkbox(
                         "Marcar como conciliado e bloquear o lançamento",
@@ -1087,6 +1161,9 @@ def renderizar_conta_financeira(ctx, tipo):
                              data_para_banco_br(data_conciliacao_editada) if marcar_conciliado else "",
                              usuario_edicao if marcar_conciliado else "", usuario_edicao, agora_br(), id_baixa),
                         )
+                        coluna_centro = 'centro_custo' if eh_pagar else 'centro_receita'
+                        cursor_edicao.execute(f'UPDATE {tabela} SET categoria=?, {coluna_centro}=?, plano_contas=? WHERE id=?',
+                                              (class_editada['categoria'], class_editada['centro'], class_editada['plano_contas'], id_baixa))
                         conn_edicao.commit()
                         conn_edicao.close()
                         registrar_evento_sistema(
@@ -1120,7 +1197,7 @@ def renderizar_conta_financeira(ctx, tipo):
                 b1, b2, b3 = st.columns(3)
                 data_baixa = b1.date_input("Data da baixa:", value=date.today(), disabled=bloqueado_conciliacao, key=f"{tabela}_data_baixa")
                 valor_baixa = b2.number_input("Valor baixado R$:", min_value=0.0, value=float(registro.get("valor_total") or 0), step=0.01, format="%.2f", disabled=bloqueado_conciliacao, key=f"{tabela}_valor_baixa")
-                novo_status = b3.selectbox("Novo status:", status_opcoes, index=status_opcoes.index(status_baixa), disabled=bloqueado_conciliacao, key=f"{tabela}_novo_status")
+                novo_status = b3.selectbox("Novo status:", status_opcoes, index=status_opcoes.index(status_baixa), disabled=bloqueado_conciliacao, key=f"{tabela}_baixa_status_{id_baixa}")
                 bb1, bb2, bb3, bb4 = st.columns(4)
                 conta_baixa = selecionar_conta(bb1, "Conta bancária / caixa / boleto da baixa:", contas_financeiras,
                     registro.get("conta_baixa") or registro.get("conta_bancaria") or "",
@@ -1227,10 +1304,27 @@ def renderizar_conta_financeira(ctx, tipo):
 
     with aba_rec:
         st.subheader("Lançamentos Recorrentes")
+        cadastros_rec = {str(c["id"]): c for c in clientes}
+        chave_rec = f"{tabela}_recorrencia_cadastro"
+        if st.session_state.get(chave_rec, "") not in [""] + list(cadastros_rec):
+            st.session_state[chave_rec] = ""
+        cadastro_rec_id = st.selectbox(
+            "Cliente/fornecedor da recorrência:", [""] + list(cadastros_rec),
+            format_func=lambda v: (
+                f"{cadastros_rec[v].get('nome')} — {cadastros_rec[v].get('cnpj') or ''} (#{v})"
+                if v else "Selecione um cadastro"
+            ),
+            key=chave_rec,
+        )
+        cadastro_rec = cadastros_rec.get(cadastro_rec_id) or {}
+        rec_parte = cadastro_rec.get("nome") or ""
+        rec_documento = cadastro_rec.get("cnpj") or ""
         with st.form(f"form_recorrencia_{tipo}", clear_on_submit=True):
             rr1, rr2, rr3 = st.columns(3)
-            rec_parte = rr1.text_input(f"{parte_label}:")
-            rec_documento = rr2.text_input("CPF/CNPJ:")
+            rr1.text_input(f"{parte_label}:", value=rec_parte, disabled=True,
+                           key=f"{tabela}_recorrencia_nome_{cadastro_rec_id}")
+            rr2.text_input("CPF/CNPJ:", value=rec_documento, disabled=True,
+                           key=f"{tabela}_recorrencia_documento_{cadastro_rec_id}")
             rec_descricao = rr3.text_input("Descrição:")
             rr4, rr5, rr6 = st.columns(3)
             rec_valor = rr4.number_input("Valor R$:", min_value=0.0, step=0.01, format="%.2f")
@@ -1240,9 +1334,9 @@ def renderizar_conta_financeira(ctx, tipo):
             rec_inicio = rr7.date_input("Data inicial:", value=date.today())
             rec_final = rr8.date_input("Data final:", value=None)
             rec_auto = rr9.selectbox("Gerar automaticamente:", ["Sim", "Não"])
-            rr10, rr11 = st.columns(2)
-            rec_centro = rr10.text_input("Centro de custo/receita:")
-            rec_categoria = rr11.text_input("Categoria:")
+            rec_classificacao = classificacao_financeira(st, conectar_banco, f'{tabela}_rec_classificacao')
+            rec_centro = rec_classificacao['centro']
+            rec_categoria = rec_classificacao['categoria']
             if st.form_submit_button("Salvar recorrência", type="primary", width="stretch"):
                 if not rec_parte or not rec_descricao or rec_valor <= 0:
                     st.error(f"Informe {parte_label.lower()}, descrição e valor.")
@@ -1257,13 +1351,18 @@ def renderizar_conta_financeira(ctx, tipo):
                                  (tipo, rec_parte, rec_documento, rec_descricao, rec_valor, rec_frequencia, rec_dia,
                                   data_para_banco_br(rec_inicio), data_para_banco_br(rec_final), rec_centro, rec_categoria,
                                   rec_auto, "Sim", st.session_state.get("username", ""), datetime.now().strftime("%d/%m/%Y %H:%M")))
+                    crec.execute('UPDATE financeiro_recorrencias_v2 SET plano_contas=?, conta_bancaria=? WHERE id=?',
+                                 (rec_classificacao['plano_contas'], rec_classificacao['conta_bancaria'], crec.lastrowid))
                     conn_rec.commit()
                     conn_rec.close()
                     st.success("Recorrência salva.")
                     st.rerun()
         recorrencias = repo_listar_recorrencias(conectar_banco, tipo)
         if recorrencias:
-            st.dataframe(recorrencias, width="stretch", hide_index=True)
+            recorrencias_visiveis = recorrencias if usuario_eh_gerencial(st.session_state) else [
+                {k: v for k, v in r.items() if k != 'conta_bancaria'} for r in recorrencias
+            ]
+            st.dataframe(recorrencias_visiveis, width="stretch", hide_index=True)
             id_gerar_rec = st.number_input("ID da recorrência para gerar lançamento:", min_value=1, step=1, key=f"gerar_rec_{tipo}")
             rec_gerar = next((r for r in recorrencias if int(r.get("id") or 0) == int(id_gerar_rec)), None)
             if rec_gerar and st.button("Gerar lançamento desta recorrência", type="primary", key=f"btn_gerar_rec_{tipo}"):
@@ -1294,6 +1393,8 @@ def renderizar_conta_financeira(ctx, tipo):
                                  data_para_banco_br(date.today()), data_para_banco_br(date.today()),
                                  data_para_banco_br(venc_rec), rec_gerar.get("valor"), rec_gerar.get("valor"),
                                  "Aberto", rec_gerar.get("descricao"), usuario_rec, agora_rec))
+                cgr.execute(f'UPDATE {tabela} SET plano_contas=?, conta_bancaria=? WHERE id=?',
+                            (rec_gerar.get('plano_contas') or '', rec_gerar.get('conta_bancaria') or '', cgr.lastrowid))
                 cgr.execute("UPDATE financeiro_recorrencias_v2 SET ultima_geracao=? WHERE id=?", (data_para_banco_br(date.today()), id_gerar_rec))
                 conn_gr.commit()
                 conn_gr.close()
@@ -1379,9 +1480,11 @@ def renderizar_cadastros_financeiros(ctx):
         st.error("Você não tem permissão para acessar estes cadastros.")
         return
     st.title("Cadastros Financeiros")
+    from dsystem_erp.pages.cadastros_planilha import renderizar as renderizar_planilha, detalhes_importados
+    renderizar_planilha(st, conectar_banco)
     tipos = [
         "Conta bancária", "Caixa físico", "Boleto", "Cartão de crédito",
-        "Centro de custo", "Categoria financeira", "Plano de contas", "Imposto",
+        "Centro de custo", "Categoria financeira", "Natureza financeira", "Plano de contas", "Imposto",
     ]
     gerencial = usuario_eh_gerencial(st.session_state)
     if not gerencial:
@@ -1448,7 +1551,9 @@ def renderizar_cadastros_financeiros(ctx):
             else:
               with st.expander("Editar / excluir cadastro", expanded=True):
                 registro = next((r for r in registros if int(r.get("id") or 0) == int(id_aux)), None)
-                if registro:
+                if registro and registro.get('importacao_origem'):
+                    detalhes_importados(st, registro)
+                elif registro:
                     e1, e2, e3 = st.columns(3)
                     tipo_e = e1.selectbox("Tipo:", tipos, index=tipos.index(registro.get("tipo")) if registro.get("tipo") in tipos else 0, key=f"fin_aux_tipo_e_{id_aux}")
                     nome_e = e2.text_input("Nome:", value=registro.get("nome") or "", key=f"fin_aux_nome_e_{id_aux}")
@@ -1553,15 +1658,15 @@ def renderizar_lancamentos_financeiros(ctx):
             "Status": r.get("status"), "Conciliado": r.get("conciliado") or "Não",
         })
     if tabela:
-        lancamento_clicado = tabela_clicavel_registro(st, tabela, "lancamentos_financeiros_grade")
+        lancamento_clicado = tabela_clicavel_registro(st, tabela, f"lancamentos_financeiros_grade_{st.session_state.get('lancamentos_financeiros_versao', 0)}")
         if lancamento_clicado:
-            origem_clicada = lancamento_clicado.get("Origem")
-            tabela_destino = "contas_pagar" if origem_clicada == "Pagar" else "contas_receber"
-            st.session_state[f"financeiro_historico_selecionado_{tabela_destino}"] = int(
-                lancamento_clicado.get("ID") or 0
+            pagina_destino = abrir_lancamento_no_historico(
+                st.session_state,
+                lancamento_clicado.get("Origem"),
+                lancamento_clicado.get("ID"),
             )
-            st.session_state[f"{tabela_destino}_aba_destino"] = "Histórico e baixa"
-            st.session_state["pagina_atual"] = "Contas a Pagar" if origem_clicada == "Pagar" else "Contas a Receber"
+            st.session_state["pagina_atual"] = pagina_destino
+            st.session_state["pagina_atual_radio"] = pagina_destino
             st.rerun()
         st.caption(
             "Tela somente para consulta. Clique em uma linha para abrir o lançamento em Contas a Pagar ou Contas a Receber."

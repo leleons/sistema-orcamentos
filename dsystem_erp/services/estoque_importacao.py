@@ -8,6 +8,8 @@ import re
 ESTADOS_POR_CODIGO = {
     "01": "1-01 Novo",
     "02": "1-02 Usado",
+    "03": "1-03 Equipamentos montados",
+    "04": "1-04 Itens internos",
 }
 
 AREAS_POR_CODIGO = {

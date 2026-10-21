@@ -1,139 +1,80 @@
-"""Espelho completo dos dados enviados para faturamento e emissão de nota."""
-
-from __future__ import annotations
-
+"""Descritivo comercial de produtos e serviços, inspirado no modelo do cliente."""
 import io
+from pathlib import Path
 from html import escape
-
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
+from reportlab.lib.utils import ImageReader
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, Image
 from dsystem_erp.services.faturamento import itens_faturamento_lista
 from dsystem_erp.utils.datas import data_para_br
 from dsystem_erp.utils.formatadores import formatar_moeda_br
 
 
-def gerar_pdf_espelho_faturamento(faturamento: dict) -> bytes:
+def gerar_pdf_espelho_faturamento(faturamento: dict, cliente: dict | None = None) -> bytes:
+    cliente = cliente or {}
     buffer = io.BytesIO()
-    documento = SimpleDocTemplate(
-        buffer, pagesize=A4, rightMargin=16 * mm, leftMargin=16 * mm,
-        topMargin=16 * mm, bottomMargin=16 * mm,
-        title=f"Espelho de nota - Faturamento {faturamento.get('id') or ''}",
-    )
-    estilos = getSampleStyleSheet()
-    titulo = ParagraphStyle(
-        "EspelhoTitulo", parent=estilos["Title"], fontName="Helvetica-Bold",
-        fontSize=18, leading=22, alignment=TA_CENTER, textColor=colors.HexColor("#07559B"),
-    )
-    corpo = ParagraphStyle(
-        "EspelhoCorpo", parent=estilos["BodyText"], fontSize=8.5,
-        leading=12, textColor=colors.HexColor("#20252B"),
-    )
-    rotulo = ParagraphStyle(
-        "EspelhoRotulo", parent=corpo, fontName="Helvetica-Bold",
-        textColor=colors.HexColor("#36404A"),
-    )
-    cabecalho_tabela = ParagraphStyle(
-        "EspelhoCabecalhoTabela", parent=rotulo, textColor=colors.white,
-    )
-    direita = ParagraphStyle("EspelhoDireita", parent=corpo, alignment=TA_RIGHT)
-    elementos = [
-        Paragraph("ESPELHO DE NOTA / FATURAMENTO", titulo),
-        Spacer(1, 5 * mm),
-    ]
-    modalidade = faturamento.get("modalidade_faturamento") or "Por item"
-    cabecalho = [
-        [Paragraph("LANÇAMENTO", rotulo), Paragraph(f"#{faturamento.get('id') or ''}", corpo),
-         Paragraph("STATUS", rotulo), Paragraph(escape(str(faturamento.get("status") or "Aberto")), corpo)],
-        [Paragraph("CLIENTE", rotulo), Paragraph(escape(str(faturamento.get("cliente") or "")), corpo),
-         Paragraph("CPF/CNPJ", rotulo), Paragraph(escape(str(faturamento.get("cnpj") or "")), corpo)],
-        [Paragraph("DATA", rotulo), Paragraph(data_para_br(faturamento.get("data_lanc")) or "", corpo),
-         Paragraph("VENCIMENTO", rotulo), Paragraph(data_para_br(faturamento.get("vencimento")) or "", corpo)],
-        [Paragraph("MODALIDADE", rotulo), Paragraph(escape(str(modalidade)), corpo),
-         Paragraph("TIPO DE NOTA", rotulo), Paragraph(escape(str(faturamento.get("tipo_nota") or "")), corpo)],
-        [Paragraph("PAGAMENTO", rotulo), Paragraph(escape(str(faturamento.get("forma_pag") or "")), corpo),
-         Paragraph("PARCELAS", rotulo), Paragraph(escape(str(faturamento.get("parcelas") or "Não")), corpo)],
-    ]
-    tabela_cabecalho = Table(cabecalho, colWidths=[25 * mm, 67 * mm, 27 * mm, 59 * mm])
-    tabela_cabecalho.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#EAF2FA")),
-        ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#EAF2FA")),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#B8C3CE")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-    ]))
-    elementos.extend([tabela_cabecalho, Spacer(1, 6 * mm)])
-    if modalidade == "Por medição":
-        elementos.extend([
-            Paragraph("DADOS DA MEDIÇÃO", rotulo), Spacer(1, 2 * mm),
-            Table([
-                [Paragraph("Número", rotulo), Paragraph(escape(str(faturamento.get("medicao_numero") or "")), corpo),
-                 Paragraph("Período", rotulo), Paragraph(
-                     f"{data_para_br(faturamento.get('medicao_inicio')) or ''} a "
-                     f"{data_para_br(faturamento.get('medicao_fim')) or ''}", corpo)],
-                [Paragraph("Percentual", rotulo), Paragraph(
-                    f"{float(faturamento.get('medicao_percentual') or 0):.2f}%".replace(".", ","), corpo),
-                 Paragraph("Referência", rotulo), Paragraph(escape(str(faturamento.get("medicao_referencia") or "")), corpo)],
-            ], colWidths=[25 * mm, 45 * mm, 25 * mm, 83 * mm], style=TableStyle([
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#B8C3CE")),
-                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F4F6F8")),
-                ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#F4F6F8")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ])), Spacer(1, 6 * mm),
-        ])
-
-    linhas = [[
-        Paragraph("Tipo", cabecalho_tabela), Paragraph("Descrição", cabecalho_tabela),
-        Paragraph("Qtd.", cabecalho_tabela), Paragraph("Unitário", cabecalho_tabela),
-        Paragraph("Total", cabecalho_tabela),
-    ]]
-    for item in itens_faturamento_lista(faturamento.get("itens")):
-        linhas.append([
-            Paragraph(escape(str(item.get("tipo_item") or "")), corpo),
-            Paragraph(escape(str(item.get("desc") or "")), corpo),
-            Paragraph(str(item.get("qtd") or 0), direita),
-            Paragraph(formatar_moeda_br(item.get("vunit") or 0), direita),
-            Paragraph(formatar_moeda_br(item.get("vtotal") or 0), direita),
-        ])
-    linhas.append([
-        "", Paragraph("TOTAL DO FATURAMENTO", rotulo), "", "",
-        Paragraph(formatar_moeda_br(faturamento.get("valor_total") or 0), direita),
-    ])
-    tabela_itens = Table(linhas, colWidths=[25 * mm, 83 * mm, 17 * mm, 25 * mm, 28 * mm], repeatRows=1)
-    tabela_itens.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#07559B")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#EAF2FA")),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#B8C3CE")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-    ]))
-    elementos.extend([Paragraph("PRODUTOS E SERVIÇOS", rotulo), Spacer(1, 2 * mm), tabela_itens])
-    historicos = [
-        ("Histórico / informações para a nota", faturamento.get("obs_nota")),
-        ("Observação interna", faturamento.get("obs_interna")),
-        ("Histórico da medição", faturamento.get("medicao_historico")),
-        ("Orçamento de referência", faturamento.get("orc_ref")),
-    ]
-    for nome, valor in historicos:
-        if valor:
-            elementos.extend([
-                Spacer(1, 5 * mm), Paragraph(nome.upper(), rotulo), Spacer(1, 1.5 * mm),
-                Paragraph(escape(str(valor)).replace("\n", "<br/>"), corpo),
-            ])
-    documento.build(elementos)
+    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=18*mm, rightMargin=18*mm,
+        topMargin=18*mm, bottomMargin=18*mm, title="Descritivo de serviços e produtos / Espelho de nota")
+    normal = ParagraphStyle("normal", fontName="Helvetica", fontSize=8, leading=11)
+    bold = ParagraphStyle("bold", parent=normal, fontName="Helvetica-Bold")
+    def p(valor, forte=False):
+        return Paragraph(escape(str(valor or "")).replace("\n", "<br/>"), bold if forte else normal)
+    azul = colors.HexColor("#5B9BD5")
+    claro = colors.HexColor("#DEEBF7")
+    def tabela(linhas, larguras, header=False):
+        t = Table(linhas, colWidths=[x*mm for x in larguras], repeatRows=1 if header else 0)
+        regras = [("VALIGN", (0,0),(-1,-1),"TOP"), ("GRID", (0,0),(-1,-1), .35, azul),
+                  ("LEFTPADDING",(0,0),(-1,-1),4), ("RIGHTPADDING",(0,0),(-1,-1),4),
+                  ("TOPPADDING",(0,0),(-1,-1),5), ("BOTTOMPADDING",(0,0),(-1,-1),5)]
+        if header:
+            regras.append(("BACKGROUND",(0,0),(-1,0),claro))
+        t.setStyle(TableStyle(regras))
+        return t
+    logo = Path(__file__).resolve().parents[2] / "logo_dsystem.png"
+    marca = p("DSYSTEM TECNOLOGIA", True)
+    if logo.exists():
+        largura, altura = ImageReader(str(logo)).getSize()
+        escala = min(38*mm/largura, 12*mm/altura)
+        marca = Image(str(logo), width=largura*escala, height=altura*escala)
+        marca.hAlign = "LEFT"
+    elementos = [tabela([[marca, p(data_para_br(faturamento.get("data_lanc")), True)]],[134,40])]
+    competencia = data_para_br(faturamento.get("medicao_inicio") or faturamento.get("data_lanc"))
+    competencia = competencia[3:] if competencia else ""
+    endereco = " ".join(str(cliente.get(k) or "") for k in ("endereco", "numero", "complemento", "bairro", "cidade_estado")).strip()
+    elementos.append(tabela([
+        [p("Faturar para",True), p(f"Competência {competencia}",True)],
+        [p("Cliente"),p(faturamento.get("cliente"),True)],
+        [p("ID do cliente / CPF-CNPJ"),p(f"{cliente.get('codigo_cliente') or cliente.get('id') or ''} / {faturamento.get('cnpj') or cliente.get('cnpj') or ''}")],
+        [p("Endereço"),p(endereco)], [p("Telefone"),p(cliente.get("telefone"))],
+        [p("Vencimento do pagamento"),p(data_para_br(faturamento.get("vencimento")))],
+        [p("Condições de pagamento"),p(faturamento.get("forma_pag"))],
+        [p("Referência"),p(f"Lançamento #{faturamento.get('id') or ''} - {faturamento.get('orc_ref') or ''}")],
+    ],[44,130],True))
+    linhas = [[p(x,True) for x in ("Qtd.","Nº item","Descrição","Preço unitário","Desconto","Total")]]
+    for i, item in enumerate(itens_faturamento_lista(faturamento.get("itens")),1):
+        linhas.append([p(item.get("qtd")), p(item.get("estoque_id") or i),
+            p(f"{item.get('tipo_item') or ''}: {item.get('desc') or ''}"),
+            p(formatar_moeda_br(item.get("vunit"))),p("-"),p(formatar_moeda_br(item.get("vtotal")))])
+    elementos += [Spacer(1,3*mm),tabela(linhas,[12,16,71,27,20,28],True)]
+    total = tabela([[p("Total Geral",True), p(formatar_moeda_br(faturamento.get("valor_total")),True)]],[146,28])
+    total.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),claro)]))
+    elementos.append(total)
+    for titulo, texto in [("Histórico / informações da nota",faturamento.get("obs_nota")),
+                          ("Histórico da medição",faturamento.get("medicao_historico")),
+                          ("Observação interna",faturamento.get("obs_interna"))]:
+        if texto:
+            elementos += [Spacer(1,3*mm),p(titulo,True),p(texto)]
+    if faturamento.get("modalidade_faturamento") == "Por medição":
+        elementos += [Spacer(1,3*mm),p(f"Medição {faturamento.get('medicao_numero') or ''} - "
+            f"{data_para_br(faturamento.get('medicao_inicio'))} a {data_para_br(faturamento.get('medicao_fim'))}"),
+            p(faturamento.get("medicao_referencia"))]
+    elementos += [Spacer(1,5*mm),p("Obrigado por fazer negócios conosco!",True),
+                  p("Espelho de faturamento / descritivo comercial. Não substitui a nota fiscal.")]
+    def rodape(canvas, doc):
+        canvas.setFont("Helvetica",7)
+        canvas.drawRightString(192*mm,10*mm,f"Página {doc.page}")
+    doc.build(elementos,onFirstPage=rodape,onLaterPages=rodape)
     return buffer.getvalue()

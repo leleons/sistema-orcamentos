@@ -296,16 +296,21 @@ def portal_logo_src(ctx=None):
         return ""
 
 def contar_portal_cliente(cliente_portal, cliente_portal_id=None, ctx=None):
+    from dsystem_erp.services.portal_cliente import filtro_chamados_portal, portal_funcionario
     if ctx is not None:
         aplicar_contexto_pagina(ctx, globals())
     dados = {"chamados_abertos": 0, "os": 0, "propostas": 0, "notas": 0, "financeiro": 0.0}
     conn = conectar_banco()
     c = conn.cursor(dictionary=True)
     try:
-        c.execute("SELECT COUNT(*) AS total FROM chamados_cliente WHERE cliente_nome=%s AND COALESCE(status,'') NOT IN ('Concluído','Concluido','Fechado','Cancelado')", (cliente_portal,))
+        filtro, parametros = filtro_chamados_portal(st.session_state, cliente_portal_id, cliente_portal)
+        c.execute(f"SELECT COUNT(*) AS total FROM chamados_cliente WHERE ({filtro}) AND COALESCE(status,'') NOT IN ('Concluído','Concluido','Fechado','Cancelado')", parametros)
         dados["chamados_abertos"] = (c.fetchone() or {}).get("total") or 0
     except Exception:
         pass
+    if portal_funcionario(st.session_state):
+        conn.close()
+        return dados
     try:
         vinculo_os = "(os.cliente_id=%s OR (os.cliente_id IS NULL AND os.cliente=%s))" if cliente_portal_id else "os.cliente=%s"
         params_os = (cliente_portal_id, cliente_portal) if cliente_portal_id else (cliente_portal,)
@@ -423,10 +428,21 @@ def portal_href(secao, ctx=None):
 
 
 def renderizar_portal_cliente_home(cliente_portal, cliente_portal_id=None, ctx=None):
+    from dsystem_erp.services.portal_cliente import portal_funcionario
     if ctx is not None:
         aplicar_contexto_pagina(ctx, globals())
     injetar_css_portal_cliente()
     dados = contar_portal_cliente(cliente_portal, cliente_portal_id)
+    if portal_funcionario(st.session_state):
+        st.title('Meu atendimento — ' + str(cliente_portal))
+        st.caption('Acesso individual: ' + str(st.session_state.get('portal_usuario_nome') or st.session_state.get('username')))
+        st.metric('Meus chamados em aberto', dados['chamados_abertos'])
+        for rotulo, secao in (('Abrir chamado', 'abrir_chamado'), ('Meus chamados', 'meus_chamados'), ('Contato', 'contato')):
+            if st.button(rotulo, key=f'portal_nav_{secao}'):
+                selecionar_secao_portal(secao)
+        if st.button('Sair do portal', key='portal_logout'):
+            logout()
+        return
     logo_src = portal_logo_src()
     logo_html = f'<img src="{logo_src}" alt="Dsystem">' if logo_src else "<strong>Dsystem Tecnologia</strong>"
     whatsapp_href = whatsapp_oficial_url(

@@ -14,11 +14,13 @@ from dsystem_erp.services.estoque_fiscal import (
 )
 from dsystem_erp.services.precificacao_estoque import calcular_preco_revenda, decimal_valor
 from dsystem_erp.services.estoque_importacao import (
+    ESTADOS_POR_CODIGO,
     codigo_localizacao_valido,
     interpretar_codigo_localizacao,
     normalizar_tem_fonte,
 )
 from dsystem_erp.services.estoque_notas import (
+    cancelar_saida_manual,
     interpretar_xml_nfe,
     registrar_entrada_nota,
     registrar_movimentacao,
@@ -33,6 +35,7 @@ from dsystem_erp.services.estoque_emprestimos import (
     resolver_itens_emprestimo,
 )
 from dsystem_erp.ui_consulta import tabela_clicavel_id, tabela_selecionavel_id
+from dsystem_erp.services.estoque_qr import gerar_qr_produto
 
 
 def sincronizar_selecao_produto_estoque(estado_sessao, produto_id):
@@ -682,7 +685,7 @@ def renderizar_estoque(ctx: dict) -> None:
 
             st.write("---")
             st.subheader("Baixa de Estoque")
-            st.caption("Toda saída exige a seleção do cliente que receberá o item.")
+            st.caption("Selecione o cliente ou o usuário da empresa que receberá o item.")
             col_mov1, col_mov2 = st.columns([2, 1])
             
             produtos_por_id = {int(p["id"]): p for p in estoque_data}
@@ -705,6 +708,9 @@ def renderizar_estoque(ctx: dict) -> None:
             
             if id_sel:
                 prod_info = produtos_por_id.get(int(id_sel))
+                if prod_info:
+                    st.download_button("Baixar QR do produto", data=gerar_qr_produto(prod_info),
+                        file_name=f"produto_{id_sel}_qr.png", mime="image/png", key=f"qr_produto_{id_sel}")
                 foto_produto = buscar_foto_estoque(conectar_banco, int(id_sel)) if prod_info else None
                 if foto_produto and foto_produto.get("foto"):
                     st.image(
@@ -714,9 +720,17 @@ def renderizar_estoque(ctx: dict) -> None:
                     )
                 
                 qtd_mov = col_mov2.number_input("Quantidade da saída:", min_value=1, value=1, step=1)
-                clientes_saida = buscar_clientes()
+                destino_saida = st.radio("Destino da saída:", ["Cliente", "Uso interno"], horizontal=True, key="estoque_baixa_destino")
+                uso_interno = destino_saida == "Uso interno"
+                usuarios_saida = {item['username']: item for item in listar_funcionarios_sistema()} if uso_interno else {}
+                usuario_saida = ""
+                if uso_interno:
+                    usuario_saida = st.selectbox("Usuário da empresa que receberá o item:", [""] + list(usuarios_saida),
+                        format_func=lambda valor: usuarios_saida[valor]['label'] if valor else "-- Selecionar usuário --",
+                        key="estoque_baixa_usuario")
+                clientes_saida = buscar_clientes() if not uso_interno else []
                 clientes_saida_por_id = {int(item["id"]): item for item in clientes_saida}
-                cliente_saida_id = st.selectbox(
+                cliente_saida_id = 0 if uso_interno else st.selectbox(
                     "Cliente que receberá o item:", [0] + list(clientes_saida_por_id),
                     format_func=lambda valor: (
                         "-- Selecionar cliente --" if valor == 0
@@ -730,9 +744,11 @@ def renderizar_estoque(ctx: dict) -> None:
                 
                 if st.button("Confirmar baixa de estoque", type="primary"):
                     cliente_saida = clientes_saida_por_id.get(int(cliente_saida_id or 0), {})
+                    destinatario_id = usuario_saida if uso_interno else cliente_saida_id
+                    destinatario_nome = usuarios_saida.get(usuario_saida, {}).get('label', '') if uso_interno else cliente_saida.get('nome') or ''
                     erro_saida = validar_saida_com_cliente(
-                        cliente_saida_id, cliente_saida.get("nome") or "", qtd_mov,
-                        int(prod_info.get("quantidade") or 0),
+                        destinatario_id, destinatario_nome, qtd_mov,
+                        int(prod_info.get("quantidade") or 0), uso_interno=uso_interno,
                     )
                     if erro_saida:
                         st.error(erro_saida)
@@ -747,19 +763,19 @@ def renderizar_estoque(ctx: dict) -> None:
                             estoque_atualizado = c.fetchone() or {}
                             quantidade_anterior = int(estoque_atualizado.get("quantidade") or 0)
                             erro_saida = validar_saida_com_cliente(
-                                cliente_saida_id, cliente_saida.get("nome") or "", qtd_mov,
-                                quantidade_anterior,
+                                destinatario_id, destinatario_nome, qtd_mov,
+                                quantidade_anterior, uso_interno=uso_interno,
                             )
                             if erro_saida:
                                 raise ValueError(erro_saida)
                             nova_qtd = quantidade_anterior - int(qtd_mov)
                             c.execute("UPDATE estoque SET quantidade=? WHERE id=?", (nova_qtd, prod_info['id']))
                             registrar_movimentacao(
-                                c, produto_id=int(prod_info["id"]), tipo="Saída para cliente",
+                                c, produto_id=int(prod_info["id"]), tipo="Saída para uso interno" if uso_interno else "Saída para cliente",
                                 quantidade=int(qtd_mov), estoque_anterior=quantidade_anterior,
-                                estoque_atual=nova_qtd, cliente_id=int(cliente_saida_id),
+                                estoque_atual=nova_qtd, cliente_id=None if uso_interno else int(cliente_saida_id),
                                 cliente_nome=cliente_saida.get("nome") or "",
-                                origem="Baixa manual", observacoes=motivo_saida,
+                                origem="Baixa manual", observacoes=(f"Uso interno — Usuário: {destinatario_nome}. {motivo_saida}" if uso_interno else motivo_saida),
                                 criado_por=st.session_state.get("username", ""), criado_em=agora_br(),
                             )
                             conn.commit()
@@ -769,10 +785,11 @@ def renderizar_estoque(ctx: dict) -> None:
                         else:
                             registrar_evento_sistema(
                                 "Saída", "estoque", prod_info["id"],
-                                cliente_saida.get("nome") or "",
+                                destinatario_nome,
                                 {"produto": prod_info.get("produto"), "quantidade": qtd_mov,
                                  "estoque_anterior": quantidade_anterior, "estoque_atual": nova_qtd,
-                                 "cliente_id": cliente_saida_id, "motivo": motivo_saida},
+                                 "cliente_id": cliente_saida_id or None, "usuario_destinatario": usuario_saida,
+                                 "destino": destino_saida, "motivo": motivo_saida},
                             )
                             st.success(f"Baixa registrada. Nova quantidade em estoque: {nova_qtd}")
                             st.rerun()
@@ -781,6 +798,22 @@ def renderizar_estoque(ctx: dict) -> None:
 
             st.write("---")
             st.markdown("#### Histórico de movimentações")
+            with st.expander("Cancelar saída manual e devolver ao estoque"):
+                if tem_permissao("estoque.edit"):
+                    id_estorno = st.number_input("ID da saída no histórico:", min_value=1, step=1, key="estorno_estoque_id")
+                    motivo_estorno = st.text_input("Motivo do cancelamento:", key="estorno_estoque_motivo")
+                    if st.button("Confirmar cancelamento da saída", key="estorno_estoque_salvar"):
+                        conn_estorno = conectar_banco()
+                        try:
+                            cancelar_saida_manual(conn_estorno, id_estorno, motivo_estorno,
+                                st.session_state.get("username", ""), agora_br())
+                        except ValueError as erro:
+                            st.error(str(erro))
+                        else:
+                            st.success("Saída cancelada e quantidade devolvida ao estoque.")
+                            st.rerun()
+                        finally:
+                            conn_estorno.close()
             filtro_movimento = st.text_input(
                 "Pesquisar cliente, fornecedor ou produto no histórico:",
                 key="estoque_movimentacao_pesquisa",
@@ -821,15 +854,26 @@ def renderizar_estoque(ctx: dict) -> None:
             st.info("Nenhum produto cadastrado no seu estoque ainda.")
 
     with aba_est2:
+        # Limpar o rascunho apenas depois de uma gravação confirmada. Validar ou
+        # recalcular nunca deve apagar os valores que o usuário está preenchendo.
+        if st.session_state.pop('estoque_limpar_cadastro', False):
+            for chave in list(st.session_state):
+                if str(chave).startswith('estoque_novo_'):
+                    del st.session_state[chave]
+        ultimo_qr = st.session_state.get("estoque_ultimo_produto_qr")
+        if ultimo_qr:
+            st.download_button("Baixar QR do produto recém-cadastrado", data=gerar_qr_produto(ultimo_qr),
+                file_name=f"produto_{ultimo_qr['id']}_qr.png", mime="image/png", key="qr_ultimo_produto")
         st.subheader("Cadastrar Produto")
-        with st.form("form_estoque", clear_on_submit=True):
+        st.caption('Enter não cadastra o produto. Use a prévia para calcular e salve somente quando terminar de preencher.')
+        with st.form("form_estoque", clear_on_submit=False, enter_to_submit=False):
             ce1, ce2, ce3 = st.columns(3)
-            opcoes_fileira1 = ["", "1-01 Novo", "1-02 Usado"]
+            opcoes_fileira1 = [""] + list(ESTADOS_POR_CODIGO.values())
             opcoes_fileira2 = ["", "2-01 Informática", "2-02 CFTV", "2-03 Alarme", "2-04 Infraestrutura"]
-            e_cod = ce1.selectbox("Fileira 1 (Obrigatório):", opcoes_fileira1)
-            e_cat = ce2.selectbox("Fileira 2 (Obrigatório):", opcoes_fileira2)
-            e_modelo = ce3.text_input("Fileira 3 / Modelo (Obrigatório):")
-            e_nome_generico = st.text_input("Nome genérico / descrição:")
+            e_cod = ce1.selectbox("Fileira 1 (Obrigatório):", opcoes_fileira1, key='estoque_novo_cod')
+            e_cat = ce2.selectbox("Fileira 2 (Obrigatório):", opcoes_fileira2, key='estoque_novo_cat')
+            e_modelo = ce3.text_input("Fileira 3 / Modelo (Obrigatório):", key='estoque_novo_modelo')
+            e_nome_generico = st.text_input("Nome genérico / descrição:", key='estoque_novo_nome')
 
             ce_loc1, ce_loc2, ce_loc3 = st.columns(3)
             ce_loc1.number_input(
@@ -841,43 +885,44 @@ def renderizar_estoque(ctx: dict) -> None:
                 "Código completo:", value=e_codigo_entrada, disabled=True,
                 help="Gerado automaticamente no formato 01.02.01 com as três partes do endereço do estoque.",
             )
-            e_caixa = ce_loc3.text_input("Caixa / Gaveta:")
+            e_caixa = ce_loc3.text_input("Caixa / Gaveta:", key='estoque_novo_caixa')
 
             ce4, ce5, ce_fonte = st.columns(3)
             e_qtd = ce4.number_input(
-                "Quantidade inicial:", min_value=0, value=0, step=1,
+                "Quantidade inicial:", min_value=0, value=0, step=1, key='estoque_novo_qtd',
                 help="Informe quantas unidades já existem no momento do cadastro. Essa entrada ficará no histórico.",
             )
-            e_min = ce5.number_input("Estoque Mínimo (Alerta):", min_value=0, value=5)
-            e_tem_fonte = ce_fonte.radio("Tem fonte?", ["Não", "Sim"], horizontal=True)
+            e_min = ce5.number_input("Estoque Mínimo (Alerta):", min_value=0, value=5, key='estoque_novo_min')
+            e_tem_fonte = ce_fonte.radio("Tem fonte?", ["Não", "Sim"], horizontal=True, key='estoque_novo_fonte')
             e_situacao_nota = st.radio(
-                "Documento da compra:", list(SITUACOES_DOCUMENTO_COMPRA), horizontal=True,
+                "Documento da compra:", list(SITUACOES_DOCUMENTO_COMPRA), horizontal=True, key='estoque_novo_documento',
                 help="Produtos comprados sem nota serão classificados como serviço na venda, mas continuarão baixando o estoque.",
             )
 
-            e_preco_auto = st.checkbox("Calcular preço de revenda automaticamente", value=True)
+            e_preco_auto = st.checkbox("Calcular preço de revenda automaticamente", value=True, key='estoque_novo_auto')
             ce6, ce7, ce8 = st.columns(3)
-            e_custo = ce6.number_input("Valor de compra (R$):", min_value=0.0, step=0.01, format="%.2f")
-            e_deslocamento = ce7.number_input("Deslocamento por unidade (R$):", min_value=0.0, step=0.01, format="%.2f")
+            e_custo = ce6.number_input("Valor de compra (R$):", min_value=0.0, step=0.01, format="%.2f", key='estoque_novo_custo')
+            e_deslocamento = ce7.number_input("Deslocamento por unidade (R$):", min_value=0.0, step=0.01, format="%.2f", key='estoque_novo_deslocamento')
             e_forn = ce8.text_input(
                 "Fornecedor da última compra:", disabled=True,
                 help="Preenchido automaticamente quando a nota de entrada for lançada.",
             )
             cp1, cp2, cp3 = st.columns(3)
-            e_imposto = cp1.number_input("Impostos (%):", min_value=0.0, step=0.1, format="%.2f")
-            e_lucro = cp2.number_input("Lucro (%):", min_value=0.0, step=0.1, format="%.2f")
-            e_ajuste = cp3.checkbox("Permitir ajuste no orçamento/faturamento", value=False)
+            e_imposto = cp1.number_input("Impostos (%):", min_value=0.0, step=0.1, format="%.2f", key='estoque_novo_imposto')
+            e_lucro = cp2.number_input("Lucro (%):", min_value=0.0, step=0.1, format="%.2f", key='estoque_novo_lucro')
+            e_ajuste = cp3.checkbox("Permitir ajuste no orçamento/faturamento", value=False, key='estoque_novo_ajuste')
             preco_calculado = float(calcular_preco_revenda(e_custo, e_deslocamento, e_imposto, e_lucro))
             e_venda_manual = st.number_input(
                 "Valor de revenda manual (R$):", min_value=0.0, step=0.01, format="%.2f",
-                disabled=e_preco_auto, help="Usado somente quando o cálculo automático estiver desmarcado.",
+                disabled=e_preco_auto, key='estoque_novo_venda', help="Usado somente quando o cálculo automático estiver desmarcado. Atualize a prévia para habilitar o campo.",
             )
+            st.form_submit_button('Calcular / atualizar prévia', key='estoque_novo_previa', help='Atualiza o cálculo e as opções do formulário, sem gravar um produto.')
             st.metric("Preço de revenda utilizado", formatar_moeda_br(preco_calculado if e_preco_auto else e_venda_manual))
 
-            e_obs = st.text_area("Observações Adicionais:")
-            e_foto = st.file_uploader("Foto do item (opcional):", type=TIPOS_IMAGEM_UPLOAD, key="estoque_foto_novo")
+            e_obs = st.text_area("Observações Adicionais:", key='estoque_novo_obs')
+            e_foto = st.file_uploader("Foto do item (opcional):", type=TIPOS_IMAGEM_UPLOAD, key="estoque_novo_foto")
 
-            if st.form_submit_button("Salvar Produto no Estoque"):
+            if st.form_submit_button("Salvar Produto no Estoque", key='estoque_novo_salvar'):
                 if e_cod and e_cat and e_modelo.strip():
                     if e_foto and not upload_dentro_limite(e_foto):
                         erro_upload_grande("foto")
@@ -913,16 +958,20 @@ def renderizar_estoque(ctx: dict) -> None:
                         conn.commit()
                         produto_salvo = True
                     except Exception as e:
+                        conn.rollback()
                         st.error(f"Erro ao salvar: {e}")
                     finally:
                         conn.close()
                     if produto_salvo:
+                        st.session_state['estoque_limpar_cadastro'] = True
+                        st.session_state["estoque_ultimo_produto_qr"] = {"id": produto_id_novo, "codigo_entrada": cod_entrada_final}
                         st.toast("Produto cadastrado com sucesso!")
                         st.rerun()
                 else:
                     st.error("As duas primeiras fileiras e a Fileira 3 / Modelo são obrigatórias.")
 
     with aba_est3:
+        st.caption("O QR identifica o produto pelo ID e código cadastrado.")
         st.subheader("Editar ou Excluir Produto")
         if estoque_data:
             act_est = st.radio("Selecione a Ação:", ["Editar Produto", "Excluir Produto"], horizontal=True)
@@ -1017,8 +1066,11 @@ def renderizar_estoque(ctx: dict) -> None:
                 prod_edit = produtos_por_id_edicao.get(int(id_ed_est)) if id_ed_est else None
                 
                 if prod_edit:
+                    st.download_button("Baixar QR do produto", data=gerar_qr_produto(prod_edit),
+                        file_name=f"produto_{id_ed_est}_qr.png", mime="image/png", key=f"qr_editar_produto_{id_ed_est}")
+                    st.caption("O QR contém os dados salvos do produto. Salve as alterações antes de baixar uma nova etiqueta; etiquetas antigas não se atualizam automaticamente.")
                     with st.expander(f"Editando Produto: {prod_edit.get('codigo_entrada') or prod_edit['produto']}", expanded=True):
-                        opcoes_estado_edit = ["1-01 Novo", "1-02 Usado"]
+                        opcoes_estado_edit = list(ESTADOS_POR_CODIGO.values())
                         estado_atual = str(prod_edit.get("codigo") or "")
                         if estado_atual and estado_atual not in opcoes_estado_edit:
                             opcoes_estado_edit.append(estado_atual)

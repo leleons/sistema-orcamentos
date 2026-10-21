@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -11,6 +12,54 @@ from xml.etree import ElementTree as ET
 NFE_NS = "http://www.portalfiscal.inf.br/nfe"
 SOAP_NFE_AUTORIZACAO_NS = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4"
 NOME_HOMOLOGACAO = "NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
+
+
+def aliquotas_ibscbs_integral(ano: int) -> dict[str, float]:
+    """Alíquotas nominais conhecidas, somente para CST 000/cClassTrib 000001.
+
+    IT 2025.002 v1.50, seção 05. Não infere enquadramento ou base de cálculo.
+    Não reutiliza a tabela de 2026 em anos futuros ainda não implementados.
+    """
+    return {"uf": 0.1, "municipal": 0.0, "cbs": 0.9} if ano == 2026 else {}
+
+
+def aplicar_aliquotas_ibscbs_integral(item: dict, ano: int) -> dict:
+    """Atualiza apenas taxas tabeladas de um enquadramento já selecionado."""
+    import copy
+    preparado = copy.deepcopy(item)
+    rtc = preparado.get('ibscbs')
+    if isinstance(rtc, dict) and rtc.get('cst') == '000' and rtc.get('classificacao') == '000001':
+        rtc.update(aliquotas_ibscbs_integral(ano))
+    return preparado
+
+
+def validar_aliquotas_ibscbs_xml(xml: bytes) -> list[str]:
+    raiz = ET.fromstring(xml)
+    emissao = raiz.findtext(f".//{{{NFE_NS}}}ide/{{{NFE_NS}}}dhEmi") or ""
+    try:
+        ano = datetime.fromisoformat(emissao).year
+    except ValueError:
+        return ["Data de emissão inválida para conferir as alíquotas IBS/CBS."]
+    padrao = aliquotas_ibscbs_integral(ano)
+    pendencias = []
+    for det in raiz.findall(f".//{{{NFE_NS}}}det"):
+        rtc = det.find(f"{{{NFE_NS}}}imposto/{{{NFE_NS}}}IBSCBS")
+        if rtc is None or rtc.findtext(f"{{{NFE_NS}}}CST") != "000" or rtc.findtext(f"{{{NFE_NS}}}cClassTrib") != "000001":
+            continue
+        for campo, tag, nome, rejeicao in (("uf", "pIBSUF", "IBS estadual", "1026"),
+                ("municipal", "pIBSMun", "IBS municipal", "1032"), ("cbs", "pCBS", "CBS", "1037")):
+            if campo not in padrao:
+                continue
+            valor = rtc.findtext(f".//{{{NFE_NS}}}{tag}")
+            try:
+                correto = valor is not None and Decimal(valor) == Decimal(str(padrao[campo]))
+            except InvalidOperation:
+                correto = False
+            if not correto:
+                aliquota = str(padrao[campo]).replace('.', ',')
+                pendencias.append(f"Item {det.get('nItem')}: {nome} deve ser {aliquota}% em {ano} "
+                                  f"para tributação integral 000/000001 (rejeição {rejeicao}).")
+    return pendencias
 
 
 def endpoint_autorizacao_nfe(uf: str, ambiente: str) -> str:
@@ -213,13 +262,19 @@ def gerar_xml_nfe_produto_400(
         for campo, tag in (("logradouro", "xLgr"), ("numero", "nro"), ("bairro", "xBairro"),
                            ("codigo_municipio", "cMun"), ("municipio", "xMun"), ("uf", "UF")):
             _tag(ender_dest, tag, endereco_dest.get(campo))
+            if campo == "numero" and endereco_dest.get("complemento"):
+                _tag(ender_dest, "xCpl", _limitar(endereco_dest["complemento"], 60))
         if endereco_dest.get("cep"):
             _tag(ender_dest, "CEP", _somente_digitos(endereco_dest["cep"]))
         _tag(ender_dest, "cPais", "1058")
         _tag(ender_dest, "xPais", "BRASIL")
+        if endereco_dest.get("telefone"):
+            _tag(ender_dest, "fone", _somente_digitos(endereco_dest["telefone"]))
     _tag(dest, "indIEDest", str(endereco_dest.get("indicador_ie") or "9"))
     if endereco_dest.get("indicador_ie") == "1" and endereco_dest.get("ie"):
         _tag(dest, "IE", _somente_digitos(endereco_dest["ie"]))
+    if endereco_dest.get("email"):
+        _tag(dest, "email", _limitar(endereco_dest["email"], 60))
 
     total_produtos = Decimal("0")
     totais_rtc = dict(base=Decimal(0), uf=Decimal(0), municipal=Decimal(0), cbs=Decimal(0))
@@ -255,6 +310,8 @@ def gerar_xml_nfe_produto_400(
         base_icms = _decimal(fiscal.get("base_icms"))
         valor_icms = _decimal(_decimal_nfe(base_icms * _decimal(fiscal.get("icms")) / 100))
         if crt == "1":
+            if str(item.get('csosn') or '102') != '102':
+                raise ValueError('O gerador atual não implementa este CSOSN. Não é permitido convertê-lo silenciosamente para 102.')
             icms_sn = _tag(icms, "ICMSSN102")
             _tag(icms_sn, "orig", str(item.get("origem") or "0"))
             _tag(icms_sn, "CSOSN", "102")
@@ -392,6 +449,8 @@ def validar_xml_nfe_produto_minimo(xml_bytes: bytes, dados: dict[str, Any], iten
     if not itens:
         pendencias.append("A NF-e de produto precisa ter ao menos um item.")
     endereco = dados.get("destinatario") or {}
+    if str(endereco.get("indicador_ie") or "") not in {"1", "2", "9"}:
+        pendencias.append("Confirme se o destinatário é contribuinte, isento ou não contribuinte do ICMS.")
     for campo in ("logradouro", "numero", "bairro", "municipio", "uf", "codigo_municipio"):
         if not _texto(endereco.get(campo)):
             pendencias.append(f"Endereço do destinatário: preencha {campo}.")
@@ -436,7 +495,31 @@ def validar_xml_nfe_produto_minimo(xml_bytes: bytes, dados: dict[str, Any], iten
                     pendencias.append(f"Item {idx}: IBS/CBS {campo} inválido.")
         if _crt(dados.get("regime_tributario")) in {"2", "3"} and not (item.get("ibscbs") or dados.get("ibscbs")):
             pendencias.append(f"Item {idx}: preencha IBS/CBS para o regime normal.")
+    pendencias.extend(validar_aliquotas_ibscbs_xml(xml_bytes))
     return pendencias
+
+
+def canonicalizar_elemento_nfe(elemento) -> bytes:
+    """C14N 1.0 do subconjunto, preservando o contexto herdado.
+
+    libxml2 pode inserir xmlns="" espúrios ao canonicalizar diretamente um
+    descendente cujo namespace padrão difere de um ancestral (SignedInfo ds
+    dentro de NFe). Uma cópia independente materializa os namespaces em escopo
+    antes de aplicar C14N. Só os bytes usados no cálculo são derivados dela:
+    nunca substitui, limpa nem reserializa a NFe assinada de transporte.
+    """
+    from lxml import etree
+
+    copia = etree.fromstring(etree.tostring(elemento, with_tail=False),
+                            etree.XMLParser(resolve_entities=False, no_network=True))
+    # C14N inclusivo também herda atributos xml:* dos ancestrais omitidos.
+    # tostring materializa namespaces, mas não esses atributos. O mais próximo
+    # prevalece, e atributos do próprio elemento nunca são sobrescritos.
+    for ancestral in elemento.iterancestors():
+        for nome, valor in ancestral.attrib.items():
+            if nome.startswith("{http://www.w3.org/XML/1998/namespace}") and nome not in copia.attrib:
+                copia.set(nome, valor)
+    return etree.tostring(copia, method="c14n", exclusive=False, with_comments=False)
 
 
 def assinar_xml_nfe_produto(
@@ -500,31 +583,189 @@ def assinar_xml_nfe_produto(
     if digest_algorithm not in hash_types or signature_algorithm not in {"rsa-sha1", "rsa-sha256"}:
         raise ValueError("Algoritmo de assinatura NF-e não suportado.")
     digest = hashes.Hash(hash_types[digest_algorithm]())
-    digest.update(etree.tostring(signed_root.find(f"{{{NFE_NS}}}infNFe"), method="c14n"))
+    digest.update(canonicalizar_elemento_nfe(signed_root.find(f"{{{NFE_NS}}}infNFe")))
     signed_info.find(f".//{{{ds}}}DigestValue").text = base64.b64encode(digest.finalize()).decode("ascii")
-    assinatura = key.sign(etree.tostring(signed_info, method="c14n"), padding.PKCS1v15(), hash_types[signature_algorithm.removeprefix("rsa-")]())
+    assinatura = key.sign(canonicalizar_elemento_nfe(signed_info), padding.PKCS1v15(), hash_types[signature_algorithm.removeprefix("rsa-")]())
     signature.find(f"{{{ds}}}SignatureValue").text = base64.b64encode(assinatura).decode("ascii")
-    return etree.tostring(signed_root, encoding="utf-8", xml_declaration=True)
+    xml_assinado = etree.tostring(signed_root, encoding="utf-8", xml_declaration=True)
+    registrar_integridade_nfe("apos_assinar", xml_assinado)
+    # Verifica também o contexto efetivamente transmitido antes de registrar envio.
+    validar_assinatura_nfe_produto(montar_envelope_nfe_autorizacao(xml_assinado))
+    return xml_assinado
+
+
+def extrair_nfe_assinada_bytes(xml: bytes) -> bytes:
+    """Recorta a NFe original por offsets, sem tostring, decode ou normalização.
+
+    Expat identifica as tags reais (não texto de comentários/CDATA) e informa
+    offsets em bytes. A mesma extração serve para a NFe isolada e para o SOAP.
+    A declaração XML e o BOM não pertencem ao elemento NFe comparado.
+    """
+    from xml.parsers import expat
+
+    if not isinstance(xml, bytes):
+        raise ValueError("O XML assinado deve ser fornecido em bytes UTF-8.")
+    # Não converte encodings: o transporte fiscal usa exclusivamente UTF-8.
+    parser = expat.ParserCreate(encoding="UTF-8", namespace_separator="}")
+    inicio = fim = None
+    profundidade = 0
+    nivel_nfe = None
+    quantidade = 0
+
+    def iniciar(nome, attrs):
+        nonlocal inicio, profundidade, nivel_nfe, quantidade
+        profundidade += 1
+        if nome == NFE_NS + "}NFe":
+            quantidade += 1
+            if quantidade > 1:
+                raise ValueError("Esperada exatamente uma NF-e no documento.")
+            inicio, nivel_nfe = parser.CurrentByteIndex, profundidade
+
+    def terminar(nome):
+        nonlocal fim, profundidade
+        if nome == NFE_NS + "}NFe" and profundidade == nivel_nfe:
+            posicao = parser.CurrentByteIndex
+            if xml[posicao:posicao + 2] != b"</":
+                raise ValueError("NF-e vazia não pode ser transmitida.")
+            fim = xml.index(b">", posicao) + 1
+        profundidade -= 1
+
+    def declarar(versao, encoding, standalone):
+        if encoding and encoding.upper().replace("-", "") != "UTF8":
+            raise ValueError("O XML assinado deve permanecer em UTF-8.")
+
+    def bloquear_dtd(*args):
+        raise ValueError("DTD não permitida na NF-e.")
+
+    parser.StartElementHandler = iniciar
+    parser.EndElementHandler = terminar
+    parser.XmlDeclHandler = declarar
+    parser.StartDoctypeDeclHandler = bloquear_dtd
+    try:
+        parser.Parse(xml, True)
+    except expat.ExpatError as erro:
+        raise ValueError("XML da NF-e malformado; envio bloqueado.") from erro
+    if inicio is None or fim is None:
+        raise ValueError("Esperada exatamente uma NF-e no documento.")
+    return xml[inicio:fim]
+
+
+def sha256_nfe_assinada(xml: bytes) -> str:
+    return sha256(extrair_nfe_assinada_bytes(xml)).hexdigest()
+
+
+def registrar_integridade_nfe(etapa: str, xml: bytes, esperado: str | None = None) -> str:
+    """Registra apenas hashes/metadados, nunca o XML, senha ou chave privada."""
+    from lxml import etree
+    from dsystem_erp.technical_logs import registrar_log_tecnico
+
+    nfe = extrair_nfe_assinada_bytes(xml)
+    atual = sha256(nfe).hexdigest()
+    raiz = etree.fromstring(xml, etree.XMLParser(resolve_entities=False, no_network=True))
+    nota = next(raiz.iter(f"{{{NFE_NS}}}NFe"))
+    inf = nota.find(f"{{{NFE_NS}}}infNFe")
+    si = nota.find("{http://www.w3.org/2000/09/xmldsig#}Signature/"
+                   "{http://www.w3.org/2000/09/xmldsig#}SignedInfo")
+    detalhes = dict(etapa=etapa, sha256_nfe=atual, sha256_documento=sha256(xml).hexdigest(),
+                    bytes_nfe=len(nfe), sha256_esperado=esperado,
+                    referencia=inf.get("Id") if inf is not None else "")
+    # Bytes iguais não bastam: C14N inclusivo também considera os ancestrais.
+    for campo, elemento in (("infNFe", inf), ("SignedInfo", si)):
+        if elemento is not None:
+            detalhes[f"sha256_{campo}_c14n"] = sha256(
+                canonicalizar_elemento_nfe(elemento)).hexdigest()
+    divergente = esperado is not None and atual != esperado
+    registrar_log_tecnico("ERROR" if divergente else "INFO", "nfe_integridade",
+                          "Comparação do XML assinado", detalhes)
+    if divergente:
+        raise ValueError(f"NF-e alterada após assinatura ({etapa}): SHA-256 divergente; envio bloqueado.")
+    return atual
 
 
 def montar_envelope_nfe_autorizacao(xml_assinado: bytes, c_uf: str = "31") -> bytes:
     from xml.sax.saxutils import escape
 
     from lxml import etree
-    root = etree.fromstring(xml_assinado)
+    nfe_bytes = extrair_nfe_assinada_bytes(xml_assinado)
+    root = etree.fromstring(xml_assinado, etree.XMLParser(resolve_entities=False, no_network=True))
     if root.tag != f"{{{NFE_NS}}}NFe":
         raise ValueError("O lote deve conter uma NFe assinada.")
-    # Remove somente a declaração XML, preservando os bytes da assinatura.
-    xml_texto = xml_assinado.decode("utf-8-sig").strip()
-    if xml_texto.startswith("<?xml"):
-        xml_texto = xml_texto.split("?>", 1)[1].lstrip()
     lote = root.findtext(f"{{{NFE_NS}}}infNFe/{{{NFE_NS}}}ide/{{{NFE_NS}}}nNF") or "1"
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
-  <soap:Body>
-    <nfeDadosMsg xmlns="{SOAP_NFE_AUTORIZACAO_NS}"><enviNFe xmlns="{NFE_NS}" versao="4.00"><idLote>{escape(lote)}</idLote><indSinc>1</indSinc>{xml_texto}</enviNFe></nfeDadosMsg>
-  </soap:Body>
-</soap:Envelope>""".encode("utf-8")
+    # Nunca inserir a árvore assinada em outra árvore nem serializá-la de novo.
+    # O SOAP usa somente namespaces padrão para não alterar o C14N inclusivo.
+    prefixo = f"""<?xml version="1.0" encoding="utf-8"?>
+<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope">
+  <Body>
+    <nfeDadosMsg xmlns="{SOAP_NFE_AUTORIZACAO_NS}"><enviNFe xmlns="{NFE_NS}" versao="4.00"><idLote>{escape(lote)}</idLote><indSinc>1</indSinc>""".encode("utf-8")
+    sufixo = b"""</enviNFe></nfeDadosMsg>
+  </Body>
+</Envelope>"""
+    return prefixo + nfe_bytes + sufixo
+
+
+def validar_assinatura_nfe_produto(xml: bytes) -> None:
+    """Confere integridade XMLDSig no contexto recebido (NFe ou SOAP completo).
+
+    Não substitui validação de validade/cadeia/CNPJ do A1 nem autorização SEFAZ.
+    C14N inclusivo herda namespaces ancestrais: prefixos no SOAP alterariam
+    tanto infNFe quanto SignedInfo, mesmo preservando o texto da NFe.
+    """
+    import base64
+    import hmac
+    from cryptography import x509
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    from lxml import etree
+
+    ds = "http://www.w3.org/2000/09/xmldsig#"
+    c14n = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    try:
+        raiz = etree.fromstring(xml, parser)
+        if raiz.getroottree().docinfo.doctype:
+            raise ValueError("DTD não permitida na NF-e.")
+        notas = list(raiz.iter(f"{{{NFE_NS}}}NFe"))
+        if len(notas) != 1:
+            raise ValueError("Esperada exatamente uma NF-e assinada.")
+        nota = notas[0]
+        infos = nota.findall(f"{{{NFE_NS}}}infNFe")
+        assinaturas = list(raiz.iter(f"{{{ds}}}Signature"))
+        if len(infos) != 1 or len(assinaturas) != 1 or assinaturas[0].getparent() is not nota:
+            raise ValueError("Estrutura de assinatura NF-e inválida ou ausente.")
+        inf, assinatura = infos[0], assinaturas[0]
+        identificador = inf.get("Id") or ""
+        if not identificador.startswith("NFe") or len(raiz.xpath('//*[@Id=$id]', id=identificador)) != 1:
+            raise ValueError("Identificador da NF-e inválido ou duplicado.")
+        si = assinatura.find(f"{{{ds}}}SignedInfo")
+        referencias = si.findall(f"{{{ds}}}Reference") if si is not None else []
+        if len(referencias) != 1 or referencias[0].get("URI") != "#" + identificador:
+            raise ValueError("A assinatura não referencia esta NF-e.")
+        ref = referencias[0]
+        if si.find(f"{{{ds}}}CanonicalizationMethod").get("Algorithm") != c14n:
+            raise ValueError("Canonicalização NF-e não suportada.")
+        transforms = [t.get("Algorithm") for t in ref.findall(f"{{{ds}}}Transforms/{{{ds}}}Transform")]
+        if transforms != [ds + "enveloped-signature", c14n]:
+            raise ValueError("Transformações de assinatura NF-e não suportadas.")
+        digests = {ds + "sha1": hashes.SHA1, "http://www.w3.org/2001/04/xmlenc#sha256": hashes.SHA256}
+        signatures = {ds + "rsa-sha1": hashes.SHA1, "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256": hashes.SHA256}
+        digest_type = digests[ref.find(f"{{{ds}}}DigestMethod").get("Algorithm")]
+        signature_type = signatures[si.find(f"{{{ds}}}SignatureMethod").get("Algorithm")]
+        digest = hashes.Hash(digest_type())
+        digest.update(canonicalizar_elemento_nfe(inf))
+        esperado = base64.b64decode(ref.findtext(f"{{{ds}}}DigestValue") or "", validate=True)
+        if not hmac.compare_digest(digest.finalize(), esperado):
+            raise ValueError("Conteúdo da NF-e difere do assinado (digest inválido).")
+        certificado = x509.load_der_x509_certificate(base64.b64decode(
+            assinatura.findtext(f"{{{ds}}}KeyInfo/{{{ds}}}X509Data/{{{ds}}}X509Certificate") or ""))
+        chave = certificado.public_key()
+        if not isinstance(chave, rsa.RSAPublicKey):
+            raise ValueError("A assinatura NF-e exige chave RSA.")
+        chave.verify(base64.b64decode(assinatura.findtext(f"{{{ds}}}SignatureValue") or "", validate=True),
+                     canonicalizar_elemento_nfe(si), padding.PKCS1v15(), signature_type())
+    except (ValueError, KeyError, AttributeError, InvalidSignature, etree.LxmlError) as erro:
+        raise ValueError("Assinatura NF-e inválida; envio bloqueado antes de acessar a SEFAZ. " +
+                         (str(erro) or "Assinatura difere do calculado.")) from erro
 
 
 def enviar_xml_nfe_produto(
@@ -535,6 +776,7 @@ def enviar_xml_nfe_produto(
     *,
     c_uf: str = "31",
     timeout: int = 30,
+    sha256_assinado: str | None = None,
 ) -> bytes:
     from urllib.error import HTTPError
     from urllib.request import Request, urlopen
@@ -542,6 +784,7 @@ def enviar_xml_nfe_produto(
 
     from dsystem_erp.services.nfse_soap import contexto_ssl_certificado_pfx
 
+    hash_nfe = registrar_integridade_nfe("antes_lote", xml_assinado, sha256_assinado)
     root = ET.fromstring(xml_assinado)
     ambiente = root.findtext(f".//{{{NFE_NS}}}tpAmb")
     host = urlparse(endpoint).hostname
@@ -557,6 +800,12 @@ def enviar_xml_nfe_produto(
         },
         method="POST",
     )
+    # Confere o próprio Request.data, não uma cópia reserializada do XML.
+    registrar_integridade_nfe("antes_envio", req.data, hash_nfe)
+    validar_assinatura_nfe_produto(req.data)
+    pendencias_rtc = validar_aliquotas_ibscbs_xml(req.data)
+    if pendencias_rtc:
+        raise ValueError("Envio bloqueado: " + " ".join(pendencias_rtc))
     try:
         with contexto_ssl_certificado_pfx(cert_path, cert_password) as ssl_context:
             with urlopen(req, timeout=timeout, context=ssl_context) as resp:

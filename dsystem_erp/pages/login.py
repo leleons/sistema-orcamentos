@@ -64,11 +64,11 @@ def renderizar_login(ctx) -> None:
 
     exibir_logo_dsystem("210")
     st.title("Acesso ao Sistema Dsystem ERP")
-    with st.container():
+    with st.form("login_sistema", enter_to_submit=True):
         user = st.text_input("Usuário")
         password = st.text_input("Senha", type="password")
 
-        if not st.button("Entrar no Sistema", type="primary"):
+        if not st.form_submit_button("Entrar no Sistema", type="primary"):
             return
 
         conn = conectar_banco()

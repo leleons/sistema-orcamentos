@@ -9,6 +9,7 @@
 *.key
 *.crt
 *.cer
+*.dpapi
 
 # Bancos, exportações e dados de produção
 *.db

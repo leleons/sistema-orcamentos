@@ -1,4 +1,35 @@
 """Regras de conciliação e bloqueio permanente dos títulos financeiros."""
+import re
+
+
+def proteger_escrita_financeira(cursor, sql, params, tabela, acao):
+    """Verifica e trava as linhas na mesma transação da escrita do ERP."""
+    if tabela not in {"contas_pagar", "contas_receber"} or acao not in {"update", "delete"}:
+        return
+    match = re.search(r"\bWHERE\b", sql, re.I)
+    if not match:
+        raise ValueError("Alteração financeira exige seleção dos lançamentos.")
+    valores = tuple(params or ())
+    inicio_params = sql[:match.start()].count("%s")
+    cursor.execute(f"SELECT status, data_baixa, conciliado FROM `{tabela}` " + sql[match.start():] + " FOR UPDATE", valores[inicio_params:])
+    registros = cursor.fetchall()
+    for registro in registros:
+        if str(registro.get("conciliado") or "").strip().casefold() in {"sim", "1", "true", "yes"}:
+            raise ValueError("Lançamento conciliado: alteração ou exclusão bloqueada.")
+    if acao == "update":
+        def valor_atribuido(campo):
+            atrib = re.search(rf"\b{campo}\s*=\s*(%s|'[^']*')", sql[:match.start()], re.I)
+            if not atrib:
+                return None
+            token = atrib.group(1)
+            return valores[sql[:atrib.start(1)].count("%s")] if token == "%s" else token[1:-1]
+        if str(valor_atribuido("conciliado") or "").strip().casefold() in {"sim", "1", "true", "yes"}:
+            esperado = "Pago" if tabela == "contas_pagar" else "Recebido"
+            if not valor_atribuido("data_conciliacao") or any(not esta_baixado(r) or r.get("status") != esperado for r in registros):
+                raise ValueError("Conciliação exige baixa integral anterior e data da conciliação.")
+            status_novo = valor_atribuido("status")
+            if status_novo is not None and status_novo != esperado:
+                raise ValueError("Não é possível mudar o status ao conciliar.")
 
 
 def esta_baixado(registro):
