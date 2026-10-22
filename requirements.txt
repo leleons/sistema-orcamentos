@@ -11,6 +11,6 @@ lxml
 signxml
 python-dotenv
 qrcode[pil]
-requests>=2.32.4
+requests>=2.34.2
 tzdata
 BrazilFiscalReport==0.6.5
