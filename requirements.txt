@@ -13,4 +13,4 @@ python-dotenv
 qrcode[pil]
 requests>=2.32.4
 tzdata
-BrazilFiscalReport==0.6.5
+BrazilFiscalReport==1.3.1
