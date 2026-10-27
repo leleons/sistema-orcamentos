@@ -45,6 +45,27 @@ Reutiliza `configuracoes_sistema`, com prefixos `IMPOSTO_ITEM_<CNPJ>_...`, `IMPO
 
 ## Testes isolados
 
+### Importação de catálogo XLSX
+
+Em **Cadastros → Cadastrar impostos → Importar catálogo de produtos e serviços (.xlsx)**,
+envie o arquivo com abas `Produtos` e/ou `Serviços`, confira a prévia e confirme a importação.
+O formato aceito é o de `catalogo_fiscal_ti_iss_ncm.xlsx`, com cabeçalhos na primeira linha.
+Limites: 5 MB, 30 MB descompactados, 2.000 itens por aba e 50 colunas. Fórmulas e nomes
+duplicados na mesma espécie são rejeitados. Não cria itens nem quantidades no estoque.
+
+Novos registros ficam inativos e não confirmados. Em **Editar cadastro**, selecione o item,
+consulte os dados originais, complete os parâmetros fiscais, marque Cadastro ativo e
+confirme a revisão contábil antes de salvar. CFOP interno/interestadual, CSOSN alternativos,
+LC 116 e faixa de ISS são preservados como referências, sem escolha automática.
+Não há conversão automática de LC 116 para código nacional completo nem de ST para CSOSN 102.
+Os valores iniciais do formulário não constituem recomendações fiscais.
+
+Importação repetida preserva registros existentes pelo CNPJ, tipo e nome normalizado.
+SKU e dados originais são guardados, mas o vínculo fiscal atual continua pelo nome.
+Qualquer erro na gravação reverte o lote. Exige `impostos.edit`.
+
+`python -m unittest tests.test_impostos_importacao -q`
+
 `python -m unittest tests.test_impostos_v14 tests.test_fiscal_automatico tests.test_faturamento_manual tests.test_fiscal_modelos -q`
 
 Não importe `orcamento.py` para testar: o entrypoint inicializa o banco real. Os testes usam SQLite em memória, mocks e Streamlit AppTest.

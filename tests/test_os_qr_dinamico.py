@@ -190,7 +190,10 @@ renderizar_recepcao_kanban(ctx)
         self.assertFalse(app.exception)
         self.assertEqual(app.session_state['item_teste']['servico'], "Trocar fonte e testar")
         self.assertIn("Trocar fonte e testar", app.text[0].value)
-        self.assertEqual(app.query_params['equipamento_id'], ['5'])
+        # AppTest pode expor o parâmetro único como str ou lista conforme a versão.
+        # Exigir o mesmo ID, sem aceitar ausência, duplicidade ou outro equipamento.
+        equipamento_id = app.query_params['equipamento_id']
+        self.assertEqual([equipamento_id] if isinstance(equipamento_id, str) else equipamento_id, ['5'])
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ def main(argv=None):
     parser.add_argument('--empresa', type=int, required=True)
     parser.add_argument('--usuario', required=True)
     modo = parser.add_mutually_exclusive_group(required=True)
-    for opcao in ('preparar', 'ativar', 'desativar', 'agendado', 'atualizar'):
+    for opcao in ('preparar', 'ativar', 'desativar', 'verificar', 'agendado', 'atualizar'):
         modo.add_argument('--'+opcao, action='store_true')
     args = parser.parse_args(argv)
     consultas = None
@@ -32,7 +32,19 @@ def main(argv=None):
             repo.schema()  # Apenas base isolada *_inter_config, nunca financeiro ERP.
         consultas = ConsultasInterProducao(repo)
         painel = PainelInter(repo, consultas)
-        if args.preparar or args.ativar or args.desativar:
+        if args.verificar:
+            from dsystem_erp.services.inter_runtime import chave_mestra, validar_par_certificado
+            from dsystem_erp.services.inter_api import decifrar_credencial
+            with repo.transacao() as c:
+                repo.exigir_empresa(c, args.empresa, usuario['username'])
+                repo.executar(c, 'SELECT credencial_secret FROM inter_contas WHERE empresa_id=%s AND ambiente=%s', (args.empresa, 'producao'))
+                row = c.fetchone()
+            dados = decifrar_credencial(row['credencial_secret'], args.empresa, chave_mestra(), 'credencial:producao')
+            if 'extrato.read' not in dados['escopos']:
+                raise PermissionError
+            validar_par_certificado(Path(dados['certificado']).read_bytes(), Path(dados['chave']).read_bytes())
+            print('Cofre, certificado e acesso local verificados. Nenhuma chamada bancária executada.')
+        elif args.preparar or args.ativar or args.desativar:
             painel.configurar_agenda(args.empresa, usuario, ativo=args.ativar)
             print('Agenda configurada. Nenhuma chamada bancária executada.')
         else:

@@ -1,9 +1,74 @@
-# Banco Inter — consultas reais e movimentações simuladas
+# Banco Inter — saldo, boletos de notas e pagamentos
 
-Trabalho local em branch `codex/`, sem publicação no servidor. **Movimentações em
-produção continuam bloqueadas em código.** Após autorização do usuário, produção
-passou a aceitar exclusivamente saldo/extrato (`extrato.read`). Não há envio de
-Pix, pagamento, agendamento, lote, cobrança nem baixa financeira em produção.
+## Ajuste do Admin Master — 23/10/2026
+
+O cadastro do administrador é protegido contra edição geral. Para não impedir
+o acesso inicial ao Inter, `Daniel.fabio` com `is_admin` ativo recebe consulta
+e configuração (`inter.view`, `inter.configurar`) pela regra de autorização.
+Não é necessário editar diretamente seu cadastro nem liberar todos os admins.
+O vínculo à empresa e as credenciais continuam obrigatórios, e preparar/aprovar/
+executar/conciliar exigem permissões explícitas. A lista de delegação considera
+também esse acesso do Master. Entradas do portal cliente nunca recebem a exceção.
+
+## Entrega atual — 22/10/2026
+
+Branch `codex/inter-boletos-pagamentos`, sem publicação no servidor e sem executar
+transações reais durante o desenvolvimento. As seções datadas abaixo registram
+o histórico: o bloqueio integral das versões anteriores foi substituído por
+habilitação administrativa por empresa, mantendo saldo/extrato isolados.
+
+- **Faturamento → documentos do faturado → Boleto Banco Inter**: prepara uma
+  cobrança por parcela já existente no Contas a Receber. Exige forma Boleto,
+  nota autorizada em produção, CNPJ do emitente igual ao da empresa bancária,
+  destinatário e total conferidos, cadastro único do cliente e parcela aberta.
+  NF-e vincula chave, número, série e parcela no campo oficial `notaFiscal`.
+  NFS-e Nacional fica vinculada no ledger; não usa sua chave como chave de NF-e.
+- **Banco Inter → Configuração da conta e ambientes de teste → Produção —
+  boletos e pagamentos**: preparação de Pix ou boleto/conta, inclusive data
+  futura, revisão, aprovação e confirmação textual de envio. O preparador não
+  aprova o próprio pagamento. A autorização adicional do Internet Banking Inter,
+  quando exigida pela conta, continua necessária.
+- Administrador com `inter.configurar` habilita os recursos em **Configurar
+  conta real → Habilitar boletos e pagamentos em produção**. Reutiliza as chaves
+  protegidas, sem expor segredos, reupload ou chamada à API. Os escopos também
+  precisam estar liberados pelo Inter. `DSYSTEM_INTER_PERMITIR_MOVIMENTACAO=0`
+  bloqueia a instalação inteira; a configuração por empresa pode ser desativada
+  mesmo com operações pendentes. Salvar configuração não envia pagamentos.
+- Delegação: conceder `inter.view` e as ações desejadas (`inter.preparar`,
+  `inter.aprovar`, `inter.executar`) no Gerenciador de Usuários e vincular o login
+  à empresa na configuração bancária. Permissões e vínculos do preparador,
+  aprovador e executor são relidos antes do envio. Não há concessão automática
+  a todos os administradores ou funcionários.
+- No histórico: consultar status, obter o PDF original do Inter e visualizar
+  QR Code/Pix copia-e-cola quando retornados. Emissão é assíncrona: PDF e QR podem
+  ficar pendentes até o processamento bancário. Consulta JSON não é comprovante.
+- Idempotência local, referência estável da parcela, aprovação vinculada ao
+  conteúdo/conta, trava transacional e nenhum retry de escrita. Em timeout,
+  resposta sem identificador ou falha ao salvar o retorno, o envio fica bloqueado
+  para revisão. Não criar outra referência para contornar um envio incerto.
+
+Limites: pagamentos desta tela são preparados manualmente; não baixam Contas a
+Pagar automaticamente. A baixa/conciliação de produção, lotes, cancelamentos e
+Pix Automático continuam fora deste fluxo. A titularidade de uma chave Pix não
+é consultada no DICT: nome/documento informados são para revisão humana.
+Ainda é necessária homologação com o Inter; testes simulados não comprovam
+aceitação, permissões bancárias ou liquidação reais.
+
+Configuração local concluída em 22/10: recursos habilitados para a empresa
+Dsystem Tecnologia e permissões `inter.preparar`, `inter.aprovar`, `inter.executar`
+adicionadas somente ao administrador Daniel.fabio, preservando os demais acessos.
+Nenhum outro usuário recebeu permissões. Tela verificada com a configuração local
+e HTTP bloqueado: nenhuma exceção, nenhum erro e **zero operações bancárias
+criadas/enviadas**. Daniel deve autorizar um segundo login para a aprovação
+separada dos pagamentos que ele próprio preparar. Saldo/extrato seguem somente
+leitura e o agendador nunca envia pagamentos.
+
+Validação final desta entrega: **701 testes passaram**, incluindo 97 testes
+Inter (24 novos testes do fluxo de produção, sempre com HTTP simulado).
+
+Fontes oficiais conferidas:
+[Cobrança V3](https://developers.inter.co/redocusaurus/swagger-cobranca-bolepix-yaml.yaml)
+e [Banking V2](https://developers.inter.co/redocusaurus/swagger-banking-yaml.yaml).
 
 ## Atualização de 19/10/2026 — chaves reais, sem pagamentos
 
@@ -260,8 +325,12 @@ a API ao instalar. Exige administrador ERP com `inter.view`, `inter.configurar`
 e vínculo empresarial. O fuso Windows precisa ser Brasília. O PC e o MySQL
 precisam estar ligados, com o usuário Windows conectado (tela bloqueada funciona).
 Não é necessário deixar o navegador ou Streamlit aberto. Um gatilho de login
-recupera somente o último horário pendente do dia; cada horário é tentado uma
-única vez. Falhas podem ser tentadas novamente pelo botão, ou no próximo horário.
+recupera somente o último horário pendente do dia. A tarefa verifica pendências
+a cada 5 minutos, sem consultar o Inter quando o horário já foi concluído.
+Uma falha não consome o horário: há nova tentativa após pelo menos 5 minutos.
+Trocar credenciais também permite recuperar o cache invalidado no mesmo horário.
+Uma atualização manual bem-sucedida atende o horário corrente. Reinstale a tarefa
+com o comando acima para receber o novo gatilho de recuperação.
 Uma trava compartilhada evita execução simultânea por duas sessões/agendadores.
 
 A tela verifica o **cache local** a cada 60 segundos, sem chamar a API Inter.
@@ -274,10 +343,11 @@ python .\scripts\inter_atualizar_painel.py --empresa 1 --usuario "Daniel.fabio" 
 ```
 
 A tarefa Windows pode permanecer registrada: desativada no ERP, não acessa o banco.
-Nada é instalado automaticamente no servidor remoto. No Linux, após configurar
-cofre/certificados e preparar/ativar a agenda com o mesmo script Python, o
-administrador pode executar `--agendado` via cron/systemd às 08h e 12h de Brasília
-(conferir suporte a timezone do agendador). Usar apenas **um executor** por instalação.
+Nada é instalado automaticamente no servidor remoto. No Linux, use
+`scripts/inter_agendar_servidor.py` conforme `ENVIO_SERVIDOR_INTER_NOTAS.md`:
+timer systemd às 08h/12h de Brasília, recuperação a cada 5 minutos e após boot.
+Usar apenas **um executor** por instalação. A chave DPAPI do Windows não é
+portável para Linux; configure o cofre do servidor sem substituir chaves existentes.
 
 O SDK oficial não foi adicionado: o transporte existente já usa os endpoints
 oficiais e preserva bloqueios de movimentação, mTLS e autorização por empresa.

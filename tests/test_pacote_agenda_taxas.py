@@ -2,6 +2,8 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import shutil
+import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -11,6 +13,23 @@ from scripts import pacote_agenda_financeiro_taxas as pacote
 
 
 class PacoteAgendaTaxasTests(unittest.TestCase):
+    def test_deploy_dry_run_envia_documentos_do_manifesto_sem_segredos(self):
+        powershell = shutil.which('powershell') or shutil.which('pwsh')
+        if not powershell:
+            self.skipTest('PowerShell indisponível neste sistema.')
+        raiz = Path(__file__).resolve().parents[1]
+        resultado = subprocess.run([powershell, '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', str(raiz/'deploy.ps1'), '-HostName', 'servidor-teste.invalid', '-DryRun'],
+            cwd=raiz, capture_output=True, text=True, errors='replace', timeout=60)
+        self.assertEqual(resultado.returncode, 0, resultado.stdout + resultado.stderr)
+        for nome in pacote.ARQUIVOS:
+            if '/' not in nome and nome.endswith('.md'):
+                self.assertIn('/opt/orcamento/' + nome, resultado.stdout)
+        envios = '\n'.join(linha for linha in resultado.stdout.splitlines() if '[scp' in linha)
+        self.assertNotIn('.env', envios)
+        self.assertNotIn('.dpapi', envios)
+        self.assertNotIn('.pfx', envios)
+
     def test_pacote_inclui_modulos_testes_e_componente_sem_dados_privados(self):
         raiz = Path(__file__).resolve().parents[1]
         for pasta in ('dsystem_erp', 'modules', 'tests'):

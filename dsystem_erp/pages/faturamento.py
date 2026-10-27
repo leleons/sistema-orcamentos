@@ -45,7 +45,8 @@ from dsystem_erp.services.nfe_produto import (
 )
 from dsystem_erp.utils.formatadores import somente_digitos
 from dsystem_erp.services.precificacao_estoque import preco_revenda_produto
-from dsystem_erp.services.impostos_cadastro import preparar_cadastro
+from dsystem_erp.services.impostos_cadastro import preparar_cadastro, dados_fiscais_item
+from dsystem_erp.pages.impostos import carregar_catalogo_itens, selecionar_impostos_item
 from dsystem_erp.ui_consulta import tabela_clicavel_id
 try:
     from dsystem_erp.services.settings import endpoint_nfse_nacional_rest
@@ -110,6 +111,7 @@ def _preparacao_automatica(fat, tipo, dados, itens, endpoint, pronto=True):
 def renderizar_a_faturar(ctx: dict) -> None:
     aplicar_contexto_pagina(ctx, globals())
     st.title("A faturar")
+    empresa_impostos, catalogo_impostos = carregar_catalogo_itens(ctx)
 
     import io
     from openpyxl import Workbook
@@ -213,8 +215,11 @@ def renderizar_a_faturar(ctx: dict) -> None:
 
         for i in range(qtd_itens):
             ic1, ic2, ic3, ic4, ic5 = st.columns([4, 1.5, 2, 2, 2])
-            desc  = ic1.text_input(f"Descrição Item {i+1}:", key=f"fat_desc_{i}")
             tipo_item_fat = ic2.selectbox(f"Tipo Item {i+1}:", ["Serviço", "Produto"], key=f"fat_tipo_item_{i}")
+            nome_fiscal_selecionado = st.session_state.get(f'fat_imposto_{i}_{tipo_item_fat}', '')
+            if nome_fiscal_selecionado:
+                st.session_state[f'fat_desc_{i}'] = nome_fiscal_selecionado
+            desc = ic1.text_input(f"Descrição Item {i+1}:", key=f"fat_desc_{i}", disabled=bool(nome_fiscal_selecionado))
             produto_fat = None
             tipo_item_fiscal_fat = tipo_item_fat
             situacao_nota_fat = ""
@@ -235,13 +240,16 @@ def renderizar_a_faturar(ctx: dict) -> None:
                         st.caption(f"Preço do estoque aplicado: {formatar_moeda_br(preco_fat)} — {situacao_nota_fat}")
                         if situacao_nota_fat == COMPRADO_SEM_NOTA:
                             st.warning(f"Item {i+1}: sairá fiscalmente como Serviço, mantendo a baixa no estoque.")
+            desc, regra_imposto_fat = selecionar_impostos_item(
+                empresa_impostos, catalogo_impostos, tipo_item_fiscal_fat, desc,
+                f'fat_imposto_{i}', estoque=bool(produto_fat))
             chave_preco_fat = f"fat_vunit_{i}_{produto_fat.get('id') if produto_fat else 'manual'}_{ajuste_fat:.2f}"
             vunit = ic3.number_input(f"Valor Unit. R$:", min_value=0.0, value=preco_fat, step=0.01, format="%.2f", key=chave_preco_fat, disabled=bool(produto_fat))
             qtd   = ic4.number_input(f"Quantidade:", min_value=0, step=1, value=1, key=f"fat_qtd_{i}")
             vtotal = vunit * qtd
             ic5.metric(f"Total Item {i+1}", f"R$ {vtotal:,.2f}".replace(',','X').replace('.',',').replace('X','.'))
             if desc:
-                itens_fat.append({"desc": desc, "tipo_item": tipo_item_fiscal_fat, "vunit": vunit, "qtd": qtd, "vtotal": vtotal,
+                itens_fat.append({**dados_fiscais_item(regra_imposto_fat, vtotal), "desc": desc, "tipo_item": tipo_item_fiscal_fat, "vunit": vunit, "qtd": qtd, "vtotal": vtotal,
                                   "estoque_id": produto_fat.get("id") if produto_fat else None,
                                   "origem_item": "Produto do estoque" if produto_fat else tipo_item_fat,
                                   "situacao_nota": situacao_nota_fat,
@@ -617,12 +625,19 @@ def renderizar_a_faturar(ctx: dict) -> None:
                         if tipo_padrao_item not in ["Produto", "Serviço"]:
                             tipo_padrao_item = "Serviço"
                         ii1, ii2, ii3, ii4, ii5 = st.columns([4, 1.4, 1.4, 1.6, 1.6])
-                        desc_item = ii1.text_input("Descrição:", value=item_padrao.get("desc") or "", key=f"fat_e_item_desc_{id_edit_fat}_{idx_item}")
                         tipo_item_edit = ii2.selectbox("Tipo:", ["Serviço", "Produto"], index=["Serviço", "Produto"].index(tipo_padrao_item), key=f"fat_e_item_tipo_{id_edit_fat}_{idx_item}")
+                        nome_fiscal_edit = st.session_state.get(f'fat_e_imposto_{id_edit_fat}_{idx_item}_{tipo_item_edit}', '')
+                        if nome_fiscal_edit:
+                            st.session_state[f'fat_e_item_desc_{id_edit_fat}_{idx_item}'] = nome_fiscal_edit
+                        desc_item = ii1.text_input("Descrição:", value=item_padrao.get("desc") or "", key=f"fat_e_item_desc_{id_edit_fat}_{idx_item}", disabled=bool(nome_fiscal_edit))
                         qtd_item = ii3.number_input("Qtd:", min_value=0, value=int(item_padrao.get("qtd") or 0), step=1, key=f"fat_e_item_qtd_{id_edit_fat}_{idx_item}")
                         vunit_item = ii4.number_input("Valor unit. R$:", min_value=0.0, value=float(item_padrao.get("vunit") or 0), step=0.01, format="%.2f", key=f"fat_e_item_vunit_{id_edit_fat}_{idx_item}")
                         vtotal_item = float(qtd_item) * float(vunit_item)
                         ii5.metric("Total", formatar_moeda_br(vtotal_item))
+                        tipo_imposto_edit = tipo_fiscal_produto_estoque(item_padrao) if item_padrao.get('estoque_id') else tipo_item_edit
+                        desc_item, regra_imposto_edit = selecionar_impostos_item(
+                            empresa_impostos, catalogo_impostos, tipo_imposto_edit, desc_item,
+                            f'fat_e_imposto_{id_edit_fat}_{idx_item}', estoque=bool(item_padrao.get('estoque_id')))
                         if desc_item.strip() or vtotal_item:
                             tipo_fiscal_preservado = (
                                 tipo_fiscal_produto_estoque(item_padrao)
@@ -630,6 +645,7 @@ def renderizar_a_faturar(ctx: dict) -> None:
                                 else tipo_item_edit
                             )
                             itens_editados.append({
+                                **dados_fiscais_item(regra_imposto_edit, vtotal_item),
                                 "desc": desc_item.strip(), "tipo_item": tipo_fiscal_preservado,
                                 "qtd": int(qtd_item), "vunit": float(vunit_item), "vtotal": float(vtotal_item),
                                 "estoque_id": item_padrao.get("estoque_id"),
@@ -1952,7 +1968,12 @@ def renderizar_faturado(ctx: dict) -> None:
                 nfe_col4, nfe_col5, nfe_col6 = st.columns(3)
                 nfe_unidade = nfe_col4.text_input("Unidade:", value="UN", key="nfe_produto_unidade")
                 nfe_natureza = nfe_col5.text_input("Natureza da operacao:", value="Venda de mercadoria", key="nfe_produto_natureza")
-                nfe_ambiente = nfe_col6.selectbox("Ambiente:", ["homologacao", "producao"], index=0, key="nfe_produto_ambiente")
+                nfe_ambiente_padrao = config_sistema_val("NFE_AMBIENTE", "homologacao")
+                nfe_ambiente = nfe_col6.selectbox("Ambiente:", ["homologacao", "producao"],
+                    index=1 if nfe_ambiente_padrao == "producao" else 0,
+                    key=f"nfe_produto_ambiente_{nfe_ambiente_padrao}")
+                if nfe_ambiente == "producao":
+                    st.warning("NF-e em produção: a emissão gera uma nota real. Confira dados fiscais, série e numeração antes de confirmar.")
                 nfe_cfg1, nfe_cfg2, nfe_cfg3 = st.columns(3)
                 nfe_numero = nfe_cfg1.number_input("Numero NF-e:", min_value=1, value=int(fat_nf_faturado.get("id") or 1), step=1, key="nfe_produto_numero")
                 nfe_serie = nfe_cfg2.number_input("Serie NF-e:", min_value=1, value=int(config_sistema_val("NFE_SERIE", "1") or 1), step=1, key="nfe_produto_serie")

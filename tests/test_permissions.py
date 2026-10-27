@@ -71,6 +71,25 @@ class PermissionsTests(unittest.TestCase):
         ):
             self.assertFalse(usuario_tem_permissao("infra.senhas.view", usuario))
 
+    def test_master_consulta_e_configura_inter_sem_editar_cadastro_protegido(self):
+        for nome in ('Daniel.fabio', ' Daniel.Fabio '):
+            usuario = {'username': nome, 'is_admin': 1, 'submodulos': '[]'}
+            for acao in ('inter.view', 'inter.configurar'):
+                self.assertTrue(usuario_tem_permissao(acao, usuario))
+            for acao in ('inter.preparar', 'inter.aprovar', 'inter.executar', 'inter.conciliar'):
+                self.assertFalse(usuario_tem_permissao(acao, usuario))
+
+    def test_excecao_inter_nao_libera_outros_admins_clientes_ou_master_revogado(self):
+        for usuario in (
+            {'username': 'Daniel.fabio', 'is_admin': 0},
+            {'username': 'Daniel.fabio', 'is_admin': '0'},
+            {'username': 'outro', 'is_admin': 1},
+            {'username': 'Daniel.fabio', 'is_admin': 1, 'tipo_login': 'cliente'},
+        ):
+            for acao in ('inter.view', 'inter.configurar'):
+                self.assertFalse(usuario_tem_permissao(acao, usuario))
+        self.assertTrue(usuario_tem_permissao('inter.view', {'username': 'delegado', 'submodulos': ['inter.view']}))
+
 
 if __name__ == "__main__":
     unittest.main()

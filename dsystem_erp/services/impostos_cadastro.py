@@ -15,6 +15,41 @@ from dsystem_erp.services.permissions import usuario_tem_permissao
 PREFIXO = 'IMPOSTO_ITEM_'
 
 
+def nome_produto_estoque(produto):
+    return str(next((produto.get(k) for k in ('nome_generico', 'modelo', 'produto', 'codigo_entrada')
+                     if produto.get(k)), '')).strip()
+
+
+def regras_disponiveis(regras, empresa, tipo):
+    """Catálogo do emitente: não mistura espécies, empresas ou regras inativas."""
+    empresa = empresa_cnpj(empresa)
+    return sorted((r for r in regras if r.get('empresa') == empresa and r.get('tipo') == tipo
+                   and r.get('ativo', True) and r.get('confirmado') and r.get('nome')),
+                  key=lambda r: nome_normalizado(r['nome']))
+
+
+def dados_fiscais_item(regra, total):
+    """Pré-preenche o item comercial; a emissão continua revalidando o cadastro.
+
+    Não soma impostos ao preço, não transmite nota nem movimenta estoque.
+    """
+    if not regra:
+        return {}
+    r = validar_regra(regra)
+    dados = {'imposto_cadastro_chave': chave_item(r['empresa'], r['tipo'], r['nome']),
+             'imposto_cadastro_versao': r.get('versao', '')}
+    if r['tipo'] == 'Produto':
+        dados.update({k: r[k] for k in ('ncm', 'cfop', 'origem', 'unidade', 'csosn')})
+        dados['tributos'] = {'pis': r['pis'], 'cofins': r['cofins'],
+                             'base_pis': str(moeda(total)), 'base_cofins': str(moeda(total))}
+        if r['crt'] == '3':
+            dados['tributos'].update(icms=r['icms'], base_icms=str(moeda(total)))
+    else:
+        dados.update({k: r[k] for k in ('codigo_tributacao_nacional', 'codigo_tributacao_municipal',
+                      'aliquota_iss', 'tipo_retencao_issqn', 'informar_aliquota', 'retencao_inss')})
+    return dados
+
+
 def digitos(v):
     return ''.join(c for c in str(v or '') if c.isascii() and c.isdigit())
 

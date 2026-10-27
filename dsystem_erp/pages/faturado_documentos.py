@@ -181,6 +181,8 @@ def renderizar_central_documentos_faturados(ctx: dict, faturamentos: list[dict])
         key="faturado_documentos_id",
     )
     faturamento = next(f for f in faturados if int(f["id"]) == int(selecionado_id))
+    from dsystem_erp.pages.banco_inter_operacoes import boletos_no_faturamento
+    boletos_no_faturamento(conectar_banco, faturamento, dict(st.session_state))
     grupo = _grupo_orcamento(faturamento, faturados)
     if len(grupo) > 1:
         st.info('Documentos reunidos do orçamento ' + str(faturamento.get('orc_ref')) + ': faturamentos ' + ', '.join(f"#{f['id']}" for f in grupo))

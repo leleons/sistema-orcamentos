@@ -1,6 +1,6 @@
 """Orquestração bancária com aprovação, idempotência e isolamento por empresa.
 
-Não executa tarefas ao importar; rede de produção não é suportada nesta versão.
+Não executa tarefas ao importar; produção exige política de autorização adicional.
 """
 from __future__ import annotations
 from datetime import date, datetime, timezone
@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from dsystem_erp.services.permissions import usuario_tem_permissao
 from dsystem_erp.services.inter_api import (
@@ -34,8 +35,11 @@ def dinheiro(valor):
         raise ValueError('Valor deve ser positivo, finito e ter no máximo duas casas decimais.') from None
 
 
-def digest_conteudo(tipo, payload, identificador):
-    return hashlib.sha256(json.dumps([tipo, payload, identificador], sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+def digest_conteudo(tipo, payload, identificador, contexto=None):
+    dados = [tipo, payload, identificador]
+    if contexto is not None:
+        dados.append(contexto)
+    return hashlib.sha256(json.dumps(dados, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 
 
 def validar_payload(tipo, payload, identificador=None):
@@ -46,7 +50,7 @@ def validar_payload(tipo, payload, identificador=None):
     for campo in ('dataPagamento', 'dataVencimento'):
         if campo in payload:
             dia = date.fromisoformat(payload[campo])
-            if campo == 'dataPagamento' and dia < date.today():
+            if campo == 'dataPagamento' and dia < datetime.now(ZoneInfo('America/Sao_Paulo')).date():
                 raise ValueError('Data de pagamento no passado.')
     if tipo == 'pix_enviar':
         dinheiro(payload.get('valor'))
@@ -107,18 +111,24 @@ def validar_payload(tipo, payload, identificador=None):
 
 
 class FinanceiroInter:
-    def __init__(self, repo, cliente, chave_mestra, *, ambiente='simulacao'):
+    def __init__(self, repo, cliente, chave_mestra, *, ambiente='simulacao', politica_producao=None):
         if ambiente not in ('simulacao', 'sandbox', 'producao'):
             raise ValueError('Ambiente bancário inválido.')
         if ambiente == 'simulacao' and not isinstance(cliente, InterSimulado):
             raise ValueError('Transporte incompatível com o ambiente.')
-        if ambiente == 'sandbox' and (not isinstance(cliente, ClienteInter) or getattr(cliente, '_producao_movimentacao', False)):
+        if ambiente == 'sandbox' and (not isinstance(cliente, ClienteInter) or cliente.credencial.ambiente != 'sandbox'):
             raise ValueError('Sandbox exige adaptador mTLS.')
-        if ambiente == 'producao' and not getattr(cliente, '_producao_movimentacao', False):
+        if ambiente == 'producao' and (not isinstance(cliente, ClienteInter)
+                or not getattr(cliente, '_producao_movimentacao', False) or not callable(politica_producao)):
             raise ValueError('Cobrança e pagamentos em produção exigem opt-in explícito.')
         if ambiente != 'simulacao' and isinstance(cliente, InterSimulado):
             raise ValueError('Transporte incompatível com o ambiente.')
         self.repo, self.cliente, self.chave, self.ambiente = repo, cliente, chave_mestra, ambiente
+        self.politica_producao = politica_producao
+
+    def _validar_operacao(self, c, empresa, usuario, registro, pacote, etapa):
+        if self.ambiente == 'producao':
+            self.politica_producao(c, empresa, usuario, registro, pacote, etapa)
 
     def _autorizar(self, c, empresa, usuario, acao):
         if (not usuario.get('autenticado') or usuario.get('tipo_login') == 'cliente'
@@ -133,13 +143,17 @@ class FinanceiroInter:
         return decifrar_credencial(registro[campo + '_secret'], empresa, self.chave,
                                   f'{self.ambiente}:{registro["id"]}:{campo}')
 
-    def criar(self, empresa, usuario, tipo, payload, chave, identificador=None):
+    def criar(self, empresa, usuario, tipo, payload, chave, identificador=None, *, contexto=None):
         validar_payload(tipo, payload, identificador)
         if not re.fullmatch(r'[A-Za-z0-9:._-]{1,120}', chave):
             raise ValueError('Informe uma referência única e estável do lançamento/competência.')
-        digest = digest_conteudo(tipo, payload, identificador)
+        digest = digest_conteudo(tipo, payload, identificador, contexto)
         with self.repo.transacao() as c:
             self._autorizar(c, empresa, usuario, 'preparar')
+            pacote = {'payload': payload, 'identificador': identificador}
+            if contexto is not None:
+                pacote['contexto'] = contexto
+            self._validar_operacao(c, empresa, usuario, {'tipo': tipo, 'chave': chave}, pacote, 'criar')
             self.repo.executar(c, 'SELECT id,digest FROM inter_operacoes WHERE empresa_id=%s AND ambiente=%s AND chave=%s',
                               (empresa, self.ambiente, chave))
             anterior = c.fetchone()
@@ -148,7 +162,6 @@ class FinanceiroInter:
                     raise ValueError('Referência já usada com dados diferentes. Não será reenviada.')
                 return anterior['id']
             uid = str(uuid4())
-            pacote = {'payload': payload, 'identificador': identificador}
             self.repo.executar(c, '''INSERT INTO inter_operacoes
                 (id,empresa_id,ambiente,chave,tipo,payload_secret,digest,estado,criado_por,criado_em)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,'PENDENTE_APROVACAO',%s,%s)''',
@@ -184,19 +197,24 @@ class FinanceiroInter:
                 raise ValueError('Confirme exatamente a operação revisada; dados ou status divergentes.')
             if r['tipo'] in DEBITOS and r['criado_por'].casefold() == usuario['username'].casefold():
                 raise PermissionError('Pagamentos exigem aprovação de outra pessoa autorizada.')
+            self._validar_operacao(c, empresa, usuario, r, self._ler(empresa, r), 'aprovar')
             self.repo.executar(c, 'UPDATE inter_operacoes SET estado=%s, aprovado_por=%s WHERE id=%s AND empresa_id=%s AND ambiente=%s',
                 ('APROVADA', usuario['username'], uid, empresa, self.ambiente))
             self.repo.registrar(c, empresa, self.ambiente, usuario['username'], 'APROVADA', uid)
 
-    def executar(self, empresa, usuario, uid):
+    def executar(self, empresa, usuario, uid, *, confirmacao=None, digest=None):
         with self.repo.transacao() as c:
             self._autorizar(c, empresa, usuario, 'executar')
             r = self.repo.operacao(c, empresa, self.ambiente, uid, travar=True)
+            if self.ambiente == 'producao' and (confirmacao != 'ENVIAR ' + uid or digest != r['digest']):
+                raise ValueError('Revise os dados e confirme explicitamente ENVIAR seguido do identificador.')
             if r['estado'] != 'APROVADA':
                 raise ValueError('Operação não aprovada ou já enviada. Consulte o status; não repita.')
             pacote = self._ler(empresa,r)
-            if digest_conteudo(r['tipo'], pacote['payload'], pacote['identificador']) != r['digest']:
+            if digest_conteudo(r['tipo'], pacote['payload'], pacote['identificador'], pacote.get('contexto')) != r['digest']:
                 raise ValueError('Dados modificados após aprovação.')
+            validar_payload(r['tipo'], pacote['payload'], pacote['identificador'])
+            self._validar_operacao(c, empresa, usuario, r, pacote, 'executar')
             from dsystem_erp.services.inter_titulos import validar_vinculo_envio
             validar_vinculo_envio(self, c, empresa, uid)
             self.repo.executar(c, 'UPDATE inter_operacoes SET estado=%s WHERE id=%s AND empresa_id=%s AND ambiente=%s',

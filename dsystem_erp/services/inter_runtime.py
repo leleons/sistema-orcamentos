@@ -16,8 +16,31 @@ ESCOPOS_MOVIMENTACAO = frozenset({
 })
 
 
-def movimentacao_producao_liberada():
-    return str(config_val('DSYSTEM_INTER_PERMITIR_MOVIMENTACAO', '') or '') == '1'
+def movimentacao_producao_liberada(repo=None, empresa=None, *, cursor=None):
+    flag = str(config_val('DSYSTEM_INTER_PERMITIR_MOVIMENTACAO', '') or '')
+    if flag == '0':
+        return False
+    if repo is None or empresa is None:
+        return flag == '1'
+    def ler(c):
+        import sqlite3
+        from mysql.connector import Error as MySQLError
+        try:
+            repo.executar(c, 'SELECT ativo FROM inter_habilitacoes WHERE empresa_id=%s', (empresa,))
+            row = c.fetchone()
+            return bool(row['ativo']) if row else flag == '1'
+        except MySQLError as exc:
+            if exc.errno == 1146:
+                return False  # Instalação anterior à habilitação administrativa desta versão.
+            raise
+        except sqlite3.OperationalError as exc:
+            if str(exc) == 'no such table: inter_habilitacoes':
+                return False
+            raise
+    if cursor is not None:
+        return ler(cursor)
+    with repo.transacao() as c:
+        return ler(c)
 from dsystem_erp.services.inter_financeiro import FinanceiroInter
 from dsystem_erp.services.permissions import usuario_tem_permissao
 
@@ -87,9 +110,9 @@ def salvar_credencial(repo, empresa, usuario, dados, *, ambiente='sandbox'):
         escolhidos = set(dados['escopos'])
         if 'extrato.read' not in escolhidos:
             raise ValueError('Produção exige o escopo extrato.read.')
-        if not movimentacao_producao_liberada() and escolhidos != {'extrato.read'}:
+        if escolhidos != {'extrato.read'} and not movimentacao_producao_liberada(repo, empresa):
             raise ValueError('Produção admite somente extrato.read; pagamentos permanecem bloqueados.')
-        if movimentacao_producao_liberada() and not escolhidos <= ESCOPOS_MOVIMENTACAO:
+        if not escolhidos <= ESCOPOS_MOVIMENTACAO:
             raise ValueError('Escopo de produção não autorizado para cobrança/pagamento.')
     raiz = Path(__file__).resolve().parents[2]
     for campo in ('certificado','chave'):
@@ -247,9 +270,12 @@ def abrir_sandbox(repo, empresa, usuario):
     return FinanceiroInter(repo,ClienteInter(credencial,permitir_sandbox=True),chave,ambiente='sandbox')
 
 
-def abrir_producao_movimentacao(repo, empresa, usuario):
-    if not movimentacao_producao_liberada():
-        raise PermissionError('Movimentação em produção desabilitada. Defina DSYSTEM_INTER_PERMITIR_MOVIMENTACAO=1.')
+def abrir_producao_movimentacao(repo, empresa, usuario, *, conectar_erp=None):
+    from .inter_painel import carregar_usuario
+    from .inter_producao import ProducaoInter, OrigemFaturamento
+    if not usuario.get('autenticado') or usuario.get('tipo_login') == 'cliente':
+        raise PermissionError('Sem acesso bancário.')
+    usuario = carregar_usuario(usuario.get('username'), conectar_erp)
     if not usuario.get('autenticado') or not usuario_tem_permissao('inter.view', usuario):
         raise PermissionError('Sem acesso bancário.')
     with repo.transacao() as c:
@@ -261,13 +287,55 @@ def abrir_producao_movimentacao(repo, empresa, usuario):
     chave = chave_mestra()
     dados = decifrar_credencial(row['credencial_secret'], empresa, chave, 'credencial:producao')
     dados['escopos'] = frozenset(dados['escopos'])
-    if 'boleto-cobranca.write' not in dados['escopos'] and 'pagamento-boleto.write' not in dados['escopos'] and 'pagamento-pix.write' not in dados['escopos']:
-        raise ValueError('As chaves de produção desta empresa ainda estão só para consulta. Recadastre com os escopos de cobrança/pagamento.')
     credencial = CredencialInter(empresa_id=empresa, ambiente='producao', **dados)
-    return FinanceiroInter(repo, ClienteInter(credencial, permitir_producao_movimentacao=True), chave, ambiente='producao')
+    servico = ProducaoInter(repo, ClienteInter(credencial, permitir_producao_movimentacao=True), chave,
+                           carregar=lambda login: carregar_usuario(login, conectar_erp),
+                           origem=OrigemFaturamento(conectar_erp))
+    import hashlib
+    servico.credencial_digest = hashlib.sha256(row['credencial_secret'].encode()).hexdigest()
+    return servico
 
 
-def abrir_servico_operacoes(usuario, sessao=None):
+def configurar_movimentacoes(repo, empresa, usuario, ativo, escopos, confirmacao, *, conectar_erp=None):
+    """Opt-in administrativo por empresa. Reutiliza o cofre; não chama a API."""
+    from .inter_painel import carregar_usuario
+    if not usuario.get('autenticado') or usuario.get('tipo_login') == 'cliente':
+        raise PermissionError('Acesso interno obrigatório.')
+    atual = carregar_usuario(usuario.get('username'), conectar_erp)
+    if str(atual.get('is_admin', 0)).lower() not in ('1', 'true') or not usuario_tem_permissao('inter.configurar', atual):
+        raise PermissionError('Somente administrador com acesso às chaves pode habilitar operações.')
+    if confirmacao != 'CONFIGURAR ' + str(empresa):
+        raise ValueError('Confirme a empresa bancária antes de alterar as operações permitidas.')
+    escolhidos = set(escopos) | {'extrato.read'}
+    if not escolhidos <= ESCOPOS_MOVIMENTACAO:
+        raise ValueError('Escopos de produção inválidos.')
+    if ativo and str(config_val('DSYSTEM_INTER_PERMITIR_MOVIMENTACAO', '') or '') == '0':
+        raise PermissionError('Movimentações bloqueadas pelo administrador desta instalação.')
+    with repo.transacao() as c:
+        repo.exigir_empresa(c, empresa, atual['username'])
+    repo.schema()  # Somente tabelas isoladas inter_*, ação administrativa explícita.
+    with repo.transacao() as c:
+        repo.exigir_empresa(c, empresa, atual['username'])
+        repo.executar(c, "SELECT credencial_secret FROM inter_contas WHERE empresa_id=%s AND ambiente='producao'"+('' if repo.sqlite else ' FOR UPDATE'), (empresa,))
+        row = c.fetchone()
+        if not row:
+            raise ValueError('Cadastre as chaves desta empresa primeiro.')
+        if ativo:
+            dados = decifrar_credencial(row['credencial_secret'], empresa, chave_mestra(), 'credencial:producao')
+            if set(dados['escopos']) != escolhidos:
+                repo.executar(c, "SELECT id FROM inter_operacoes WHERE empresa_id=%s AND ambiente='producao' AND estado NOT IN ('LIQUIDADA','RECUSADA')", (empresa,))
+                if c.fetchone():
+                    raise ValueError('Há operações pendentes. Não altere os escopos durante o processamento.')
+                dados['escopos'] = sorted(escolhidos)
+                secret = cifrar_credencial(dados, empresa, chave_mestra(), 'credencial:producao')
+                repo.executar(c, "UPDATE inter_contas SET credencial_secret=%s WHERE empresa_id=%s AND ambiente='producao'", (secret, empresa))
+        repo.executar(c, 'DELETE FROM inter_habilitacoes WHERE empresa_id=%s', (empresa,))
+        repo.executar(c, 'INSERT INTO inter_habilitacoes (empresa_id,ativo) VALUES (%s,%s)', (empresa, int(bool(ativo))))
+        repo.registrar(c, empresa, 'producao', atual['username'], 'MOVIMENTACOES_HABILITADAS' if ativo else 'MOVIMENTACOES_BLOQUEADAS')
+    return True
+
+
+def abrir_servico_operacoes(usuario, sessao=None, *, empresa=None):
     """Abre simulação da sessão, sandbox ou produção com movimentação."""
     demo = (sessao or {}).get('_inter_demo')
     if demo and demo.get('usuario') == usuario.get('username') and demo.get('servico'):
@@ -279,7 +347,9 @@ def abrir_servico_operacoes(usuario, sessao=None):
         empresas = repo.empresas(usuario['username'])
         if not empresas:
             raise ValueError('Seu login não tem empresa bancária vinculada.')
-        return empresas[0]['id'], abrir_producao_movimentacao(repo, empresas[0]['id'], usuario)
+        if empresa is None or empresa not in {e['id'] for e in empresas}:
+            raise ValueError('Selecione explicitamente a empresa bancária para movimentação.')
+        return empresa, abrir_producao_movimentacao(repo, empresa, usuario)
     if config_val('DSYSTEM_INTER_ALLOW_SANDBOX', '') == '1':
         repo = repositorio_teste()
         empresas = repo.empresas(usuario['username'])

@@ -47,7 +47,7 @@ def renderizar_painel(repo, consultas, empresa, nome_empresa, prefixo, acao, con
     dados = resultado['dados']
     if resultado['agenda_ativa']:
         proxima = proxima_atualizacao(agora).strftime('%d/%m às %H:%M')
-        st.caption(f'Automático às 08:00 e 12:00 (Brasília) · Próxima: {proxima} · Computador ligado, usuário Windows conectado e MySQL ativo.')
+        st.caption(f'Automático às 08:00 e 12:00 (Brasília) · Próxima: {proxima} · Recuperação de pendências a cada 5 minutos com o agendador atualizado. Servidor/PC e MySQL precisam estar ligados; no Windows, mantenha o usuário conectado.')
     else:
         st.caption('Horários previstos: 08:00 e 12:00 (Brasília). Agendador desta instalação ainda não ativado; atualização manual disponível.')
     if not dados:
@@ -97,4 +97,4 @@ def renderizar_painel(repo, consultas, empresa, nome_empresa, prefixo, acao, con
         st.dataframe(df, hide_index=True, use_container_width=True,
                      column_config={'Data': st.column_config.DateColumn(format='DD/MM/YYYY'),
                                     'Descrição': st.column_config.TextColumn(width='large')})
-    st.caption('Pagamentos, transferências, cobranças e baixas continuam bloqueados. Nenhum lançamento financeiro é alterado por esta tela.')
+    st.caption('Esta tela só consulta saldo e extrato. Para operações autorizadas, use Boletos e pagamentos. Nenhum lançamento financeiro é alterado por este painel.')

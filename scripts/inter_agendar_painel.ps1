@@ -34,7 +34,8 @@ $interAcao = New-ScheduledTaskAction -Execute $interPythonJanela -Argument $inte
 $interGatilhos = @(
     (New-ScheduledTaskTrigger -Daily -At '08:00'),
     (New-ScheduledTaskTrigger -Daily -At '12:00'),
-    (New-ScheduledTaskTrigger -AtLogOn -User $interWindowsUsuario)
+    (New-ScheduledTaskTrigger -AtLogOn -User $interWindowsUsuario),
+    (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5))
 )
 $interPrincipal = New-ScheduledTaskPrincipal -UserId $interWindowsUsuario -LogonType Interactive -RunLevel Limited
 $interOpcoes = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
@@ -48,4 +49,4 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Agenda nao ativada no ERP; tarefa deixada desabilitada.'
 }
 Write-Output "Agenda instalada: $interNome. 08h e 12h (Brasilia), somente consultas."
-Write-Output 'O PC/MySQL precisam estar ligados e o usuario Windows conectado (pode estar bloqueado). No proximo login, recupera apenas o horario mais recente pendente, sem repetir consultas ja realizadas.'
+Write-Output 'O PC/MySQL precisam estar ligados e o usuario Windows conectado (pode estar bloqueado). A cada 5 minutos verifica pendencias; so consulta o Inter se faltar o ultimo horario ou se o cache da conta foi invalidado. Falhas sao tentadas novamente sem repetir horarios concluidos.'

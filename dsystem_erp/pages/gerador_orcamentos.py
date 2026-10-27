@@ -8,6 +8,8 @@ from dsystem_erp.services.estoque_fiscal import (
 )
 from dsystem_erp.services.precificacao_estoque import preco_revenda_produto
 from dsystem_erp.services.orcamentos import preparar_edicao_orcamento
+from dsystem_erp.services.impostos_cadastro import dados_fiscais_item
+from dsystem_erp.pages.impostos import carregar_catalogo_itens, selecionar_impostos_item
 from dsystem_erp.ui_consulta import tabela_clicavel_id
 
 
@@ -39,6 +41,7 @@ def abandonar_edicao_orcamento(estado_sessao):
 def renderizar_gerador_orcamentos(ctx: dict) -> None:
     aplicar_contexto_pagina(ctx, globals())
     st.title("Gerador de Orçamentos")
+    empresa_impostos, catalogo_impostos = carregar_catalogo_itens(ctx)
     mensagem_sucesso = st.session_state.pop("orc_mensagem_sucesso", None)
     if mensagem_sucesso:
         st.success(mensagem_sucesso)
@@ -214,15 +217,18 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
             except Exception:
                 def_q = 1
 
-            d = cc1.text_input(
-                f"Descrição do Item {i+1}:", value=def_d,
-                key=f"{prefixo_orc}_oi_{i}",
-                on_change=manter_edicao_orcamento_ativa,
-            )
             tipo_item_orc = cc2.selectbox(
                 f"Tipo {i+1}:", ["Serviço", "Produto"],
                 index=["Serviço", "Produto"].index(def_tipo_item),
                 key=f"{prefixo_orc}_tipo_item_{i}",
+                on_change=manter_edicao_orcamento_ativa,
+            )
+            nome_fiscal_selecionado = st.session_state.get(f'{prefixo_orc}_imposto_{i}_{tipo_item_orc}', '')
+            if nome_fiscal_selecionado:
+                st.session_state[f'{prefixo_orc}_oi_{i}'] = nome_fiscal_selecionado
+            d = cc1.text_input(
+                f"Descrição do Item {i+1}:", value=def_d,
+                key=f"{prefixo_orc}_oi_{i}", disabled=bool(nome_fiscal_selecionado),
                 on_change=manter_edicao_orcamento_ativa,
             )
             produto_orc = None
@@ -258,6 +264,10 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
                         st.caption(f"Preço do estoque aplicado ao item {i+1}: {formatar_moeda_br(def_v)} — {situacao_nota_orc}")
                         if situacao_nota_orc == COMPRADO_SEM_NOTA:
                             st.warning(f"Item {i+1}: será lançado fiscalmente como Serviço e continuará vinculado à baixa do estoque.")
+            d, regra_imposto_orc = selecionar_impostos_item(
+                empresa_impostos, catalogo_impostos, tipo_item_fiscal_orc, d,
+                f'{prefixo_orc}_imposto_{i}', estoque=bool(produto_orc),
+                on_change=manter_edicao_orcamento_ativa)
             chave_preco_orc = f"{prefixo_orc}_ov_{i}_{produto_orc.get('id') if produto_orc else 'manual'}_{ajuste_orc:.2f}"
             v = cc3.number_input(
                 f"Valor Unit. R$ {i+1}:", value=def_v, min_value=0.0,
@@ -274,7 +284,7 @@ def renderizar_gerador_orcamentos(ctx: dict) -> None:
             cc5.metric(f"Total item {i+1}", formatar_moeda_br(total_item))
             
             if d: 
-                srvs.append({"d": d, "tipo_item": tipo_item_fiscal_orc, "v": v, "q": q, "t": total_item,
+                srvs.append({**dados_fiscais_item(regra_imposto_orc, total_item), "d": d, "tipo_item": tipo_item_fiscal_orc, "v": v, "q": q, "t": total_item,
                              "estoque_id": produto_orc.get("id") if produto_orc else None,
                              "origem_item": "Produto do estoque" if produto_orc else tipo_item_orc,
                              "situacao_nota": situacao_nota_orc,

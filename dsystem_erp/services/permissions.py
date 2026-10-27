@@ -20,7 +20,9 @@ PERMISSOES_PORTAL_CLIENTE = frozenset(
 )
 
 # Administradores comuns também precisam destas permissões nominais.
-# A conta principal Daniel.fabio, quando administradora, mantém acesso às senhas.
+# A conta principal Daniel.fabio, quando administradora, mantém acesso às senhas
+# e à consulta/configuração bancária. Movimentações continuam exigindo concessão
+# nominal; o vínculo à empresa e o cofre continuam obrigatórios no serviço Inter.
 PERMISSOES_EXPLICITAS = frozenset({"infra.senhas.view", "inter.view", "inter.preparar", "inter.aprovar", "inter.executar", "inter.conciliar", "inter.configurar"})
 
 
@@ -73,7 +75,7 @@ def usuario_tem_permissao(acao: str, usuario: Any) -> bool:
     if acao in PERMISSOES_EXPLICITAS:
         principal = str(valor_usuario(usuario, "username", "") or "").strip().casefold() == "daniel.fabio"
         administrador = str(valor_usuario(usuario, "is_admin", 0)).strip().casefold() in {"1", "true"}
-        if acao == "infra.senhas.view" and principal and administrador:
+        if acao in {"infra.senhas.view", "inter.view", "inter.configurar"} and principal and administrador:
             return True
         return acao in permissoes_do_usuario(usuario)
     if valor_usuario(usuario, "is_admin", 0):

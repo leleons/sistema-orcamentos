@@ -1,4 +1,4 @@
-"""Interface bancária isolada. Nunca abre o banco financeiro de produção."""
+"""Interface bancária; consultas e movimentações têm fluxos separados."""
 from datetime import date, timedelta
 from io import BytesIO
 import json
@@ -23,7 +23,7 @@ def _acao(funcao):
         st.error(str(erro))
     except MySQLError as erro:
         if erro.errno in (2002, 2003, 2005, 2006, 2013, 2055):
-            st.error('Não foi possível conectar à base de configuração do Inter. Confira se o MySQL desta instalação está em execução. Nenhuma operação bancária foi enviada.')
+            st.error('Não foi possível conectar à base de configuração do Inter. Confira se o MySQL está em execução. Se houve tentativa de envio, consulte o histórico/banco antes de repetir.')
         elif erro.errno in (1044, 1045):
             st.error('O MySQL recusou o acesso à base de configuração do Inter. Peça ao administrador para conferir as permissões da conexão nesta instalação.')
         elif erro.errno in (1049, 1146):
@@ -40,6 +40,10 @@ def _abrir_conta_real(*, configurar=False):
     st.session_state['inter_ambiente'] = (
         'Configurar chaves (sem conexão bancária)' if configurar else 'Produção — somente consultas')
     st.session_state['inter_config_ambiente'] = 'producao'
+
+
+def _abrir_operacoes_reais():
+    st.session_state['inter_ambiente'] = 'Produção — boletos e pagamentos'
 
 
 def _preparar(servico, empresa, usuario, prefixo):
@@ -109,7 +113,8 @@ def _avancado(servico, empresa, usuario, prefixo):
 
 
 def _historico(servico, empresa, usuario, prefixo):
-    registros = servico.repo.listar(empresa, servico.ambiente, usuario['username'])
+    registros = (servico.listar(empresa, usuario) if servico.ambiente == 'producao'
+                 else servico.repo.listar(empresa, servico.ambiente, usuario['username']))
     if not registros:
         st.info('Nenhuma operação neste ambiente e empresa.')
         return
@@ -120,8 +125,11 @@ def _historico(servico, empresa, usuario, prefixo):
     if dados.get('identificador'):
         st.write('Identificador bancário solicitado:', dados['identificador'])
     st.write('Estado local: **'+dados['estado']+'**. Enviada não significa liquidada.')
-    if servico.ambiente == 'sandbox':
-        st.write('Conta de origem:', servico.cliente.credencial.conta)
+    if servico.ambiente in ('sandbox', 'producao'):
+        st.write('Conta de origem:', servico.cliente.credencial.conta or 'Conta única da integração da empresa selecionada')
+    if dados.get('contexto'):
+        revisao = {k: v for k, v in dados['contexto'].items() if k != 'credencial'}
+        st.write('Origem / favorecido informado para revisão:', revisao)
     st.json(dados['payload'])
     if dados['estado'] == 'PENDENTE_APROVACAO' and usuario_tem_permissao('inter.aprovar', usuario):
         st.caption('Pagamentos exigem outro usuário autorizado como aprovador.')
@@ -134,10 +142,13 @@ def _historico(servico, empresa, usuario, prefixo):
                 if _acao(aprovar):
                     st.rerun()
     if dados['estado'] == 'APROVADA' and usuario_tem_permissao('inter.executar', usuario):
-        if st.button('Executar operação aprovada — '+servico.ambiente, key=prefixo+'enviar'):
-            resultado = _acao(lambda: servico.executar(empresa, usuario, uid))
-            if resultado:
-                st.rerun()
+        with st.form(prefixo+uid+'envio', enter_to_submit=False):
+            confirmacao_envio = st.text_input('Digite ENVIAR '+uid) if servico.ambiente == 'producao' else None
+            if st.form_submit_button('Executar operação aprovada — '+servico.ambiente):
+                resultado = _acao(lambda: servico.executar(empresa, usuario, uid,
+                    confirmacao=confirmacao_envio, digest=dados['digest']))
+                if resultado:
+                    st.rerun()
     if st.button('Consultar status no banco / simulador', key=prefixo+'consultar'):
         _acao(lambda: servico.atualizar(empresa, usuario, uid))
         dados = servico.detalhes(empresa, usuario, uid)
@@ -147,7 +158,7 @@ def _historico(servico, empresa, usuario, prefixo):
                        json.dumps(resposta, ensure_ascii=False, indent=2), file_name='consulta_inter.json', mime='application/json')
     if isinstance(resposta, dict):
         copia = (resposta.get('pix') or {}).get('pixCopiaECola') if isinstance(resposta.get('pix'), dict) else resposta.get('pixCopiaECola')
-        if copia and servico.ambiente == 'sandbox':
+        if copia and servico.ambiente in ('sandbox', 'producao'):
             import qrcode
             imagem = BytesIO()
             qrcode.make(copia).save(imagem, format='PNG')
@@ -157,7 +168,7 @@ def _historico(servico, empresa, usuario, prefixo):
         if st.button('Obter PDF do boleto', key=prefixo+'pdf'):
             pdf = _acao(lambda: pdf_da_resposta(servico.consultar(empresa, usuario, 'boleto_pdf', identificador=dados['externo'])))
             if pdf:
-                st.download_button('Baixar PDF retornado pelo Inter', pdf, file_name='boleto_inter.pdf', mime='application/pdf')
+                st.download_button('Baixar PDF retornado pelo Inter', pdf, file_name='boleto_inter.pdf', mime='application/pdf', on_click='ignore')
     if servico.repo.financeiro_teste and usuario_tem_permissao('inter.conciliar', usuario):
         from dsystem_erp.services.inter_conciliacao import vincular_titulo, conciliar_operacao
         titulo = st.number_input('ID do título na base de teste (empresa previamente validada)', min_value=1, step=1)
@@ -175,10 +186,12 @@ def _configurar_chaves(repo, empresa, usuario, prefixo, *, ambiente='sandbox', c
     st.subheader('Chaves e certificados do Banco Inter')
     status = _acao(lambda: status_configuracao(repo, empresa, usuario, ambiente=ambiente))
     if ambiente == 'producao':
+        from dsystem_erp.pages.banco_inter_operacoes import configurar_operacoes
+        configurar_operacoes(repo, empresa, usuario, prefixo, _acao, conectar_erp)
         if conectar_erp and str(usuario.get('is_admin', 0)).lower() in ('1', 'true'):
             from dsystem_erp.services.inter_acessos import listar_acessos, salvar_acessos
             with st.expander('Autorizar outros usuários a consultar esta empresa'):
-                st.caption('Primeiro marque Banco Inter → Consultar banco no cadastro de usuários. Depois selecione aqui quem pode consultar esta conta. Isso não libera pagamentos nem a configuração de chaves.')
+                st.caption('Marque as permissões Banco Inter no Gerenciador de Usuários e vincule a empresa aqui. Consultar banco sozinho não permite preparar, aprovar ou executar pagamentos.')
                 acessos = _acao(lambda: listar_acessos(repo, empresa, usuario, conectar_erp))
                 if acessos:
                     elegiveis, atuais = acessos
@@ -187,7 +200,7 @@ def _configurar_chaves(repo, empresa, usuario, prefixo, *, ambiente='sandbox', c
                     if st.button('Salvar acessos de consulta', key=prefixo+'salvar_acessos'):
                         if _acao(lambda: salvar_acessos(repo, empresa, usuario, conectar_erp, escolhidos)):
                             st.success('Acessos atualizados. O administrador atual mantém seu acesso.')
-        st.info('Conta real: somente saldo e extrato. Pagamentos, Pix, agendamentos, lotes e cobranças estão bloqueados. Salvar não chama o banco.')
+        st.info('Este formulário cadastra chaves para saldo e extrato. Para autorizar boletos e pagamentos com as mesmas chaves, use Habilitar boletos e pagamentos acima. Salvar não chama o banco.')
         from dsystem_erp.services.inter_pendente import existe_pendente, importar_pendente
         if existe_pendente() and not (status and status['configurada']):
             st.caption('Existe um pacote local protegido, preparado neste Windows. Ele ainda não foi vinculado a nenhuma empresa.')
@@ -246,13 +259,13 @@ def renderizar_banco_inter(ctx=None):
         return
     st.title('Banco Inter')
     with st.expander('Configuração da conta e ambientes de teste', expanded=False):
-        st.caption('Produção permite somente consultas. Simulação usa dados fictícios; sandbox exige chaves próprias.')
+        st.caption('Saldo e extrato são somente leitura. Boletos e pagamentos reais exigem habilitação, permissões e confirmação. Sandbox exige chaves próprias.')
         st.button('Acessar conta real — saldo e extrato', key='inter_abrir_producao',
               on_click=_abrir_conta_real, type='primary')
         if usuario_tem_permissao('inter.configurar', usuario):
             st.button('Configurar conta real', key='inter_configurar_producao',
                   on_click=_abrir_conta_real, kwargs={'configurar': True})
-        modo = st.radio('Ambiente / configuração', ['Produção — somente consultas', 'Simulação sem rede', 'Sandbox Inter', 'Configurar chaves (sem conexão bancária)'], key='inter_ambiente')
+        modo = st.radio('Ambiente / configuração', ['Produção — somente consultas', 'Produção — boletos e pagamentos', 'Simulação sem rede', 'Sandbox Inter', 'Configurar chaves (sem conexão bancária)'], key='inter_ambiente')
     ambiente_config = 'sandbox'
     if modo == 'Configurar chaves (sem conexão bancária)':
         ambiente_config = st.selectbox('Ambiente das chaves', ['producao', 'sandbox'], format_func=lambda v: 'Produção — conta real, somente consultas' if v == 'producao' else 'Sandbox — testes', key='inter_config_ambiente')
@@ -269,7 +282,7 @@ def renderizar_banco_inter(ctx=None):
         st.caption('Dados fictícios temporários desta sessão. Aprovação por duas pessoas é exercitada nos testes automatizados e na base compartilhada de homologação.')
     else:
         from dsystem_erp.services.inter_runtime import repositorio_teste, repositorio_configuracao, abrir_sandbox
-        repo = _acao(repositorio_configuracao if modo == 'Produção — somente consultas' or ambiente_config == 'producao' else repositorio_teste)
+        repo = _acao(repositorio_configuracao if modo.startswith('Produção') or ambiente_config == 'producao' else repositorio_teste)
         if repo is None:
             return
     empresas = _acao(lambda: repo.empresas(usuario['username']))
@@ -286,7 +299,13 @@ def renderizar_banco_inter(ctx=None):
         _configurar_chaves(repo, empresa, usuario, prefixo, ambiente=ambiente_config,
                           conectar_erp=ctx.get('conectar_banco') if ctx else None)
         return
+    if modo == 'Produção — boletos e pagamentos':
+        from dsystem_erp.pages.banco_inter_operacoes import renderizar_operacoes
+        renderizar_operacoes(repo, empresa, usuario, prefixo, _acao,
+                             conectar_erp=ctx.get('conectar_banco') if ctx else None)
+        return
     if modo == 'Produção — somente consultas':
+        st.button('Boletos e pagamentos', key='inter_abrir_operacoes', on_click=_abrir_operacoes_reais)
         from dsystem_erp.services.inter_runtime import ConsultasInterProducao
         from dsystem_erp.pages.banco_inter_painel import renderizar_painel
         identidade = (usuario['username'], config_val('DSYSTEM_INTER_CONFIG_DATABASE', ''))

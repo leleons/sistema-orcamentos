@@ -3139,6 +3139,10 @@ def renderizar_configuracoes_sistema():
 
     with abas_cfg[2]:
         st.subheader("NFS-e")
+        cfg_nfe_amb = st.selectbox("Ambiente padrão da NF-e (produtos):", ["homologacao", "producao"],
+            index=1 if config_sistema_val("NFE_AMBIENTE", "homologacao") == "producao" else 0,
+            key="cfg_nfe_ambiente_padrao")
+        st.caption("Os ambientes são salvos por instalação. Produção gera notas reais somente ao confirmar a emissão; preparações antigas mantêm o ambiente já aprovado.")
         n1, n2, n3 = st.columns(3)
         cfg_amb = n1.selectbox("Ambiente:", ["homologacao", "producao"], index=0 if config_sistema_val("NFSE_AMBIENTE", "homologacao") != "producao" else 1)
         cfg_endpoint = n2.text_input("Endpoint/API:", value=config_sistema_val("NFSE_ENDPOINT_SOAP", NFSE_ENDPOINT_TESTE_NACIONAL))
@@ -3212,6 +3216,7 @@ def renderizar_configuracoes_sistema():
                     st.error(mensagem)
                 st.stop()
             for chave, valor in [
+                ("NFE_AMBIENTE", cfg_nfe_amb),
                 ("NFSE_AMBIENTE", cfg_amb),
                 ("NFSE_ENDPOINT_SOAP", cfg_endpoint),
                 ("NFSE_CERT_PFX_PATH", cfg_cert),

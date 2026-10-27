@@ -1,4 +1,4 @@
-"""Adaptador oficial Inter. Produção limitada a saldo/extrato, sem movimentação.
+"""Adaptador Inter: consultas isoladas e movimentações com opt-in explícito.
 
 Fontes: developers.inter.co/redocusaurus/swagger-*-yaml.yaml (15/10/2026).
 Sem retries em escrita; respostas 202 não significam pagamento liquidado.
@@ -20,6 +20,10 @@ import os
 SANDBOX = 'https://cdpj-sandbox.partners.uatinter.co'
 PRODUCAO = 'https://cdpj.partners.bancointer.com.br'
 CONSULTAS_PRODUCAO = frozenset({'saldo', 'extrato', 'extrato_pdf'})
+MOVIMENTACOES_PRODUCAO = frozenset({
+    'boleto_emitir', 'boleto_consultar', 'boleto_pdf',
+    'pix_enviar', 'pix_consultar', 'conta_pagar', 'conta_consultar',
+})
 # método, caminho, escopo OAuth. A conta é sempre fixa na credencial da empresa.
 OPERACOES = {
     'saldo': ('GET', '/banking/v2/saldo', 'extrato.read'),
@@ -103,6 +107,16 @@ class ClienteInter:
         self._token, self._expira, self._scope = None, 0, None
 
     def _http(self, metodo, caminho, **kwargs):
+        if self._producao_movimentacao:
+            permitidos = CONSULTAS_PRODUCAO | MOVIMENTACOES_PRODUCAO
+            permitido = any(metodo == OPERACOES[o][0] and re.fullmatch(
+                re.escape(OPERACOES[o][1]).replace(r'\{id\}', r'[A-Za-z0-9-]{1,80}'), caminho)
+                for o in permitidos)
+            token = (metodo == 'POST' and caminho == '/oauth/v2/token'
+                     and kwargs.get('data', {}).get('scope') in
+                     ({OPERACOES[o][2] for o in permitidos} & self.credencial.escopos))
+            if not (permitido or token):
+                raise PermissionError('Operação não habilitada para produção.')
         if self._producao_consulta and not self._producao_movimentacao:
             consulta = metodo == 'GET' and caminho in {OPERACOES[o][1] for o in CONSULTAS_PRODUCAO}
             token = (metodo == 'POST' and caminho == '/oauth/v2/token'
@@ -126,6 +140,8 @@ class ClienteInter:
     def chamar(self, operacao, *, empresa_id, identificador=None, payload=None, params=None, idempotencia=None):
         if int(empresa_id) != self.credencial.empresa_id:
             raise PermissionError('Empresa não corresponde à credencial.')
+        if self._producao_movimentacao and operacao not in CONSULTAS_PRODUCAO | MOVIMENTACOES_PRODUCAO:
+            raise PermissionError('Operação não habilitada para produção.')
         if self._producao_consulta and not self._producao_movimentacao and operacao not in CONSULTAS_PRODUCAO:
             raise PermissionError('Produção permite somente saldo e extrato. Movimentações bloqueadas.')
         metodo, caminho, scope = OPERACOES[operacao]

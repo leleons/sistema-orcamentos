@@ -166,15 +166,22 @@ class PainelInter:
                 agenda = self._agenda(c, empresa)
                 if not agenda.get('ativo') or agenda['usuario'] != usuario['username']:
                     raise PermissionError('Agenda não autorizada para este usuário/empresa.')
-                if not slot or registro.get('ultimo_slot') == slot:
+                if not slot or (registro.get('ultimo_slot') == slot
+                                and registro.get('snapshot_secret')
+                                and registro.get('credencial_digest') == versao
+                                and not registro.get('erro')):
                     return 'ja_verificado'
             if registro.get('lock_ate') and registro['lock_ate'] > agora.isoformat():
                 return 'em_andamento'
+            if agendado and registro.get('tentativa_em') and (registro.get('erro') or registro.get('lock_token')):
+                tentativa = datetime.fromisoformat(registro['tentativa_em'])
+                if agora < tentativa + timedelta(minutes=5):
+                    return 'aguardando_nova_tentativa'
             if not registro:
                 self.repo.executar(c, 'INSERT INTO inter_painel (empresa_id) VALUES (%s)', (empresa,))
-            self.repo.executar(c, '''UPDATE inter_painel SET lock_token=%s,lock_ate=%s,tentativa_em=%s,
-                ultimo_slot=%s WHERE empresa_id=%s''',
-                (token, (agora + timedelta(minutes=20)).isoformat(), agora.isoformat(), slot or registro.get('ultimo_slot'), empresa))
+            self.repo.executar(c, '''UPDATE inter_painel SET lock_token=%s,lock_ate=%s,tentativa_em=%s
+                WHERE empresa_id=%s''',
+                (token, (agora + timedelta(minutes=20)).isoformat(), agora.isoformat(), empresa))
         try:
             chave = self.chave()  # Falhar antes da rede se o cofre estiver indisponível.
             hoje = agora.astimezone(BRASILIA).date()
@@ -222,8 +229,8 @@ class PainelInter:
                 if self._registro(c, empresa).get('lock_token') != token:
                     raise InterErro('ATUALIZACAO_SUBSTITUIDA')
                 self.repo.executar(c, '''UPDATE inter_painel SET snapshot_secret=%s,credencial_digest=%s,
-                    atualizado_em=%s,erro=NULL,lock_token=NULL,lock_ate=NULL WHERE empresa_id=%s AND lock_token=%s''',
-                    (cifrado, versao, concluido, empresa, token))
+                    atualizado_em=%s,ultimo_slot=%s,erro=NULL,lock_token=NULL,lock_ate=NULL WHERE empresa_id=%s AND lock_token=%s''',
+                    (cifrado, versao, concluido, slot_atual(agora), empresa, token))
                 self.repo.registrar(c, empresa, 'producao', usuario['username'], 'PAINEL_ATUALIZADO_AUTO' if agendado else 'PAINEL_ATUALIZADO_MANUAL')
             return 'atualizado'
         except Exception:

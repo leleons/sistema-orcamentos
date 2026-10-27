@@ -9,6 +9,8 @@ import sqlite3
 
 
 DDL = (
+    '''CREATE TABLE IF NOT EXISTS inter_habilitacoes (
+        empresa_id INTEGER PRIMARY KEY, ativo INTEGER NOT NULL DEFAULT 0)''',
     '''CREATE TABLE IF NOT EXISTS inter_empresas (
         id INTEGER PRIMARY KEY, nome VARCHAR(180) NOT NULL, cnpj VARCHAR(14) NOT NULL UNIQUE)''',
     '''CREATE TABLE IF NOT EXISTS inter_acessos (

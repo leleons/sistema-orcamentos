@@ -90,7 +90,7 @@ renderizar_banco_inter()
                 app = self.app(ambiente=None).run()
                 self.assertEqual(len(app.exception),0)
                 self.assertEqual(app.radio(key='inter_ambiente').value, 'Produção — somente consultas')
-                self.assertEqual([b.label for b in app.button],['Acessar conta real — saldo e extrato', 'Atualizar agora'])
+                self.assertEqual([b.label for b in app.button],['Acessar conta real — saldo e extrato', 'Boletos e pagamentos', 'Atualizar agora'])
                 self.assertFalse(any('Preparar' in b.label or 'Executar' in b.label for b in app.button))
 
     def test_atalho_sai_da_simulacao_e_consulta_somente_apos_clique(self):

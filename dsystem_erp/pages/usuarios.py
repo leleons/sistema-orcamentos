@@ -449,8 +449,10 @@ def renderizar_gerenciador_usuarios(ctx: dict) -> None:
 
             if ud:
                 ud = dict(ud)
-                if ud['is_admin']: 
-                    st.error("Permissões do Admin Master não podem ser limitadas.")
+                if ud['is_admin']:
+                    st.info("A edição geral das permissões do administrador é protegida.")
+                    if (ud.get('username') or '').strip().lower() == 'daniel.fabio':
+                        st.caption("O Admin Master Daniel.fabio tem acesso a Banco Inter → consulta e configuração. O vínculo à empresa e as credenciais do servidor continuam necessários. Isso não autoriza pagamentos automaticamente.")
                 else:
                     with st.expander(f"Editando permissões de: {ud['username']}", expanded=True):
                         st.subheader("Dados do Funcionário")

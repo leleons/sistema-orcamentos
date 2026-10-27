@@ -100,9 +100,44 @@ class InterPainelTests(unittest.TestCase):
         self.api.consultar.side_effect = RuntimeError('indisponível')
         with self.assertRaises(InterErro):
             self.painel.atualizar(1, self.usuario, agendado=True)
-        self.assertEqual(self.painel.atualizar(1, self.usuario, agendado=True), 'ja_verificado')
+        self.assertEqual(self.painel.atualizar(1, self.usuario, agendado=True), 'aguardando_nova_tentativa')
         self.respostas()
         self.assertEqual(self.painel.atualizar(1, self.usuario), 'atualizado')
+        self.assertEqual(self.painel.atualizar(1, self.usuario, agendado=True), 'ja_verificado')
+
+    def test_falha_recupera_apos_cinco_minutos_sem_consumir_slot(self):
+        self.painel.configurar_agenda(1, self.usuario, ativo=True)
+        self.api.consultar.side_effect = RuntimeError('indisponivel')
+        with self.assertRaises(InterErro):
+            self.painel.atualizar(1, self.usuario, agendado=True)
+        self.agora += timedelta(minutes=4)
+        self.assertEqual(self.painel.atualizar(1, self.usuario, agendado=True), 'aguardando_nova_tentativa')
+        self.agora += timedelta(minutes=1)
+        self.respostas()
+        self.assertEqual(self.painel.atualizar(1, self.usuario, agendado=True), 'atualizado')
+        self.assertEqual(self.painel.atualizar(1, self.usuario, agendado=True), 'ja_verificado')
+        self.assertEqual(self.api.consultar.call_count, 3)
+
+    def test_credencial_alterada_recupera_mesmo_slot(self):
+        self.painel.configurar_agenda(1, self.usuario, ativo=True)
+        self.painel.atualizar(1, self.usuario, agendado=True)
+        with self.repo.transacao() as c:
+            c.execute("UPDATE inter_contas SET credencial_secret='nova-configuracao'")
+        self.assertIsNone(self.painel.ler(1, self.usuario)['dados'])
+        self.respostas()
+        self.assertEqual(self.painel.atualizar(1, self.usuario, agendado=True), 'atualizado')
+        self.assertIsNotNone(self.painel.ler(1, self.usuario)['dados'])
+
+    def test_trava_de_processo_encerrado_expira_e_recupera(self):
+        self.painel.configurar_agenda(1, self.usuario, ativo=True)
+        with self.repo.transacao() as c:
+            self.repo.executar(c, '''INSERT INTO inter_painel
+                (empresa_id,lock_token,lock_ate,tentativa_em,ultimo_slot)
+                VALUES (%s,%s,%s,%s,%s)''', (1, 'interrompido',
+                (self.agora + timedelta(minutes=20)).isoformat(), self.agora.isoformat(), slot_atual(self.agora)))
+        self.assertEqual(self.painel.atualizar(1, self.usuario, agendado=True), 'em_andamento')
+        self.agora += timedelta(minutes=21)
+        self.assertEqual(self.painel.atualizar(1, self.usuario, agendado=True), 'atualizado')
 
     def test_revogacao_no_erp_bloqueia_leitura_cache_e_atualizacao(self):
         self.painel.atualizar(1, self.usuario)

@@ -83,6 +83,11 @@ if ($DryRun) {
 
 Write-Step "Validando arquivos locais"
 $requiredFiles = @("orcamento.py", "requirements.txt", "mysql_schema.sql")
+# A mesma lista explicita do pacote define quais documentos acompanham o deploy.
+# Nao enviar indiscriminadamente arquivos da raiz (.env, certificados ou dados).
+$deployDocumentos = @(& python -c "from scripts.pacote_agenda_financeiro_taxas import ARQUIVOS; print('\n'.join(n for n in ARQUIVOS if '/' not in n and n.endswith('.md')))")
+if ($LASTEXITCODE -ne 0) { throw 'Falha ao carregar a lista de documentos do pacote.' }
+$requiredFiles += $deployDocumentos
 foreach ($file in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $file)) {
         throw "Arquivo obrigatorio nao encontrado: $file"
@@ -106,10 +111,14 @@ Write-Step "Enviando arquivos principais"
 Send-File ".\orcamento.py" "$AppDir/orcamento.py"
 Send-File ".\requirements.txt" "$AppDir/requirements.txt"
 Send-File ".\mysql_schema.sql" "$AppDir/mysql_schema.sql"
+Send-File ".\deploy.ps1" "$AppDir/deploy.ps1"
 Send-File ".\logo_dsystem.png" "$AppDir/logo_dsystem.png"
 Send-File ".\logo_gt.png" "$AppDir/logo_gt.png"
 Send-File ".\logo_lc_printer.jpg" "$AppDir/logo_lc_printer.jpg"
 Send-File ".\.streamlit\config.toml" "$AppDir/.streamlit/config.toml"
+foreach ($documento in $deployDocumentos) {
+    Send-File (Join-Path $ProjectRoot $documento) "$AppDir/$documento"
+}
 
 Write-Step "Enviando pastas do sistema"
 Send-Directory ".\dsystem_erp" "$AppDir/"

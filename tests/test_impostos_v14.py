@@ -67,6 +67,34 @@ class CadastroTests(unittest.TestCase):
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
 
+    def test_catalogo_separa_emitente_tipo_inativos_e_nao_confirmados(self):
+        regras = cadastro.listar_regras(self.f.conectar, '23524449000154')
+        produto = next(r for r in regras if r['tipo'] == 'Produto')
+        regras += [dict(produto, empresa='23524449000235'), dict(produto, ativo=False),
+                   dict(produto, confirmado=False)]
+        self.assertEqual(cadastro.regras_disponiveis(regras, '23524449000154', 'Produto'), [produto])
+
+    def test_dados_item_pre_carregam_taxas_sem_mudar_valores_ou_regra(self):
+        regras = cadastro.listar_regras(self.f.conectar, '23524449000154')
+        antes = copy.deepcopy(regras)
+        produto = next(r for r in regras if r['tipo'] == 'Produto')
+        dados = cadastro.dados_fiscais_item(produto, '123.45')
+        self.assertEqual(dados['ncm'], '84716053')
+        self.assertEqual(dados['tributos']['base_pis'], '123.45')
+        self.assertEqual(dados['tributos']['pis'], produto['pis'])
+        self.assertEqual(dados['imposto_cadastro_versao'], produto['versao'])
+        self.assertNotIn('vtotal', dados)
+        self.assertNotIn('estoque_id', dados)
+        servico = next(r for r in regras if r['tipo'] == 'Serviço')
+        self.assertEqual(cadastro.dados_fiscais_item(servico, 100)['aliquota_iss'], servico['aliquota_iss'])
+        self.assertEqual(cadastro.dados_fiscais_item(None, 100), {})
+        self.assertEqual(regras, antes)
+
+    def test_nome_estoque_segue_mesma_prioridade_do_faturamento(self):
+        self.assertEqual(cadastro.nome_produto_estoque(dict(nome_generico='Mouse', modelo='M1', produto='P')), 'Mouse')
+        self.assertEqual(cadastro.nome_produto_estoque(dict(modelo='M1', produto='P')), 'M1')
+        self.assertEqual(cadastro.nome_produto_estoque(dict(codigo_entrada='ABC')), 'ABC')
+
     def test_cadastro_isolado_por_empresa_tipo_e_nome(self):
         self.assertEqual(cadastro.chave_item('23524449000154','Produto','MOUSE'), cadastro.chave_item('23.524.449/0001-54','Produto',' Mouse '))
         self.assertNotEqual(cadastro.chave_item('23524449000154','Produto','Mouse'), cadastro.chave_item('23524449000235','Produto','Mouse'))
@@ -236,6 +264,52 @@ class BaseNotasTests(unittest.TestCase):
 
 
 class PaginaTests(unittest.TestCase):
+    def test_pesquisa_estoque_preenche_nome_sem_gravar_por_enter(self):
+        produtos = [dict(id=1, nome_generico='Mouse USB', modelo='M100', codigo='ABC'),
+                    dict(id=2, nome_generico='Teclado', modelo='T200', codigo='DEF')]
+        with patch('dsystem_erp.pages.impostos.listar_regras', return_value=[]), \
+                patch('dsystem_erp.pages.impostos.listar_estoque', return_value=produtos), \
+                patch('dsystem_erp.pages.impostos.salvar_regra') as salvar:
+            app = self.app(cadastro=True).run()
+            next(w for w in app.text_input if w.label.startswith('Pesquisar produto')).set_value('M100').run()
+            seletor = next(w for w in app.selectbox if w.label == 'Produto do estoque')
+            self.assertEqual(len(seletor.options), 2)
+            seletor.set_value('1').run()
+            self.assertFalse(app.exception)
+            nome = next(w for w in app.text_input if w.label == 'Nome exato no faturamento')
+            self.assertEqual(nome.value, 'Mouse USB')
+            self.assertTrue(nome.disabled)
+            salvar.assert_not_called()
+
+    def test_seletor_compartilhado_carrega_servico_e_produto_sem_misturar(self):
+        f = CadastroTests()
+        f.setUp()
+        try:
+            regras = cadastro.listar_regras(f.f.conectar, '23524449000154')
+            codigo = '''
+import streamlit as st
+from dsystem_erp.pages.impostos import selecionar_impostos_item
+from dsystem_erp.services.impostos_cadastro import dados_fiscais_item
+tipo = st.selectbox('Tipo', ['Produto', 'Serviço'])
+desc, regra = selecionar_impostos_item('23524449000154', REGRAS, tipo, '', 'teste')
+st.session_state['resultado'] = (desc, dados_fiscais_item(regra, 200))
+'''.replace('REGRAS', repr(regras))
+            app = AppTest.from_string(codigo, default_timeout=30).run()
+            produto = next(r for r in regras if r['tipo']=='Produto')
+            app.selectbox(key='teste_Produto').set_value(produto['nome']).run()
+            self.assertFalse(app.exception)
+            desc, dados = app.session_state['resultado']
+            self.assertEqual(desc, produto['nome'])
+            self.assertEqual(dados['ncm'], produto['ncm'])
+            app.selectbox[0].set_value('Serviço').run()
+            self.assertEqual(app.session_state['resultado'], ('', {}))
+            servico = next(r for r in regras if r['tipo']=='Serviço')
+            app.selectbox(key='teste_Serviço').set_value(servico['nome']).run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.session_state['resultado'][1]['aliquota_iss'], servico['aliquota_iss'])
+        finally:
+            f.doCleanups()
+
     def app(self, permissao=True, cadastro=False):
         codigo = '''
 import streamlit as st

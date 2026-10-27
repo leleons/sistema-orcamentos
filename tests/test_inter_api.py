@@ -293,6 +293,21 @@ class InterConfiguracaoTests(unittest.TestCase):
         for chamada in conectar.return_value.cursor.return_value.execute.call_args_list:
             self.assertTrue(chamada.args[0].startswith('SELECT '))
 
+    def test_master_sem_flags_mantem_vinculo_obrigatorio_e_delegacao(self):
+        from dsystem_erp.services.inter_acessos import salvar_acessos
+        master = {'username': 'Daniel.fabio', 'autenticado': True, 'is_admin': 1, 'submodulos': []}
+        conectar = Mock()
+        conectar.return_value.cursor.return_value.fetchall.return_value = [
+            master, {'username': 'leitor', 'submodulos': ['inter.view']}]
+        with self.assertRaises(PermissionError):
+            salvar_acessos(self.repo, 1, master, conectar, ['leitor'])
+        conectar.assert_not_called()
+        with self.repo.transacao() as c:
+            self.repo.executar(c, 'INSERT INTO inter_acessos (empresa_id,usuario) VALUES (%s,%s)', (1, 'Daniel.fabio'))
+        self.assertTrue(salvar_acessos(self.repo, 1, master, conectar, ['leitor']))
+        self.assertEqual(len(self.repo.empresas('Daniel.fabio')), 1)
+        self.assertIn('is_admin', conectar.return_value.cursor.return_value.execute.call_args.args[0])
+
     def test_delegacao_rejeita_usuario_nao_admin_e_outro_tenant(self):
         from dsystem_erp.services.inter_acessos import salvar_acessos
         conectar = Mock()

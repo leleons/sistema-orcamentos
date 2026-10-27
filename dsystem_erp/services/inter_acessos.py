@@ -16,7 +16,7 @@ def listar_acessos(repo, empresa, usuario, conectar_erp):
     conn = conectar_erp()
     try:
         cur = conn.cursor()
-        cur.execute('SELECT username,submodulos FROM usuarios ORDER BY username')
+        cur.execute('SELECT username,is_admin,submodulos FROM usuarios ORDER BY username')
         elegiveis = [r['username'] for r in cur.fetchall() if usuario_tem_permissao('inter.view', dict(r))]
     finally:
         conn.close()

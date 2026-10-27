@@ -13,14 +13,22 @@ from datetime import datetime
 from zipfile import ZipFile, ZIP_DEFLATED
 
 ARQUIVOS = (
+    'scripts/inter_configurar_servidor.py', 'configurar_inter_servidor.ps1',
+    'tests/test_inter_configurar_servidor.py',
+    'deploy.ps1',
+    'scripts/fiscal_ativar_producao.py', 'scripts/inter_agendar_servidor.py',
+    'tests/test_preparacao_servidor.py', 'ENVIO_SERVIDOR_INTER_NOTAS.md',
     'dsystem_erp/pages/cadastros_planilha.py', 'dsystem_erp/services/cadastros_planilha.py',
     'tests/test_cadastros_planilha.py', 'IMPORTACAO_CADASTROS.md',
-    'dsystem_erp/pages/impostos.py',
+    'dsystem_erp/pages/impostos.py', 'dsystem_erp/services/impostos_importacao.py',
+    'tests/test_impostos_importacao.py',
     'dsystem_erp/services/impostos_cadastro.py', 'dsystem_erp/services/impostos_notas.py',
     'dsystem_erp/services/impostos_simples.py', 'tests/test_impostos_v14.py',
     'IMPOSTOS_V14.md',
     'orcamento.py', 'requirements.txt',
     'dsystem_erp/pages/banco_inter.py', 'dsystem_erp/repositories/inter.py',
+    'dsystem_erp/pages/banco_inter_operacoes.py', 'dsystem_erp/services/inter_producao.py',
+    'tests/test_inter_producao.py',
     'dsystem_erp/pages/banco_inter_painel.py', 'dsystem_erp/services/inter_painel.py',
     'scripts/inter_atualizar_painel.py', 'scripts/inter_agendar_painel.ps1',
     'tests/test_inter_painel.py', 'tests/preview_inter_painel.py',
